@@ -132,6 +132,25 @@ func (d *DB) SleepAgent(project, name string) error {
 	return err
 }
 
+// WakeAgent transitions a sleeping or inactive agent back to active and refreshes
+// last_seen / clears deactivated_at. Returns the number of rows affected (0 = the
+// agent does not exist or was already active — both treated as non-errors so
+// callers can branch on the count). Counterpart to SleepAgent ; together they
+// form the natural pairing for cycle-driven agents that wake under their seed
+// identity, work, then sleep again without ever spawning an ephemeral child row.
+func (d *DB) WakeAgent(project, name string) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := d.conn.Exec(
+		"UPDATE agents SET status = 'active', last_seen = ?, deactivated_at = NULL WHERE name = ? AND project = ? AND status IN ('sleeping', 'inactive')",
+		now, name, project,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("wake agent: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
+}
+
 // DeactivateAgent explicitly deactivates an agent.
 func (d *DB) DeactivateAgent(project, name string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
