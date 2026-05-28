@@ -711,10 +711,14 @@ func sleepAgentTool() mcp.Tool {
 func wakeAgentTool() mcp.Tool {
 	return mcp.NewTool(
 		"wake_agent",
-		mcp.WithDescription("Wake a sleeping or inactive agent: transition status to 'active', refresh last_seen, clear deactivated_at. Counterpart to sleep_agent. Returns {status, agent, rows_affected}: rows_affected=0 means target not found or already active (no-op, not an error). Together with sleep_agent forms the pairing for cycle-driven agents that wake under their seed identity, work, then sleep again — without spawning ephemeral child rows. The full wake-and-spawn-claude variant (Agent OS mode) builds on this primitive."),
+		mcp.WithDescription("Wake a sleeping or inactive seed agent — and optionally launch a claude process under its canonical identity. Two modes: (1) DB-only wake when neither `prompt` nor `cycle` is given (returns {status, agent, rows_affected}; rows_affected=0 means target not found or already active — no-op, not an error); (2) wake + execute when `prompt` or `cycle` is set (Agent OS or legacy mode), returns {status:'woken-and-executing', agent, mode}. In mode 2 the process operates as the seed (e.g. 'endurance'), NOT as a generated child — no ephemeral row inserted in `agents`, memories/messages signed under the canonical name, and the agent is put back to sleep automatically when the cycle ends. Counterpart to sleep_agent ; together they form the wake/work/sleep cadence."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Name of the agent to wake (the target seed, e.g. 'endurance'). Distinct from `as`, which identifies the caller."), mcp.Required()),
+		mcp.WithString("prompt", mcp.Description("Legacy mode: raw prompt to run. The claude process executes as `agent`. Mutually exclusive with `cycle`.")),
+		mcp.WithString("cycle", mcp.Description("Agent OS mode: cycle name (from the cycles table). The relay assembles identity+context from the DB. Mutually exclusive with `prompt`.")),
+		mcp.WithString("ttl", mcp.Description("Max execution time in Go duration format ('5m', '1h'). Default from cycle TTL or '10m'.")),
+		mcp.WithString("allowed_tools", mcp.Description("Comma-separated list of tools allowed for the claude process. Default: relay defaults.")),
 	)
 }
 

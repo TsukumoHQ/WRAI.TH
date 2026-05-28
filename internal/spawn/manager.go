@@ -238,6 +238,58 @@ func (m *Manager) GetExecutor() *Executor {
 	return m.executor
 }
 
+// WakeAndExecute wakes a seed agent and runs a cycle under its canonical
+// identity — the claude process operates as `agentName` directly, with no
+// row inserted in the `agents` table for an ephemeral child. After the cycle
+// completes (success, failure, or TTL expiration), the agent is put back to
+// sleep. This is the asymmetric counterpart to Spawn() / SpawnWithContext():
+// same execution pipeline, different identity semantics (seed-as-self, not
+// fork-as-child).
+//
+// Caller chooses between Agent OS mode (cycleName set, prompt empty) and
+// legacy mode (prompt set, cycleName empty). At least one must be provided
+// — for a pure DB-state wake without launching claude, call db.WakeAgent
+// directly (the HandleWakeAgent MCP handler exposes both modes).
+//
+// Non-blocking : the cycle runs in a goroutine, this method returns as soon
+// as the wake transition is recorded. Errors during execution are logged ;
+// they propagate to cycle_history but not to the immediate caller.
+func (m *Manager) WakeAndExecute(agentName, project, prompt, ttlStr, cycleName, allowedTools string) error {
+	if prompt == "" && cycleName == "" {
+		return fmt.Errorf("WakeAndExecute requires either prompt or cycleName")
+	}
+
+	// Transition the seed to active. Idempotent : 0 rows affected is fine
+	// (already active, or about to be re-activated by the cycle's own
+	// register_agent if it happens). We don't fail on already-active.
+	if _, err := m.db.WakeAgent(project, agentName); err != nil {
+		return fmt.Errorf("wake DB transition: %w", err)
+	}
+
+	// Run the cycle in background under the seed identity. The body reuses
+	// the same machinery as scheduled cycles (locks, queue, metrics, history,
+	// Agent OS / legacy prompt branching). When it returns, put the seed back
+	// to sleep — the canonical wake/work/sleep cadence.
+	go func() {
+		m.executeCycle(agentName, project, "wake", prompt, ttlStr, cycleName, allowedTools)
+		if err := m.db.SleepAgent(project, agentName); err != nil {
+			m.logger.Warn("sleep after wake_agent cycle failed", "agent", agentName, "error", err)
+		}
+	}()
+
+	m.logger.Info("wake_agent triggered",
+		"agent", agentName,
+		"project", project,
+		"mode", func() string {
+			if cycleName != "" {
+				return "agent-os"
+			}
+			return "legacy"
+		}(),
+	)
+	return nil
+}
+
 // SpawnWithContext assembles context from DB and spawns an agent.
 // This is the Agent OS "exec" — takes profile + cycle, builds the full prompt.
 func (m *Manager) SpawnWithContext(project, profileSlug, cycleName, taskID string) (string, error) {

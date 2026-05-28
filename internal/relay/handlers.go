@@ -2191,12 +2191,24 @@ func (h *Handlers) HandleSleepAgent(ctx context.Context, req mcp.CallToolRequest
 	})
 }
 
-// HandleWakeAgent transitions a sleeping or inactive agent back to active and
-// refreshes its last_seen / deactivated_at. The target is explicit (`agent`
-// parameter) and distinct from the caller (`as`) — a sleeping agent cannot
-// call MCP tools, so wake is always invoked by some other identity (e.g. the
-// planificateur, the user, or a scheduler). rows_affected = 0 is a no-op
-// (target not found or already active), not an error.
+// HandleWakeAgent transitions a sleeping or inactive seed agent back to
+// active. The target is explicit (`agent` parameter) and distinct from the
+// caller (`as`) — a sleeping agent cannot call MCP tools, so wake is always
+// invoked by some other identity (the user, a sibling agent, the scheduler).
+//
+// Two modes, selected by the presence of `prompt` or `cycle`:
+//
+//  1. DB-only wake (no prompt, no cycle): transitions status to active,
+//     refreshes last_seen, clears deactivated_at. Returns
+//     {status, agent, rows_affected}. rows_affected = 0 is a no-op (target
+//     not found or already active), not an error.
+//
+//  2. Wake + execute (prompt or cycle set): the DB transition happens, then
+//     a claude process is launched under the seed identity (no ephemeral
+//     child row created). When it returns, the agent is put back to sleep.
+//     Returns {status:"woken-and-executing", agent, mode}. This is the
+//     asymmetric counterpart to spawn — same execution pipeline, different
+//     identity semantics (seed-as-self instead of fork-as-child).
 func (h *Handlers) HandleWakeAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := resolveProject(ctx, req)
 	caller := resolveAgent(ctx, req)
@@ -2205,17 +2217,41 @@ func (h *Handlers) HandleWakeAgent(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultError("missing required parameter: agent"), nil
 	}
 
+	prompt := req.GetString("prompt", "")
+	cycle := req.GetString("cycle", "")
+	ttl := req.GetString("ttl", "")
+	allowedTools := req.GetString("allowed_tools", "")
+
+	// Mode 2 — wake + execute claude under the seed identity.
+	if prompt != "" || cycle != "" {
+		if h.spawnMgr == nil {
+			return mcp.NewToolResultError("spawn manager not available for wake-and-execute mode"), nil
+		}
+		if err := h.spawnMgr.WakeAndExecute(target, project, prompt, ttl, cycle, allowedTools); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("WakeAndExecute failed: %v", err)), nil
+		}
+		mode := "legacy"
+		if cycle != "" {
+			mode = "agent-os"
+		}
+		h.events.Emit(MCPEvent{Type: "register", Action: "wake-exec", Agent: target, Project: project})
+		return h.resultJSONTracked(project, caller, "wake_agent", map[string]any{
+			"status": "woken-and-executing",
+			"agent":  target,
+			"mode":   mode,
+		})
+	}
+
+	// Mode 1 — DB-only wake.
 	rowsAffected, err := h.db.WakeAgent(project, target)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to wake agent: %v", err)), nil
 	}
-
 	status := "awake"
 	if rowsAffected == 0 {
 		status = "noop"
 	}
 	h.events.Emit(MCPEvent{Type: "register", Action: "wake", Agent: target, Project: project})
-
 	return h.resultJSONTracked(project, caller, "wake_agent", map[string]any{
 		"status":        status,
 		"agent":         target,
