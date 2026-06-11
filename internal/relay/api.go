@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	linearconn "agent-relay/internal/connector/linear"
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
 	"agent-relay/internal/models"
@@ -162,6 +163,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// Linear connector inbound webhook (404s unless the connector is active).
 	case path == "/connectors/linear/webhook" && req.Method == http.MethodPost:
 		r.apiLinearWebhook(w, req)
+	case path == "/linear/teams" && req.Method == http.MethodGet:
+		r.apiLinearTeams(w, req)
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -205,8 +208,8 @@ func (r *Relay) apiHealth(w http.ResponseWriter) {
 	}
 	// When the Linear connector is active, surface its live status
 	// (last_webhook_at, last_reconcile_at, writer failure count, cache state).
-	if r.LinearConn != nil {
-		health["linear_connector"] = r.LinearConn.Status()
+	if lc := r.LinearConnector(); lc != nil {
+		health["linear_connector"] = lc.Status()
 	}
 	writeJSON(w, health)
 }
@@ -269,10 +272,25 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 	if sunType == "" {
 		sunType = "1"
 	}
+	apiKey, teamKey, enabled, interval, source := r.effectiveLinearConfig()
+	masked := ""
+	if apiKey != "" {
+		masked = "set"
+		if len(apiKey) > 8 {
+			masked = "…" + apiKey[len(apiKey)-4:]
+		}
+	}
 	writeJSON(w, map[string]any{
 		"sun_type":    sunType,
-		"linear_mode": r.Config.LinearMode,
-		"mode":        modeString(r.Config.LinearMode),
+		"linear_mode": enabled,
+		"mode":        modeString(enabled),
+		"linear": map[string]any{
+			"enabled":        enabled,
+			"team_key":       teamKey,
+			"api_key_masked": masked,
+			"interval":       interval.String(),
+			"source":         source,
+		},
 	})
 }
 
@@ -282,10 +300,37 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
+	linearChanged := false
 	for k, v := range body {
 		r.DB.SetSetting(k, v)
+		if strings.HasPrefix(k, "linear_") {
+			linearChanged = true
+		}
+	}
+	if linearChanged {
+		// Hot-reload the connector — no restart needed.
+		r.ReconfigureLinear()
 	}
 	writeJSON(w, map[string]string{"ok": "true"})
+}
+
+// apiLinearTeams lists the Linear workspace teams using the effective API key
+// (or one passed as ?key= for pre-save validation in the settings UI).
+func (r *Relay) apiLinearTeams(w http.ResponseWriter, req *http.Request) {
+	apiKey, _, _, _, _ := r.effectiveLinearConfig()
+	if k := strings.TrimSpace(req.URL.Query().Get("key")); k != "" {
+		apiKey = k
+	}
+	if apiKey == "" {
+		http.Error(w, `{"error":"no linear api key configured"}`, http.StatusBadRequest)
+		return
+	}
+	teams, err := linearconn.ListTeams(req.Context(), apiKey)
+	if err != nil {
+		apiError(w, http.StatusBadGateway, "linear teams fetch failed", err)
+		return
+	}
+	writeJSON(w, teams)
 }
 
 type apiTeamRef struct {
@@ -1230,7 +1275,7 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 	// Write-back (Linear mode): a web-driven → In Review fires the one owned
 	// transition + comment, fire-and-forget. No-op in native mode.
 	if body.Status == "in-review" {
-		pushInReviewAsync(r.Connector, task, body.Agent, body.Result)
+		pushInReviewAsync(r.TaskConn(), task, body.Agent, body.Result)
 	}
 
 	writeJSON(w, task)

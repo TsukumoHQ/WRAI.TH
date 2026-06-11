@@ -3248,3 +3248,23 @@ body.view-galaxy .quest-tracker { display: none !important; }
 .token-tool-bar { flex: 1; height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; }
 .token-tool-bar-fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg, rgba(255,217,61,0.3), rgba(255,217,61,0.6)); transition: width 0.3s ease-out; }
 .token-tool-count { font: 9px 'JetBrains Mono', monospace; color: rgba(255,217,61,0.5); width: 40px; text-align: right; }
+
+/* Settings modal (reuses help-modal chrome) */
+.settings-content { max-width: 480px; }
+.settings-hint { color: var(--text-muted, #6b7385); font-size: 12px; }
+.settings-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.settings-row.settings-col { flex-direction: column; align-items: stretch; gap: 6px; }
+.settings-row input[type="password"], .settings-row input[type="text"] {
+  background: rgba(10, 10, 26, 0.6); border: 1px solid rgba(108, 92, 231, 0.3);
+  border-radius: 6px; padding: 8px 10px; color: #e6e9ef; font: inherit;
+}
+.settings-btn {
+  background: rgba(108, 92, 231, 0.15); border: 1px solid rgba(108, 92, 231, 0.4);
+  border-radius: 6px; padding: 6px 14px; color: #a29bfe; cursor: pointer; font: inherit;
+}
+.settings-btn:hover { background: rgba(108, 92, 231, 0.3); }
+.settings-btn.primary { background: rgba(108, 92, 231, 0.4); color: #fff; }
+.settings-teams { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.settings-teams label { display: flex; gap: 8px; align-items: center; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
+.settings-teams label:hover { background: rgba(108, 92, 231, 0.1); }
+.settings-teams .team-cycle { color: #4ade80; font-size: 11px; margin-left: auto; }

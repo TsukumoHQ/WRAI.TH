@@ -53,18 +53,64 @@ var _ connector.TaskConnector = (*Connector)(nil)
 // New builds a Linear connector from config. The project the mirror is stored
 // under defaults to the lowercased team key, falling back to "default".
 func New(database *db.DB, cfg config.Config) *Connector {
-	project := strings.ToLower(strings.TrimSpace(cfg.LinearTeamKey))
+	return NewWithParams(database, cfg.LinearAPIKey, cfg.LinearTeamKey, cfg.LinearWebhookSecret)
+}
+
+// NewWithParams builds a connector from explicit credentials — used by the
+// settings-driven runtime (re)configuration where values come from the DB
+// rather than the environment.
+func NewWithParams(database *db.DB, apiKey, teamKey, secret string) *Connector {
+	project := strings.ToLower(strings.TrimSpace(teamKey))
 	if project == "" {
 		project = "default"
 	}
 	return &Connector{
 		db:      database,
-		gql:     newGraphQLClient(cfg.LinearAPIKey),
+		gql:     newGraphQLClient(apiKey),
 		project: project,
-		teamKey: strings.TrimSpace(cfg.LinearTeamKey),
-		secret:  cfg.LinearWebhookSecret,
+		teamKey: strings.TrimSpace(teamKey),
+		secret:  secret,
 		states:  map[string]stateInfo{},
 	}
+}
+
+// TeamInfo is a lightweight team descriptor for the settings UI picker.
+type TeamInfo struct {
+	ID          string `json:"id"`
+	Key         string `json:"key"`
+	Name        string `json:"name"`
+	ActiveCycle string `json:"active_cycle,omitempty"`
+}
+
+// ListTeams fetches the workspace's teams with a bare API key. Used by the
+// settings UI to offer a team picker before any connector exists.
+func ListTeams(ctx context.Context, apiKey string) ([]TeamInfo, error) {
+	gql := newGraphQLClient(apiKey)
+	var out struct {
+		Teams struct {
+			Nodes []struct {
+				ID          string `json:"id"`
+				Key         string `json:"key"`
+				Name        string `json:"name"`
+				ActiveCycle *struct {
+					Name string `json:"name"`
+				} `json:"activeCycle"`
+			} `json:"nodes"`
+		} `json:"teams"`
+	}
+	q := `{ teams { nodes { id key name activeCycle { name } } } }`
+	if err := gql.do(ctx, q, nil, &out); err != nil {
+		return nil, err
+	}
+	teams := make([]TeamInfo, 0, len(out.Teams.Nodes))
+	for _, t := range out.Teams.Nodes {
+		ti := TeamInfo{ID: t.ID, Key: t.Key, Name: t.Name}
+		if t.ActiveCycle != nil {
+			ti.ActiveCycle = t.ActiveCycle.Name
+		}
+		teams = append(teams, ti)
+	}
+	return teams, nil
 }
 
 // Active reports that this connector performs external I/O.

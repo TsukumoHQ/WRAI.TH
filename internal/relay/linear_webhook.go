@@ -19,7 +19,7 @@ import (
 // synchronously (rejecting unsigned/stale/oversized), returns 200 fast, and
 // processes the payload asynchronously (upsert + emit semantic events).
 func (r *Relay) apiLinearWebhook(w http.ResponseWriter, req *http.Request) {
-	conn := r.LinearConn
+	conn := r.LinearConnector()
 	if conn == nil || !conn.Active() {
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 		return

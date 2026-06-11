@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"agent-relay/internal/config"
@@ -27,12 +28,12 @@ type Relay struct {
 	Events    *EventBus
 	Handlers  *Handlers
 	Notifier  *Notifier
-	// Connector is the task source: the Linear connector when active, else a
-	// no-op (native mode). Used for the one owned write-back (→ In Review).
-	Connector connector.TaskConnector
-	// LinearConn is the concrete Linear connector, non-nil only when Linear is
-	// active. Held for the webhook HTTP route + reconcile loop wiring.
-	LinearConn *linearconn.Connector
+	// Linear connector runtime — swapped at runtime by ReconfigureLinear()
+	// (settings-driven, no restart). Read through LinearConnector()/TaskConn().
+	linearMu   sync.RWMutex
+	linearConn *linearconn.Connector   // nil when inactive
+	taskConn   connector.TaskConnector // Noop when inactive
+	linearStop chan struct{}           // closes the current reconcile loop
 	Config     config.Config
 	// Version is the build tag, injected from main.Version.
 	// Defaults to "dev" when built without ldflags.
@@ -74,20 +75,9 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	notifier := NewNotifier(database, registry, events)
 	handlers.SetNotifier(notifier)
 
-	// Task connector: the Linear connector when configured + enabled, else a
-	// no-op so every call site is branch-free. Inert unless cfg.LinearActive().
-	var taskConn connector.TaskConnector = connector.Noop{}
-	var linearConn *linearconn.Connector
-	if cfg.LinearActive() {
-		linearConn = linearconn.New(database, cfg)
-		// Reconcile-detected transitions (no public webhook needed) land on the
-		// same bus as webhook events.
-		linearConn.SetEventSink(func(e connector.TaskEvent) {
-			events.EmitSemantic(e.Type, e.Project, e.Agent, e.Payload)
-		})
-		taskConn = linearConn
-	}
-	handlers.SetConnector(taskConn)
+	// The Linear connector is wired after construction via ReconfigureLinear()
+	// (env or settings driven); until then every call site sees Noop.
+	handlers.SetConnector(connector.Noop{})
 
 	serverTools = append(serverTools,
 		server.ServerTool{Tool: discoverToolsTool(), Handler: handlers.HandleDiscoverTools},
@@ -103,18 +93,17 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	)
 
 	return &Relay{
-		MCPServer:  mcpSrv,
-		HTTP:       httpSrv,
-		DB:         database,
-		Registry:   registry,
-		Ingester:   ingester,
-		Events:     events,
-		Handlers:   handlers,
-		Notifier:   notifier,
-		Connector:  taskConn,
-		LinearConn: linearConn,
-		Config:     cfg,
-		StartedAt:  time.Now().UTC(),
+		MCPServer: mcpSrv,
+		HTTP:      httpSrv,
+		DB:        database,
+		Registry:  registry,
+		Ingester:  ingester,
+		Events:    events,
+		Handlers:  handlers,
+		Notifier:  notifier,
+		taskConn:  connector.Noop{},
+		Config:    cfg,
+		StartedAt: time.Now().UTC(),
 	}
 }
 

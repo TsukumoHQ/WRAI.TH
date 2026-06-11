@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-relay/internal/connector"
@@ -26,6 +27,7 @@ type Handlers struct {
 	events    *EventBus
 	tokenCh   chan db.TokenRecord
 	notifier  *Notifier
+	connMu    sync.RWMutex
 	connector connector.TaskConnector
 }
 
@@ -38,7 +40,16 @@ func (h *Handlers) SetNotifier(n *Notifier) {
 // SetConnector wires the task connector so the review handler can fire the one
 // owned write-back (→ In Review + comment) when running in Linear mode.
 func (h *Handlers) SetConnector(c connector.TaskConnector) {
+	h.connMu.Lock()
 	h.connector = c
+	h.connMu.Unlock()
+}
+
+// getConnector returns the current task connector (hot-swappable at runtime).
+func (h *Handlers) getConnector() connector.TaskConnector {
+	h.connMu.RLock()
+	defer h.connMu.RUnlock()
+	return h.connector
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
@@ -1633,7 +1644,7 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 	// Write-back (Linear mode): after the local stamp succeeds, fire-and-forget
 	// the agent's one owned transition (→ In Review + comment). No-op in native.
 	comment := optionalString(req.GetString("comment", ""))
-	pushInReviewAsync(h.connector, task, agent, comment)
+	pushInReviewAsync(h.getConnector(), task, agent, comment)
 
 	return h.resultJSONTracked(project, agent, "review_task", task)
 }

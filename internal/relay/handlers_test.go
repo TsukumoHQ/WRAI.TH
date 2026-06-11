@@ -203,7 +203,7 @@ func TestSendAndGetInbox(t *testing.T) {
 	}
 
 	// Check inbox
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json",
 		"project":     "p1",
 		"as":          "bot-b",
 		"unread_only": true,
@@ -257,7 +257,7 @@ func TestMarkRead(t *testing.T) {
 	}
 
 	// Inbox should be empty (unread_only)
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json",
 		"project": "p1", "as": "bot-b", "unread_only": true,
 	}))
 	inbox := parseJSON(t, inboxRes)
@@ -649,7 +649,7 @@ func TestMemoryList(t *testing.T) {
 		"project": "p1", "as": "bot-b", "key": "k2", "value": "v2",
 	}))
 
-	res, _ := h.HandleListMemories(ctx, call(map[string]any{"format": "json", 
+	res, _ := h.HandleListMemories(ctx, call(map[string]any{"format": "json",
 		"project": "p1",
 	}))
 	data := parseJSON(t, res)
@@ -1002,7 +1002,7 @@ func TestSendBroadcastMessage(t *testing.T) {
 	}
 
 	// bot-b should see it in inbox
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json",
 		"project": "p1", "as": "bot-b", "unread_only": true,
 	}))
 	inbox := parseJSON(t, inboxRes)
