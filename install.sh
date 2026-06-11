@@ -1005,7 +1005,7 @@ verify_installation() {
 
     local health_ok=false
     for attempt in 1 2 3; do
-      if curl -sf "http://localhost:${PORT}/health" &>/dev/null || \
+      if curl -sf "http://localhost:${PORT}/api/health" &>/dev/null || \
          curl -sf "http://localhost:${PORT}/mcp" &>/dev/null; then
         health_ok=true
         break
