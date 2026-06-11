@@ -141,6 +141,9 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetTokenUsageByAgent(w, req)
 	case path == "/token-usage/timeseries" && req.Method == http.MethodGet:
 		r.apiGetTokenTimeSeries(w, req)
+	// Agentic analytics (stats panel)
+	case path == "/stats" && req.Method == http.MethodGet:
+		r.apiGetAgentStats(w, req)
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}

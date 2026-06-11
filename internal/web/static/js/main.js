@@ -4,6 +4,7 @@ import { AgentView } from "./agent-view.js";
 import { APIClient } from "./api-client.js";
 import { MessageOrb } from "./message-orb.js";
 import { KanbanBoard } from "./kanban.js";
+import { StatsPanel } from "./stats.js";
 import { CommandPanel } from "./command-panel.js";
 import { ShortcutManager } from "./shortcuts.js";
 import { ConnectionOverlay } from "./connections.js";
@@ -2335,7 +2336,7 @@ let colonyProject = null; // project name when in colony view
 function setMode(mode) {
   currentMode = mode;
   const main = document.getElementById("main");
-  main.classList.remove("mode-canvas", "mode-detail", "mode-kanban");
+  main.classList.remove("mode-canvas", "mode-detail", "mode-kanban", "mode-stats");
 
   // Update header mode buttons
   document.querySelectorAll(".mode-btn").forEach(btn => {
@@ -2355,13 +2356,20 @@ function setMode(mode) {
       main.classList.add("mode-kanban");
       kanbanBoard.show();
     });
+    statsPanel.hide();
+  } else if (mode === "stats") {
+    main.classList.add("mode-stats");
+    kanbanBoard.hide();
+    statsPanel.setProject(focusedProject || colonyProject || null);
+    statsPanel.show();
   } else {
     main.classList.add(`mode-${mode}`);
     kanbanBoard.hide();
+    statsPanel.hide();
   }
 
-  // Messages panel: hidden in kanban mode
-  if (mode === "kanban") {
+  // Messages panel: hidden in kanban/stats mode
+  if (mode === "kanban" || mode === "stats") {
     messagesPanel.classList.add("hidden");
     memoriesPanel.classList.add("hidden");
     tasksPanel.classList.add("hidden");
@@ -2793,6 +2801,11 @@ const kanbanBoard = new KanbanBoard(kanbanPanel);
 window._kanbanBoard = kanbanBoard;
 kanbanBoard.hide();
 
+// --- Stats panel ---
+const statsPanel = new StatsPanel(document.getElementById("stats-panel"));
+window._statsPanel = statsPanel;
+statsPanel.hide();
+
 // Reload the board from the mirror read-replica (one call, cycle-aware).
 async function refreshKanban() {
   const project = focusedProject || "default";
@@ -2890,6 +2903,9 @@ shortcuts.register("1", "mode-canvas", "Agents view", () => {
 });
 shortcuts.register("2", "mode-kanban", "Kanban view", () => {
   if (viewMode === "colony") setMode("kanban");
+});
+shortcuts.register("3", "mode-stats", "Stats view", () => {
+  if (viewMode === "colony") setMode("stats");
 });
 
 // Colony sidebar tabs
