@@ -68,6 +68,11 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 				} else if purged > 0 {
 					log.Printf("purged %d old cycle history record(s)", purged)
 				}
+				if purged, err := database.PurgeSpawnChildren(7 * 24 * time.Hour); err != nil {
+					log.Printf("purge spawn children error: %v", err)
+				} else if purged > 0 {
+					log.Printf("purged %d old spawn child row(s)", purged)
+				}
 				database.Optimize()
 			}
 		}

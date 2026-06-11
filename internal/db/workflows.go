@@ -110,7 +110,7 @@ func (d *DB) GetWorkflow(id string) (*Workflow, error) {
 // ListWorkflows returns all workflows for a project.
 func (d *DB) ListWorkflows(project string) ([]Workflow, error) {
 	rows, err := d.ro().Query(`SELECT id, project, name, COALESCE(description, ''), nodes, edges, enabled, created_at, updated_at
-		FROM workflows WHERE project = ? ORDER BY created_at`, project)
+		FROM workflows WHERE project = ? ORDER BY created_at LIMIT 200`, project)
 	if err != nil {
 		return nil, err
 	}

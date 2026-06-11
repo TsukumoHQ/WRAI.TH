@@ -60,7 +60,7 @@ func (d *DB) ListActiveElevations(project string) ([]models.Elevation, error) {
 	rows, err := d.ro().Query(`SELECT id, project, agent_name, elevated_role, granted_by, reason, expires_at, revoked_at, created_at
 		FROM elevated_privileges
 		WHERE project = ? AND revoked_at IS NULL AND expires_at > ?
-		ORDER BY created_at DESC`, project, now)
+		ORDER BY created_at DESC LIMIT 200`, project, now)
 	if err != nil {
 		return nil, err
 	}

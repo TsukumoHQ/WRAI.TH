@@ -57,7 +57,7 @@ func (d *DB) GetSchedule(id string) map[string]any {
 // ListSchedulesByAgent returns schedules for an agent in a project.
 func (d *DB) ListSchedulesByAgent(project, agentName string) []map[string]any {
 	rows, err := d.ro().Query(`SELECT id, agent_name, project, name, cron_expr, prompt, ttl, cycle, allowed_tools, enabled, created_at, updated_at
-		FROM schedules WHERE project = ? AND agent_name = ? ORDER BY name`, project, agentName)
+		FROM schedules WHERE project = ? AND agent_name = ? ORDER BY name LIMIT 200`, project, agentName)
 	if err != nil {
 		return nil
 	}
@@ -68,7 +68,7 @@ func (d *DB) ListSchedulesByAgent(project, agentName string) []map[string]any {
 // ListSchedulesByProject returns all schedules for a project.
 func (d *DB) ListSchedulesByProject(project string) []map[string]any {
 	rows, err := d.ro().Query(`SELECT id, agent_name, project, name, cron_expr, prompt, ttl, cycle, allowed_tools, enabled, created_at, updated_at
-		FROM schedules WHERE project = ? ORDER BY agent_name, name`, project)
+		FROM schedules WHERE project = ? ORDER BY agent_name, name LIMIT 500`, project)
 	if err != nil {
 		return nil
 	}

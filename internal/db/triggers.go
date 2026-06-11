@@ -82,7 +82,7 @@ func (d *DB) ListTriggers(project, event string) []Trigger {
 		query += " AND event = ?"
 		args = append(args, event)
 	}
-	query += " ORDER BY created_at"
+	query += " ORDER BY created_at LIMIT 500"
 
 	rows, err := d.ro().Query(query, args...)
 	if err != nil {

@@ -62,7 +62,7 @@ func (d *DB) GetCycle(project, name string) (*models.Cycle, error) {
 // ListCycles returns all cycles for a project.
 func (d *DB) ListCycles(project string) ([]models.Cycle, error) {
 	rows, err := d.ro().Query(
-		"SELECT id, project, name, prompt, ttl, created_at, updated_at FROM cycles WHERE project = ? ORDER BY name",
+		"SELECT id, project, name, prompt, ttl, created_at, updated_at FROM cycles WHERE project = ? ORDER BY name LIMIT 200",
 		project,
 	)
 	if err != nil {

@@ -32,7 +32,7 @@ func (d *DB) CreateOrg(name, slug, description string) (*models.Org, error) {
 }
 
 func (d *DB) ListOrgs() ([]models.Org, error) {
-	rows, err := d.ro().Query(`SELECT id, name, slug, description, created_at FROM orgs ORDER BY name`)
+	rows, err := d.ro().Query(`SELECT id, name, slug, description, created_at FROM orgs ORDER BY name LIMIT 200`)
 	if err != nil {
 		return nil, fmt.Errorf("list orgs: %w", err)
 	}

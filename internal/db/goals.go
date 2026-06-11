@@ -179,6 +179,42 @@ func (d *DB) GetGoalAncestry(goalID, project string) ([]models.Goal, error) {
 	return chain, nil
 }
 
+// goalProgress holds aggregated task counts for a single goal.
+type goalProgress struct {
+	total int
+	done  int
+}
+
+// goalProgressByProject returns task counts for every goal in a project via a
+// single GROUP BY query. Replaces the N+1 pattern of calling GetGoalProgress
+// once per goal in GetGoalCascade. Goals with no tasks are simply absent from
+// the map (callers read the zero value).
+func (d *DB) goalProgressByProject(project string) map[string]goalProgress {
+	out := map[string]goalProgress{}
+	rows, err := d.ro().Query(
+		`SELECT goal_id,
+		        COUNT(*),
+		        SUM(CASE WHEN status IN ('done','cancelled') THEN 1 ELSE 0 END)
+		 FROM tasks
+		 WHERE project = ? AND goal_id IS NOT NULL
+		 GROUP BY goal_id`,
+		project,
+	)
+	if err != nil {
+		return out
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		var total, done int
+		if err := rows.Scan(&id, &total, &done); err != nil {
+			continue
+		}
+		out[id] = goalProgress{total: total, done: done}
+	}
+	return out
+}
+
 func (d *DB) GetGoalProgress(goalID, project string) (total int, done int) {
 	_ = d.ro().QueryRow(
 		"SELECT COUNT(*) FROM tasks WHERE goal_id = ? AND project = ?",
@@ -251,10 +287,15 @@ func (d *DB) GetGoalCascade(project string) ([]models.GoalWithProgress, error) {
 		return nil, fmt.Errorf("get goal cascade: %w", err)
 	}
 
+	// Fetch all per-goal task counts in ONE aggregate query instead of 2
+	// queries per goal (the previous N+1: GetGoalProgress called in the loop).
+	progressByGoal := d.goalProgressByProject(project)
+
 	// Build lookup and progress
 	byID := make(map[string]*models.GoalWithProgress, len(goals))
 	for _, g := range goals {
-		total, done := d.GetGoalProgress(g.ID, project)
+		p := progressByGoal[g.ID]
+		total, done := p.total, p.done
 		var progress float64
 		if total > 0 {
 			progress = float64(done) / float64(total)

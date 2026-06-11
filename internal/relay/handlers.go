@@ -628,6 +628,11 @@ func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest
 
 	result := make([]agentWithActivity, 0, len(agents))
 	for _, a := range agents {
+		// Truncate description to keep the list payload bounded; full bio is on
+		// the agent's profile / get_profile.
+		if len(a.Description) > 200 {
+			a.Description = a.Description[:200] + "…"
+		}
 		aa := agentWithActivity{Agent: a}
 		if a.SessionID != nil {
 			if s, ok := sessionByID[*a.SessionID]; ok {
@@ -2659,12 +2664,18 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 		result["goal_context"] = goalContext
 	}
 
-	// Unread messages (full content, not truncated)
+	// Unread messages — projected through Def. 7 so verbose alert bodies
+	// (Prometheus/GlitchTip digests ~4k chars each) can't blow up the boot
+	// payload. Content is preview-truncated; full bodies via get_inbox(full_content=true).
 	unread, err := h.db.GetInbox(project, agentName, true, 50)
 	if err != nil || unread == nil {
 		unread = []models.Message{}
 	}
-	result["unread_messages"] = unread
+	projected := projectMessages(unread, sessionUnreadBudget)
+	result["unread_messages"] = projected
+	if len(projected) < len(unread) {
+		result["unread_omitted"] = len(unread) - len(projected)
+	}
 
 	// Active conversations
 	convs, err := h.db.ListConversations(project, agentName)

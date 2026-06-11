@@ -57,7 +57,7 @@ func (d *DB) GetCustomEvent(project, name string) (*CustomEvent, error) {
 // ListCustomEvents returns all custom events for a project.
 func (d *DB) ListCustomEvents(project string) ([]CustomEvent, error) {
 	rows, err := d.ro().Query(`SELECT id, project, name, description, COALESCE(meta_fields, '[]'), COALESCE(icon, ''), created_at
-		FROM custom_events WHERE project = ? ORDER BY name`, project)
+		FROM custom_events WHERE project = ? ORDER BY name LIMIT 200`, project)
 	if err != nil {
 		return nil, err
 	}

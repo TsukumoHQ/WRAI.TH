@@ -13,12 +13,33 @@ func (d *DB) InsertSpawnChild(id, parentAgent, project, profile, prompt string) 
 
 // UpdateSpawnChild updates a child's status after completion. Stdout and stderr
 // tails are truncated to tailMaxStdout / tailMaxStderr bytes before persisting.
+// The full assembled prompt is cleared on completion — it averages ~88KB/row
+// and was 86% of relay.db size. The row is preserved for audit; the prompt is
+// reconstructible from (profile, cycle, task) and lives in /private/tmp/relay.log
+// for same-day debug.
 func (d *DB) UpdateSpawnChild(id, status string, exitCode int, errMsg, stdoutTail, stderrTail string) {
 	_, _ = d.conn.Exec(
-		`UPDATE spawn_children SET status = ?, exit_code = ?, error = ?, finished_at = ?, stdout_tail = ?, stderr_tail = ? WHERE id = ?`,
+		`UPDATE spawn_children SET status = ?, exit_code = ?, error = ?, finished_at = ?, stdout_tail = ?, stderr_tail = ?, prompt = '' WHERE id = ?`,
 		status, exitCode, errMsg, time.Now().UTC().Format(time.RFC3339),
 		tailBytes(stdoutTail, tailMaxStdout), tailBytes(stderrTail, tailMaxStderr), id,
 	)
+}
+
+// PurgeSpawnChildren deletes finished/killed/failed spawn rows older than maxAge.
+// Running children are always preserved. Returns the number of rows removed.
+func (d *DB) PurgeSpawnChildren(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
+	res, err := d.conn.Exec(
+		`DELETE FROM spawn_children
+		 WHERE status IN ('finished','killed','failed')
+		   AND finished_at IS NOT NULL AND finished_at < ?`,
+		cutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
 }
 
 const (

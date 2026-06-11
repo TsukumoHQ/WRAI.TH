@@ -102,7 +102,7 @@ func (d *DB) TouchAgent(project, name string) error {
 }
 
 func (d *DB) ListAgents(project string) ([]models.Agent, error) {
-	rows, err := d.ro().Query("SELECT "+agentColumns+" FROM agents WHERE project = ? AND status IN ('active', 'sleeping', 'inactive') ORDER BY name", project)
+	rows, err := d.ro().Query("SELECT "+agentColumns+" FROM agents WHERE project = ? AND status IN ('active', 'sleeping', 'inactive') ORDER BY name LIMIT 500", project)
 	if err != nil {
 		return nil, fmt.Errorf("list agents: %w", err)
 	}

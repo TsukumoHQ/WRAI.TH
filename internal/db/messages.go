@@ -122,7 +122,9 @@ func (d *DB) getInboxLegacy(project, agentName string, unreadOnly bool, limit in
 
 func (d *DB) GetThread(messageID string) ([]models.Message, error) {
 	rootID := messageID
-	for {
+	// Walk up to the root, bounded so a cyclic/self-referential reply_to chain
+	// (buggy or malicious) can't spin forever.
+	for i := 0; i < 200; i++ {
 		var replyTo *string
 		err := d.ro().QueryRow("SELECT reply_to FROM messages WHERE id = ?", rootID).Scan(&replyTo)
 		if err != nil {
@@ -134,16 +136,20 @@ func (d *DB) GetThread(messageID string) ([]models.Message, error) {
 		rootID = *replyTo
 	}
 
+	// Recursive descent is depth-bounded (depth < 200) and row-capped (LIMIT 200)
+	// so a pathological reply chain can't OOM the relay.
 	query := `
-		WITH RECURSIVE thread AS (
-			SELECT id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at
+		WITH RECURSIVE thread(id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at, depth) AS (
+			SELECT id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at, 0
 			FROM messages WHERE id = ?
 			UNION ALL
-			SELECT m.id, m.from_agent, m.to_agent, m.reply_to, m.type, m.subject, m.content, m.metadata, m.created_at, m.read_at, m.conversation_id, m.project, m.task_id, m.priority, m.ttl_seconds, m.expired_at
+			SELECT m.id, m.from_agent, m.to_agent, m.reply_to, m.type, m.subject, m.content, m.metadata, m.created_at, m.read_at, m.conversation_id, m.project, m.task_id, m.priority, m.ttl_seconds, m.expired_at, t.depth + 1
 			FROM messages m
 			JOIN thread t ON m.reply_to = t.id
+			WHERE t.depth < 200
 		)
-		SELECT * FROM thread ORDER BY created_at ASC
+		SELECT id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at
+		FROM thread ORDER BY created_at ASC LIMIT 200
 	`
 
 	return d.queryMessages(query, rootID)

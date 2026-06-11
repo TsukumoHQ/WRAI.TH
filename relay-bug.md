@@ -1,5 +1,32 @@
 # relay bugs
 
+## ✅ RESOLVED — branch `fix/uat-p0`
+
+Every bug below is fixed. Map (bug → fix location):
+
+| Bug | Fix |
+|-----|-----|
+| spawn_children.prompt never pruned (86% of DB) | `db/spawn.go` UpdateSpawnChild clears prompt on completion + `PurgeSpawnChildren(7d)` wired in `relay/cleanup.go` |
+| no concurrency cap on spawn fan-out | `spawn/manager.go` semaphore `MAX_CONCURRENT_SPAWNS` (default 10) |
+| token_usage + cycle_history never pruned | `relay/cleanup.go` wires `PurgeOldTokenUsage`/`PurgeCycleHistory` + `idx_token_usage_created` |
+| session_context: unbounded lists | `LIMIT` added to ListAgents/Boards/AllBoards/CustomEvents/ActiveElevations/FileLocks/Schedules×2/Triggers/Orgs/Skills/Cycles/Workflows |
+| session_context: GetGoalCascade N+1 | `db/goals.go` single `goalProgressByProject` GROUP BY query |
+| session_context: GetThread unbounded recursion | `db/messages.go` depth<200 CTE + LIMIT 200 + bounded root walk |
+| HandleListAgents no cap/truncation | `db/agents.go` LIMIT 500 + `relay/handlers.go` description→200 chars |
+| dispatched_by_me cancelled (300k) + leaks 2-5 | `db/tasks.go` status filter+LIMIT, `relay/project.go` desc trunc, ListConversations LIMIT 30, goalContextCap |
+| vault docs bloat spawn context | `spawn/prompt.go` head+tail cap `RELAY_VAULT_DOC_MAX_BYTES` (20k) |
+| pool-spawn nukes reports_to / re-register regress | `db/agents.go` preserves reports_to on respawn when nil |
+| spawn prompt missing task_id | `spawn/prompt.go` surfaces `**task_id:**` |
+| task.dispatched stranded on pool-full | `relay/handlers.go` re-fires oldest pending on task.completed |
+| register_profile wipes unspecified fields | PUT `/api/profiles/:slug` merges from existing |
+| PUT triggers/schedules no-op | `api_spawn.go` apiUpdateTrigger / apiUpdateSchedule PATCH |
+| child stdout/stderr not persisted | `db/spawn.go` stdout_tail/stderr_tail (2KB/4KB) |
+| trigger_cycle generic error | `api_spawn.go` propagates `cause` |
+| update_task progress invisible | `db/task_progress.go` + `api.go` surfaces notes on task detail |
+| **session_context unread bodies untruncated (81k payload)** | `relay/project.go` `projectMessages`: 300-char preview, P0-bypass budget (6k), `unread_omitted` trailer |
+
+---
+
 ## BUG — spawn_children.prompt stored full + never pruned (86% of relay.db size)
 
 **Severity:** P0 (disk + backup cost; observed 42MB DB where 36MB = this one table)

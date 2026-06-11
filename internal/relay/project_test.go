@@ -115,6 +115,77 @@ func TestProjectGoalAncestry_CapsChain(t *testing.T) {
 	}
 }
 
+func TestSummarizeMessage_TruncatesLongContent(t *testing.T) {
+	s := summarizeMessage(models.Message{
+		ID: "m1", From: "prometheus", Priority: "P1",
+		Content: strings.Repeat("digest ", 600), // ~4KB GlitchTip-style body
+	})
+	if !s.ContentTruncated {
+		t.Fatal("expected content_truncated=true for verbose alert body")
+	}
+	if len(s.ContentPreview) != msgContentPreview {
+		t.Fatalf("content_preview len: got %d, want %d", len(s.ContentPreview), msgContentPreview)
+	}
+}
+
+func TestSummarizeMessage_ShortContentKept(t *testing.T) {
+	s := summarizeMessage(models.Message{ID: "m1", From: "a", Content: "ping"})
+	if s.ContentTruncated {
+		t.Fatal("did not expect content_truncated for short body")
+	}
+	if s.ContentPreview != "ping" {
+		t.Fatalf("content_preview: got %q", s.ContentPreview)
+	}
+}
+
+// Acceptance: a boot payload with 10+ verbose unread P0/P1 stays small.
+func TestProjectMessages_BoundsVerboseUnread(t *testing.T) {
+	var msgs []models.Message
+	for i := 0; i < 12; i++ {
+		p := "P0"
+		if i%2 == 0 {
+			p = "P1"
+		}
+		msgs = append(msgs, models.Message{
+			ID:        "msg-" + strings.Repeat("z", 8),
+			From:      "alertmanager",
+			Subject:   "ALERT",
+			Priority:  p,
+			CreatedAt: "2026-06-11T00:00:0" + string(rune('0'+i%10)) + "Z",
+			Content:   strings.Repeat("Prometheus digest line. ", 200), // ~4.8KB each
+		})
+	}
+	out := projectMessages(msgs, sessionUnreadBudget)
+	total := 0
+	for _, s := range out {
+		total += messageSummaryBytes(s)
+		if len(s.ContentPreview) > msgContentPreview {
+			t.Fatalf("a preview exceeded cap: %d", len(s.ContentPreview))
+		}
+	}
+	// 12 × 4.8KB raw = ~58KB. Projected must stay an order of magnitude smaller.
+	if total > 16000 {
+		t.Fatalf("projected unread payload too large: %d bytes", total)
+	}
+}
+
+func TestProjectMessages_P0BypassesBudget(t *testing.T) {
+	msgs := []models.Message{
+		{ID: "low", From: "a", Priority: "P3", Content: "noise"},
+		{ID: "crit", From: "a", Priority: "P0", Content: "fire"},
+	}
+	out := projectMessages(msgs, 10) // tiny budget
+	found := false
+	for _, s := range out {
+		if s.ID == "crit" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("P0 message must bypass the budget")
+	}
+}
+
 func TestProjectVaultDoc_ShortDocPassThrough(t *testing.T) {
 	doc := "small content"
 	out := projectVaultDoc(doc, "x.md", 1000)

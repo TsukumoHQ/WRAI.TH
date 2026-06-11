@@ -3,6 +3,7 @@ package db
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Fix 1.7 — re-register with nil reports_to must preserve the existing value.
@@ -177,6 +178,51 @@ func TestUpdateSpawnChild_PersistsTails(t *testing.T) {
 	}
 	if len(stderr) != 4096 {
 		t.Errorf("stderr_tail want 4096 bytes, got %d", len(stderr))
+	}
+}
+
+// UpdateSpawnChild clears the stored prompt on completion (86%-of-DB leak).
+func TestUpdateSpawnChild_ClearsPrompt(t *testing.T) {
+	d := testDB(t)
+
+	d.InsertSpawnChild("child-1", "parent", "p1", "dev", strings.Repeat("x", 90000))
+	d.UpdateSpawnChild("child-1", "finished", 0, "", "", "")
+
+	var prompt string
+	if err := d.conn.QueryRow(`SELECT prompt FROM spawn_children WHERE id = ?`, "child-1").Scan(&prompt); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if prompt != "" {
+		t.Errorf("prompt not cleared on completion: %d bytes left", len(prompt))
+	}
+}
+
+// PurgeSpawnChildren removes old finished rows, preserves running children.
+func TestPurgeSpawnChildren(t *testing.T) {
+	d := testDB(t)
+
+	d.InsertSpawnChild("old-finished", "parent", "p1", "dev", "prompt")
+	d.UpdateSpawnChild("old-finished", "finished", 0, "", "", "")
+	// Backdate completion to 10 days ago.
+	old := time.Now().UTC().Add(-10 * 24 * time.Hour).Format(time.RFC3339)
+	if _, err := d.conn.Exec(`UPDATE spawn_children SET finished_at = ? WHERE id = ?`, old, "old-finished"); err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+
+	d.InsertSpawnChild("running", "parent", "p1", "dev", "prompt") // still running
+
+	n, err := d.PurgeSpawnChildren(7 * 24 * time.Hour)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 purged, got %d", n)
+	}
+
+	var count int
+	_ = d.conn.QueryRow(`SELECT COUNT(*) FROM spawn_children WHERE id = ?`, "running").Scan(&count)
+	if count != 1 {
+		t.Error("running child must be preserved")
 	}
 }
 

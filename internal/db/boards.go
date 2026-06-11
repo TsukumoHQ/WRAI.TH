@@ -41,7 +41,7 @@ func (d *DB) CreateBoard(project, name, slug, description, createdBy string) (*m
 
 func (d *DB) ListBoards(project string) ([]models.Board, error) {
 	rows, err := d.ro().Query(
-		`SELECT `+boardColumns+` FROM boards WHERE project = ? AND archived_at IS NULL ORDER BY created_at`,
+		`SELECT `+boardColumns+` FROM boards WHERE project = ? AND archived_at IS NULL ORDER BY created_at LIMIT 200`,
 		project,
 	)
 	if err != nil {
@@ -62,7 +62,7 @@ func (d *DB) ListBoards(project string) ([]models.Board, error) {
 
 func (d *DB) ListAllBoards() ([]models.Board, error) {
 	rows, err := d.ro().Query(
-		`SELECT ` + boardColumns + ` FROM boards WHERE archived_at IS NULL ORDER BY project, created_at`,
+		`SELECT ` + boardColumns + ` FROM boards WHERE archived_at IS NULL ORDER BY project, created_at LIMIT 500`,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list all boards: %w", err)

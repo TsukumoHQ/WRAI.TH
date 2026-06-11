@@ -40,7 +40,7 @@ func (d *DB) UpsertSkill(project, name, description, tags string) (*models.Skill
 
 // ListSkills returns all skills for a project.
 func (d *DB) ListSkills(project string) ([]models.Skill, error) {
-	rows, err := d.ro().Query(`SELECT id, project, name, description, tags, created_at FROM skills WHERE project = ? ORDER BY name`, project)
+	rows, err := d.ro().Query(`SELECT id, project, name, description, tags, created_at FROM skills WHERE project = ? ORDER BY name LIMIT 200`, project)
 	if err != nil {
 		return nil, fmt.Errorf("list skills: %w", err)
 	}

@@ -50,7 +50,7 @@ func (d *DB) ListFileLocks(project string) ([]models.FileLock, error) {
 	_, _ = d.ExpireFileLocks()
 
 	rows, err := d.ro().Query(
-		"SELECT id, agent_name, project, file_paths, claimed_at, released_at, ttl_seconds FROM file_locks WHERE project = ? AND released_at IS NULL ORDER BY claimed_at DESC",
+		"SELECT id, agent_name, project, file_paths, claimed_at, released_at, ttl_seconds FROM file_locks WHERE project = ? AND released_at IS NULL ORDER BY claimed_at DESC LIMIT 500",
 		project,
 	)
 	if err != nil {
