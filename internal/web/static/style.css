@@ -285,14 +285,8 @@ main.mode-detail #notifications-panel { display: none; }
   overflow: hidden;
 }
 
-/* Agent focused: hide sidebar, full-width canvas+command panel */
-main.agent-focused #messages-panel,
-main.agent-focused #memories-panel,
-main.agent-focused #tasks-panel { display: none !important; }
-main.agent-focused #left-column { flex: 1; }
-/* Also hide header sidebar tabs when agent focused */
-main.agent-focused ~ #_dummy_ { /* selector anchor — real rule below */ }
-body:has(main.agent-focused) .header-tabs { opacity: 0.3; pointer-events: none; }
+/* Agent focused: panels are floating HUD over the stage — the sidebar stays.
+   (It used to be hidden, which made the layout jump on every agent click.) */
 
 #ops-panel {
   flex-direction: column;
