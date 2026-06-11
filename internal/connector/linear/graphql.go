@@ -133,22 +133,27 @@ func (c *graphqlClient) teamStates(ctx context.Context, teamKey string) ([]state
 
 // --- active cycle issues (reconcile) ---
 
+// The active-cycle pull is split in two queries to stay under Linear's GraphQL
+// complexity budget (10k): one cheap cycle-meta lookup, then paginated issues.
+// A single nested teams→activeCycle→issues{...} query scores ~20k on a 50-issue
+// cycle and is rejected with "Query too complex".
 const activeCycleQuery = `query ActiveCycle($key: String!) {
   teams(filter: { key: { eq: $key } }) {
     nodes {
-      activeCycle {
-        id name startsAt endsAt
-        issues {
-          nodes {
-            id identifier number title description priority estimate url
-            state { id name type }
-            assignee { id name displayName }
-            parent { id }
-            cycle { id name startsAt endsAt }
-            labels { nodes { name } }
-          }
-        }
-      }
+      activeCycle { id name startsAt endsAt }
+    }
+  }
+}`
+
+const cycleIssuesQuery = `query CycleIssues($cycleId: ID!, $after: String) {
+  issues(filter: { cycle: { id: { eq: $cycleId } } }, first: 25, after: $after) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id identifier number title description priority estimate url
+      state { id name type }
+      assignee { id name displayName }
+      parent { id }
+      labels { nodes { name } }
     }
   }
 }`
@@ -192,7 +197,7 @@ func (i gqlIssue) parentLinearID() string {
 }
 
 func (c *graphqlClient) activeCycleIssues(ctx context.Context, teamKey string) ([]gqlIssue, error) {
-	var out struct {
+	var meta struct {
 		Teams struct {
 			Nodes []struct {
 				ActiveCycle *struct {
@@ -200,25 +205,52 @@ func (c *graphqlClient) activeCycleIssues(ctx context.Context, teamKey string) (
 					Name     string `json:"name"`
 					StartsAt string `json:"startsAt"`
 					EndsAt   string `json:"endsAt"`
-					Issues   struct {
-						Nodes []gqlIssue `json:"nodes"`
-					} `json:"issues"`
 				} `json:"activeCycle"`
 			} `json:"nodes"`
 		} `json:"teams"`
 	}
-	if err := c.do(ctx, activeCycleQuery, map[string]any{"key": teamKey}, &out); err != nil {
+	if err := c.do(ctx, activeCycleQuery, map[string]any{"key": teamKey}, &meta); err != nil {
 		return nil, err
 	}
-	if len(out.Teams.Nodes) == 0 {
+	if len(meta.Teams.Nodes) == 0 {
 		return nil, fmt.Errorf("team %q not found", teamKey)
 	}
-	ac := out.Teams.Nodes[0].ActiveCycle
+	ac := meta.Teams.Nodes[0].ActiveCycle
 	if ac == nil {
 		return nil, nil // no active cycle right now — nothing to heal
 	}
-	// Backfill cycle fields onto each issue when the issue-level cycle is absent.
-	issues := ac.Issues.Nodes
+
+	// Page through the cycle's issues (25/page keeps each request well under
+	// the complexity budget; bounded to 40 pages = 1000 issues as a backstop).
+	var issues []gqlIssue
+	var after *string
+	for page := 0; page < 40; page++ {
+		var out struct {
+			Issues struct {
+				PageInfo struct {
+					HasNextPage bool   `json:"hasNextPage"`
+					EndCursor   string `json:"endCursor"`
+				} `json:"pageInfo"`
+				Nodes []gqlIssue `json:"nodes"`
+			} `json:"issues"`
+		}
+		vars := map[string]any{"cycleId": ac.ID}
+		if after != nil {
+			vars["after"] = *after
+		}
+		if err := c.do(ctx, cycleIssuesQuery, vars, &out); err != nil {
+			return nil, err
+		}
+		issues = append(issues, out.Issues.Nodes...)
+		if !out.Issues.PageInfo.HasNextPage {
+			break
+		}
+		cur := out.Issues.PageInfo.EndCursor
+		after = &cur
+	}
+
+	// Backfill cycle fields onto each issue (the paginated query doesn't expand
+	// the per-issue cycle to keep complexity down — they're all in this cycle).
 	for i := range issues {
 		if issues[i].Cycle == nil {
 			issues[i].Cycle = &struct {
