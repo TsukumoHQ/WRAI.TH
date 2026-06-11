@@ -679,6 +679,153 @@ func (d *DB) ArchiveTasks(project, status, boardID string) (int64, error) {
 	return result.RowsAffected()
 }
 
+// LinearTaskSeed carries the Linear-zone fields for upserting a mirror task.
+// All pointer fields are optional. Used to populate the read-replica from the
+// Linear connector (and by tests to exercise the cycle/board endpoints).
+type LinearTaskSeed struct {
+	ID           string
+	Project      string
+	Title        string
+	Description  string
+	Priority     string
+	Status       string // native status the board maps from when linear_state is unset
+	LinearKey    *string
+	ExternalURL  *string
+	Points       *int
+	Labels       string // json array; defaults to "[]"
+	LinearState  *string
+	Assignee     *string
+	CycleID      *string
+	CycleName    *string
+	CycleStart   *string
+	CycleEnd     *string
+	DispatchedAt string
+}
+
+// UpsertLinearTask inserts or replaces a mirror task carrying the Linear zone.
+// Source is forced to 'linear'. This is the read-replica write primitive: the
+// relay never authors these from the UI — they originate from Linear via the
+// connector (or tests).
+func (d *DB) UpsertLinearTask(s LinearTaskSeed) error {
+	if s.ID == "" {
+		s.ID = uuid.New().String()
+	}
+	if s.Priority == "" {
+		s.Priority = "P2"
+	}
+	if s.Status == "" {
+		s.Status = "pending"
+	}
+	if s.Labels == "" {
+		s.Labels = "[]"
+	}
+	if s.DispatchedAt == "" {
+		s.DispatchedAt = time.Now().UTC().Format(memoryTimeFmt)
+	}
+	_, err := d.conn.Exec(
+		`INSERT INTO tasks
+		   (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at,
+		    source, linear_key, external_url, points, labels, linear_state, assignee,
+		    cycle_id, cycle_name, cycle_start, cycle_end, blocked_periods)
+		 VALUES (?, '', 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')
+		 ON CONFLICT(id) DO UPDATE SET
+		   title=excluded.title, description=excluded.description, priority=excluded.priority,
+		   status=excluded.status, linear_key=excluded.linear_key, external_url=excluded.external_url,
+		   points=excluded.points, labels=excluded.labels, linear_state=excluded.linear_state,
+		   assignee=excluded.assignee, cycle_id=excluded.cycle_id, cycle_name=excluded.cycle_name,
+		   cycle_start=excluded.cycle_start, cycle_end=excluded.cycle_end`,
+		s.ID, s.Title, s.Description, s.Priority, s.Status, s.Project, s.DispatchedAt,
+		s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState, s.Assignee,
+		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert linear task: %w", err)
+	}
+	return nil
+}
+
+// Cycle is one Linear cycle (sprint) the mirror knows about, used by the kanban
+// cycle filter. Active is true when today falls within [Start, End].
+type Cycle struct {
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Start  string `json:"start,omitempty"`
+	End    string `json:"end,omitempty"`
+	Active bool   `json:"active"`
+	Count  int    `json:"count"` // number of (non-archived) tasks in the cycle
+}
+
+// ListCycles returns the distinct cycles present in the mirror for a project,
+// newest start first. The cycle whose [start,end] window spans today is marked
+// active. Native-only projects (no Linear cycles) return an empty slice.
+func (d *DB) ListCycles(project string) ([]Cycle, error) {
+	rows, err := d.ro().Query(
+		`SELECT cycle_id, COALESCE(cycle_name, ''), COALESCE(cycle_start, ''), COALESCE(cycle_end, ''), COUNT(*)
+		 FROM tasks
+		 WHERE project = ? AND archived_at IS NULL AND cycle_id IS NOT NULL AND cycle_id != ''
+		 GROUP BY cycle_id, cycle_name, cycle_start, cycle_end
+		 ORDER BY cycle_start DESC`,
+		project,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list cycles: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	now := time.Now().UTC().Format("2006-01-02")
+	var cycles []Cycle
+	for rows.Next() {
+		var c Cycle
+		if err := rows.Scan(&c.ID, &c.Name, &c.Start, &c.End, &c.Count); err != nil {
+			return nil, fmt.Errorf("scan cycle: %w", err)
+		}
+		c.Active = cycleSpansDate(c.Start, c.End, now)
+		cycles = append(cycles, c)
+	}
+	return cycles, rows.Err()
+}
+
+// cycleSpansDate reports whether day (YYYY-MM-DD) falls within [start, end].
+// Timestamps are compared on their date prefix so RFC3339 and date-only values
+// both work. An empty bound is treated as open on that side.
+func cycleSpansDate(start, end, day string) bool {
+	if start == "" && end == "" {
+		return false
+	}
+	startOK := start == "" || datePrefix(start) <= day
+	endOK := end == "" || day <= datePrefix(end)
+	return startOK && endOK
+}
+
+func datePrefix(ts string) string {
+	if len(ts) >= 10 {
+		return ts[:10]
+	}
+	return ts
+}
+
+// ListBoardTasks returns all non-archived, non-cancelled tasks for the kanban
+// board in one query (no priority-only LIMIT truncation). When cycleID is
+// non-empty, only tasks in that cycle are returned; "all" or "" returns every
+// task. Tasks are returned flat (the board nests by parent_task_id client-side).
+// Ordering is priority → points → dispatched_at so the board's within-column
+// order is correct before any client grouping.
+func (d *DB) ListBoardTasks(project, cycleID string, limit int) ([]models.Task, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	query := "SELECT " + taskColumns + " FROM tasks WHERE project = ? AND archived_at IS NULL AND status != 'cancelled'"
+	args := []any{project}
+	if cycleID != "" && cycleID != "all" {
+		query += " AND cycle_id = ?"
+		args = append(args, cycleID)
+	}
+	query += " ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 ELSE 9 END, " +
+		"COALESCE(points, 0) DESC, dispatched_at ASC LIMIT ?"
+	args = append(args, limit)
+	return d.queryTasks(query, args...)
+}
+
 // ResolveTaskID resolves a short task ID prefix to a full UUID.
 // Returns the full ID if exactly one match is found, or the original if it's already a full UUID.
 func (d *DB) ResolveTaskID(prefix, project string) (string, error) {

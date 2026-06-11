@@ -1586,7 +1586,7 @@ canvas.addEventListener("click", (e) => {
             detailPanel.classList.remove("open");
             loadMessages();
             if (activeTab === "tasks") renderTasks();
-            if (currentMode === "kanban") kanbanBoard.setTasks(getViewFilteredTasks());
+            if (currentMode === "kanban") refreshKanban();
             return;
           }
           return;
@@ -1683,6 +1683,11 @@ function _loadDysonSettings() {
     if (settings && settings.dyson_type && settings.dyson_type !== "auto") {
       currentDysonType = settings.dyson_type;
       world._dysonType = currentDysonType;
+    }
+    // Mode-awareness: linear → read-only board; native → writable .kb-form.
+    if (settings && typeof settings.linear_mode === "boolean") {
+      linearMode = settings.linear_mode;
+      kanbanBoard.setMode(linearMode);
     }
   }).catch(() => {});
 }
@@ -2027,9 +2032,10 @@ function onNewTasks(tasks) {
     }
   }
 
-  // Update kanban if visible
+  // Update kanban if visible — re-fetch the cycle-scoped board (mirror) rather
+  // than feeding unfiltered allTasks, so the cycle filter stays consistent.
   if (currentMode === "kanban") {
-    kanbanBoard.setTasks(getViewFilteredTasks());
+    refreshKanban();
   }
 }
 
@@ -2322,6 +2328,7 @@ function updateConvFilterOptions() {
 
 let currentMode = "canvas"; // "canvas" | "detail" | "kanban"
 let viewMode = "galaxy"; // "galaxy" | "colony" — top-level screen state
+let linearMode = false; // true when the relay mirrors Linear (board is read-only)
 let projectsData = []; // cached ProjectInfo[] from /api/projects
 let colonyProject = null; // project name when in colony view
 
@@ -2335,21 +2342,18 @@ function setMode(mode) {
     btn.classList.toggle("active", btn.dataset.mode === mode);
   });
 
-  // Show/hide kanban — fetch + render BEFORE making panel visible
+  // Show/hide kanban — fetch board (mirror read-replica) + cycles BEFORE showing.
   if (mode === "kanban") {
-    const boardsFetch = focusedProject ? client.fetchBoards(focusedProject) : client.fetchAllBoards();
-    Promise.all([client.fetchAllTasks(), boardsFetch]).then(([tasks, boards]) => {
-      allTasks = tasks;
-      // Batch data + set fingerprints to prevent redundant re-renders from polling
-      kanbanBoard.boards = boards || [];
-      kanbanBoard._boardsFP = kanbanBoard._fingerprint(kanbanBoard.boards);
-      kanbanBoard.tasks = getViewFilteredTasks();
-      kanbanBoard._tasksFP = kanbanBoard._fingerprint(kanbanBoard.tasks);
-      // Single full render, then show
-      kanbanBoard._fullRender();
+    kanbanBoard.setMode(!!linearMode);
+    const project = focusedProject || "default";
+    Promise.all([
+      client.fetchCycles(project),
+      client.fetchBoardTasks(project, kanbanBoard.selectedCycle),
+    ]).then(([cycles, tasks]) => {
+      kanbanBoard.setCycles(cycles || []);
+      kanbanBoard.setTasks(tasks || []);
       main.classList.add("mode-kanban");
       kanbanBoard.show();
-      taskCountEl.textContent = allTasks.filter(t => t.status !== "done").length;
     });
   } else {
     main.classList.add(`mode-${mode}`);
@@ -2789,18 +2793,35 @@ const kanbanBoard = new KanbanBoard(kanbanPanel);
 window._kanbanBoard = kanbanBoard;
 kanbanBoard.hide();
 
+// Reload the board from the mirror read-replica (one call, cycle-aware).
+async function refreshKanban() {
+  const project = focusedProject || "default";
+  const tasks = await client.fetchBoardTasks(project, kanbanBoard.selectedCycle);
+  kanbanBoard.setTasks(tasks || []);
+}
+
+// Read-only card detail comments come from the relay's progress notes.
+kanbanBoard.fetchProgress = (taskId, project) => client.fetchTaskProgress(taskId, project);
+
+// Cycle filter change → re-fetch the board scoped to the chosen cycle.
+kanbanBoard.onCycleChange = async () => {
+  const project = focusedProject || "default";
+  const [cycles, tasks] = await Promise.all([
+    client.fetchCycles(project),
+    client.fetchBoardTasks(project, kanbanBoard.selectedCycle),
+  ]);
+  kanbanBoard.setCycles(cycles || []);
+  kanbanBoard.setTasks(tasks || []);
+};
+
+// Native-mode mutations (no-ops wired in linear/read-only mode by the board UI).
 kanbanBoard.onTransition = async (taskId, newStatus, agentName) => {
-  const task = allTasks.find(t => t.id === taskId);
-  const project = task ? task.project || "default" : "default";
+  const project = focusedProject || "default";
   const result = await client.transitionTask(taskId, newStatus, project, agentName || "user");
   if (result) {
-    // Update local state
-    const idx = allTasks.findIndex(t => t.id === taskId);
-    if (idx >= 0) allTasks[idx] = result;
-    kanbanBoard.setTasks(getViewFilteredTasks());
+    kanbanBoard.upsertTask(result);
     updateAgentTaskLabels();
     if (activeTab === "tasks") renderTasks();
-    taskCountEl.textContent = allTasks.filter(t => t.status !== "done").length;
   }
 };
 
@@ -2816,7 +2837,7 @@ kanbanBoard.onDispatch = async (data) => {
   });
   if (result) {
     allTasks.push(result);
-    kanbanBoard.setTasks(getViewFilteredTasks());
+    kanbanBoard.upsertTask(result);
     taskCountEl.textContent = allTasks.filter(t => t.status !== "done").length;
   }
 };
@@ -2825,7 +2846,8 @@ kanbanBoard.onDelete = async (taskId, project) => {
   const ok = await client.deleteTask(taskId, project);
   if (ok) {
     allTasks = allTasks.filter(t => t.id !== taskId);
-    kanbanBoard.setTasks(getViewFilteredTasks());
+    kanbanBoard.tasks = kanbanBoard.tasks.filter(t => t.id !== taskId);
+    kanbanBoard.setTasks(kanbanBoard.tasks.slice());
     taskCountEl.textContent = allTasks.filter(t => t.status !== "done").length;
     if (activeTab === "tasks") renderTasks();
   }
@@ -2836,10 +2858,27 @@ kanbanBoard.onEdit = async (taskId, project, data) => {
   if (result) {
     const idx = allTasks.findIndex(t => t.id === taskId);
     if (idx >= 0) allTasks[idx] = result;
-    kanbanBoard.setTasks(getViewFilteredTasks());
+    kanbanBoard.upsertTask(result);
     if (activeTab === "tasks") renderTasks();
   }
 };
+
+// Real-time: SSE task lifecycle events upsert the board in place (no full
+// reload). The event payload is minimal {agent, task_id, ...}; we re-fetch the
+// single task to get the full mirror row, then upsert it. Wired in the start
+// block once `client` exists.
+function wireKanbanEvents() {
+  client.subscribeTaskEvents(async (evt) => {
+    const taskId = evt.semantic && evt.semantic.task_id;
+    if (!taskId) return;
+    // Only bother if the kanban is the active view (cheap, avoids noise).
+    if (currentMode !== "kanban") return;
+    const project = focusedProject || (evt.project || "default");
+    const full = await client.fetchTask(taskId, project);
+    if (full) kanbanBoard.upsertTask(full);
+    else await refreshKanban(); // task may have been filtered/removed
+  });
+}
 
 // --- Keyboard shortcuts ---
 
@@ -2902,8 +2941,9 @@ shortcuts.register("/", "search", "Focus search", () => {
 });
 shortcuts.register("n", "new-task", "New task", () => {
   if (viewMode !== "colony") return;
+  if (linearMode) return; // read-only in Linear mode — planning lives in Linear
   if (currentMode !== "kanban") setMode("kanban");
-  kanbanBoard._showDispatchForm();
+  kanbanBoard._showCreateForm();
 });
 
 // Agent navigation with arrows
@@ -2942,7 +2982,6 @@ shortcuts.start();
 
 console.log("[relay] UI initializing...");
 const client = new APIClient(onAgents, onConversations, onNewMessages, onNewTasks, onActivity);
-kanbanBoard.apiClient = client;
 
 // --- Command panel (wire client) ---
 const commandPanel = new CommandPanel(
@@ -2973,6 +3012,7 @@ _loadDysonSettings();
 requestAnimationFrame(() => {
   engine.resize();
   client.start();
+  wireKanbanEvents();
   loadMessages();
   loadTasks();
   fetchTeamsData();

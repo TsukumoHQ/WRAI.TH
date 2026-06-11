@@ -367,6 +367,70 @@ export class APIClient {
     }
   }
 
+  // --- Kanban board (mirror read-replica) ---
+
+  // One call, all board tasks for a project (optionally a single cycle). Zero
+  // Linear round-trips. cycle: "active" | "all" | cycle_id | "".
+  async fetchBoardTasks(project, cycle) {
+    try {
+      const qs = new URLSearchParams();
+      if (project) qs.set("project", project);
+      if (cycle) qs.set("cycle", cycle);
+      const res = await fetch(`/api/tasks/board?${qs}`);
+      if (!res.ok) return [];
+      return await res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  async fetchCycles(project) {
+    try {
+      const qs = project ? `?project=${encodeURIComponent(project)}` : "";
+      const res = await fetch(`/api/cycles${qs}`);
+      if (!res.ok) return [];
+      return await res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  async fetchTaskProgress(taskId, project) {
+    try {
+      const qs = project ? `?project=${encodeURIComponent(project)}` : "";
+      const res = await fetch(`/api/tasks/${taskId}/progress${qs}`);
+      if (!res.ok) return [];
+      return await res.json();
+    } catch {
+      return [];
+    }
+  }
+
+  // Subscribe to the semantic task lifecycle stream (/api/events/stream).
+  // onTaskEvent receives the parsed MCPEvent for any task.* event. Returns the
+  // EventSource so the caller can close it.
+  subscribeTaskEvents(onTaskEvent) {
+    let src;
+    try {
+      src = new EventSource("/api/events/stream");
+    } catch {
+      return null;
+    }
+    src.onmessage = (e) => {
+      try {
+        const evt = JSON.parse(e.data);
+        if (evt && typeof evt.type === "string" && evt.type.startsWith("task.")) {
+          onTaskEvent(evt);
+        }
+      } catch {
+        // ignore malformed frames
+      }
+    };
+    src.onerror = () => { /* browser auto-reconnects EventSource */ };
+    this._eventsSource = src;
+    return src;
+  }
+
   // --- Profiles API ---
 
   async fetchProfiles(project) {
