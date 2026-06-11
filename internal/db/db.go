@@ -428,6 +428,17 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_task_progress_notes_task ON task_progress_notes(task_id, created_at)`)
 
+	// Linear connector sync log (capped audit trail of write-back outcomes).
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS linear_sync_log (
+		id        INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts        TEXT NOT NULL,
+		issue_id  TEXT NOT NULL DEFAULT '',
+		action    TEXT NOT NULL DEFAULT '',
+		outcome   TEXT NOT NULL DEFAULT '',
+		detail    TEXT NOT NULL DEFAULT ''
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_linear_sync_log_ts ON linear_sync_log(id DESC)`)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,
