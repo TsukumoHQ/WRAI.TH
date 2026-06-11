@@ -185,23 +185,29 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 	// emit when the state actually changed in this update.
 	var events []connector.TaskEvent
 	if c.shouldDispatch(env, iss) {
-		assignee := seedAssignee(seed)
-		events = append(events, connector.TaskEvent{
-			Type:    "task.in_progress",
-			Project: c.project,
-			Agent:   assignee,
-			Payload: map[string]any{
-				"agent":             assignee,
-				"task_id":           taskID,
-				"linear_key":        seedLinearKey(seed),
-				"title":             iss.Title,
-				"line":              "In progress: " + iss.Title,
-				"priority":          seed.Priority,
-				"assignee_is_agent": isAgent(assignee),
-			},
-		})
+		events = append(events, dispatchEvent(c.project, taskID, iss.Title, seed))
 	}
 	return events, nil
+}
+
+// dispatchEvent builds the semantic task.in_progress launch event. Shared by
+// the webhook path (Ingest) and the reconcile poll (transition detection).
+func dispatchEvent(project, taskID, title string, seed db.LinearMirrorSeed) connector.TaskEvent {
+	assignee := seedAssignee(seed)
+	return connector.TaskEvent{
+		Type:    "task.in_progress",
+		Project: project,
+		Agent:   assignee,
+		Payload: map[string]any{
+			"agent":             assignee,
+			"task_id":           taskID,
+			"linear_key":        seedLinearKey(seed),
+			"title":             title,
+			"line":              "In progress: " + title,
+			"priority":          seed.Priority,
+			"assignee_is_agent": isAgent(assignee),
+		},
+	}
 }
 
 // shouldDispatch reports whether this webhook is a genuine → In Progress

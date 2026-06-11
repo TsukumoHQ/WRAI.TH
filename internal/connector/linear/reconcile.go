@@ -27,20 +27,37 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 	}
 
 	// Pass 1: upsert every issue (creates rows so parent links can resolve).
+	// The poll also detects → In Progress transitions so dispatch works without
+	// a public webhook endpoint (localhost-only deployments): the prior mirror
+	// status is the dedupe — once the row is in-progress, later polls skip it.
 	upserted := 0
 	hasParent := false
 	for _, iss := range issues {
 		if iss.ID == "" {
 			continue
 		}
+		prior, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
 		seed := c.seedFromIssue(iss)
-		if _, _, err := c.db.UpsertLinearMirror(seed); err != nil {
+		taskID, _, err := c.db.UpsertLinearMirror(seed)
+		if err != nil {
 			log.Printf("[linear] reconcile upsert %s: %v", iss.ID, err)
 			continue
 		}
 		upserted++
 		if iss.parentLinearID() != "" && seed.ParentTaskID == nil {
 			hasParent = true
+		}
+		// Done echo parity with the webhook path.
+		if iss.State != nil && iss.State.Type == "completed" {
+			_ = c.db.MarkLinearDone(taskID)
+		}
+		// Dispatch on a genuine transition into a working "started" state with
+		// an agent assignee (first sight in-progress counts: boot-time pickup).
+		if c.onEvent != nil &&
+			iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
+			isAgent(issueAssignee(iss)) &&
+			(prior == nil || prior.Status != "in-progress") {
+			c.onEvent(dispatchEvent(c.project, taskID, iss.Title, seed))
 		}
 	}
 

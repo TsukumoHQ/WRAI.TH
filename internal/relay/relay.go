@@ -80,6 +80,11 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	var linearConn *linearconn.Connector
 	if cfg.LinearActive() {
 		linearConn = linearconn.New(database, cfg)
+		// Reconcile-detected transitions (no public webhook needed) land on the
+		// same bus as webhook events.
+		linearConn.SetEventSink(func(e connector.TaskEvent) {
+			events.EmitSemantic(e.Type, e.Project, e.Agent, e.Payload)
+		})
 		taskConn = linearConn
 	}
 	handlers.SetConnector(taskConn)

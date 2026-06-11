@@ -34,7 +34,18 @@ type Connector struct {
 	lastWebhookAt   atomic.Int64 // unix ms
 	lastReconcileAt atomic.Int64 // unix ms
 	writerFailures  atomic.Int64
+
+	// onEvent receives semantic events found OUTSIDE the webhook path (the
+	// reconcile poll detecting a → In Progress transition). The webhook path
+	// returns events from Ingest instead; this sink exists because reconcile
+	// runs on its own goroutine with no caller to hand events back to. Set
+	// once at wiring time (relay.New), before StartReconcile.
+	onEvent func(connector.TaskEvent)
 }
+
+// SetEventSink installs the bus callback used by the reconcile poll. Must be
+// called before StartReconcile; nil-safe (events are dropped when unset).
+func (c *Connector) SetEventSink(fn func(connector.TaskEvent)) { c.onEvent = fn }
 
 // Verify the interface is satisfied at compile time.
 var _ connector.TaskConnector = (*Connector)(nil)
