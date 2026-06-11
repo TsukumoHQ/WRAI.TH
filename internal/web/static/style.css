@@ -333,7 +333,7 @@ body:has(main.agent-focused) .header-tabs { opacity: 0.3; pointer-events: none; 
 
 /* Command dock — floating glass HUD over the lower stage */
 #command-panel {
-  height: 280px;
+  height: 200px;
   min-height: 120px;
   max-height: 60vh;
   position: relative;
@@ -388,6 +388,21 @@ body.view-colony #command-panel {
 body.view-colony #cmd-resize-handle {
   display: block !important;
   animation: hud-rise 0.32s var(--hud-ease);
+}
+
+/* Collapsed dock: only the grab bar remains, fully rounded */
+#command-panel.dock-collapsed {
+  height: 0 !important;
+  min-height: 0;
+  border-width: 0;
+  margin-bottom: var(--hud-gap);
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+#cmd-resize-handle.dock-collapsed {
+  border-bottom: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
 }
 
 #cmd-resize-handle:hover {
