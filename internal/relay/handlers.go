@@ -101,23 +101,31 @@ func (h *Handlers) resultTextTracked(project, agent, tool, text string) (*mcp.Ca
 	return mcp.NewToolResultText(text), nil
 }
 
-// renderTable renders rows as TSV: one header line, then one line per row.
-// Keys are paid once instead of once per element — roughly half the tokens
-// of the equivalent JSON for homogeneous lists.
+// renderTable renders rows as a compact (unpadded) markdown table. Keys are
+// paid once in the header instead of once per element — roughly half the
+// tokens of the equivalent JSON for homogeneous lists, and markdown reads
+// more reliably for LLMs than raw separators.
 func renderTable(header []string, rows [][]string) string {
 	var sb strings.Builder
-	sb.WriteString(strings.Join(header, "\t"))
+	sb.WriteByte('|')
+	for _, col := range header {
+		sb.WriteString(col)
+		sb.WriteByte('|')
+	}
+	sb.WriteString("\n|")
+	for range header {
+		sb.WriteString("---|")
+	}
+	cleaner := strings.NewReplacer("|", "\\|", "\t", "  ", "\n", " ", "\r", "")
 	for _, row := range rows {
-		sb.WriteByte('\n')
-		for i, cell := range row {
-			if i > 0 {
-				sb.WriteByte('\t')
-			}
-			cell = strings.NewReplacer("\t", "  ", "\n", " ", "\r", "").Replace(cell)
+		sb.WriteString("\n|")
+		for _, cell := range row {
+			cell = cleaner.Replace(cell)
 			if cell == "" {
 				cell = "-"
 			}
 			sb.WriteString(cell)
+			sb.WriteByte('|')
 		}
 	}
 	return sb.String()
@@ -571,16 +579,23 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 		formatted[i] = entry
 	}
 
-	if req.GetString("format", "json") == "table" {
+	if f := req.GetString("format", "md"); f == "md" || f == "table" {
 		rows := make([][]string, len(messages))
 		for i, m := range messages {
 			content, _ := formatted[i]["content"].(string)
+			// Threading context: conversation membership or reply chain.
+			thread := ""
+			if m.ConversationID != nil {
+				thread = "conv:" + *m.ConversationID
+			} else if m.ReplyTo != nil {
+				thread = "re:" + *m.ReplyTo
+			}
 			rows[i] = []string{
 				m.ID, strOrDash(m.DeliveryID), m.From, m.To, m.Type,
-				m.Priority, m.CreatedAt, m.Subject, content,
+				m.Priority, thread, m.CreatedAt, m.Subject, content,
 			}
 		}
-		table := renderTable([]string{"id", "delivery_id", "from", "to", "type", "priority", "created_at", "subject", "content"}, rows)
+		table := renderTable([]string{"id", "delivery_id", "from", "to", "type", "priority", "thread", "created_at", "subject", "content"}, rows)
 		return h.resultTextTracked(project, agent, "get_inbox", fmt.Sprintf("%d messages for %s\n%s", len(messages), agent, table))
 	}
 
@@ -713,7 +728,7 @@ func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest
 		result = append(result, entry)
 	}
 
-	if req.GetString("format", "json") == "table" {
+	if f := req.GetString("format", "md"); f == "md" || f == "table" {
 		rows := make([][]string, len(result))
 		for i, a := range result {
 			exec := ""
@@ -1265,7 +1280,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	if req.GetString("format", "json") == "table" {
+	if f := req.GetString("format", "md"); f == "md" || f == "table" {
 		rows := make([][]string, len(memories))
 		for i, m := range memories {
 			val, _ := truncated[i]["value"].(string)
@@ -2008,15 +2023,19 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 		}
 	}
 
-	if req.GetString("format", "json") == "table" {
+	if f := req.GetString("format", "md"); f == "md" || f == "table" {
 		rows := make([][]string, len(tasks))
 		for i, t := range tasks {
+			outcome := strOrDash(t.Result)
+			if t.Status == "blocked" {
+				outcome = "BLOCKED: " + strOrDash(t.BlockedReason)
+			}
 			rows[i] = []string{
 				t.ID, t.Status, t.Priority, t.ProfileSlug, strOrDash(t.AssignedTo),
-				t.Title, t.Description, strOrDash(t.Result),
+				t.Title, t.Description, outcome,
 			}
 		}
-		table := renderTable([]string{"id", "status", "priority", "profile", "assigned_to", "title", "description", "result"}, rows)
+		table := renderTable([]string{"id", "status", "priority", "profile", "assigned_to", "title", "description", "result_or_blocked_reason"}, rows)
 		return h.resultTextTracked(project, "", "list_tasks", fmt.Sprintf("%d tasks\n%s", len(tasks), table))
 	}
 
@@ -2610,7 +2629,7 @@ func (h *Handlers) HandleListGoals(ctx context.Context, req mcp.CallToolRequest)
 		enriched = append(enriched, goalWithProgress{Goal: g, TotalTasks: total, DoneTasks: done, Progress: progress})
 	}
 
-	if req.GetString("format", "json") == "table" {
+	if f := req.GetString("format", "md"); f == "md" || f == "table" {
 		rows := make([][]string, len(enriched))
 		for i, g := range enriched {
 			rows[i] = []string{

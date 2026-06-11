@@ -53,7 +53,7 @@ func TestCallToolDispatch(t *testing.T) {
 	// Verify it really registered, args as JSON string (fallback path)
 	res, err = h.HandleCallTool(context.Background(), call(map[string]any{
 		"tool": "list_agents",
-		"args": `{"project":"p1"}`,
+		"args": `{"project":"p1","format":"json"}`,
 	}))
 	if err != nil {
 		t.Fatalf("call_tool list: %v", err)
@@ -152,30 +152,33 @@ func TestTableFormat(t *testing.T) {
 		"subject": "hello", "content": "line1\nline2\twith tab",
 	}))
 
-	res, err := h.HandleGetInbox(ctx, call(map[string]any{"as": "scout", "project": "p1", "format": "table"}))
+	res, err := h.HandleGetInbox(ctx, call(map[string]any{"as": "scout", "project": "p1"}))
 	if err != nil {
 		t.Fatalf("inbox table: %v", err)
 	}
 	text := res.Content[0].(mcp.TextContent).Text
 	lines := strings.Split(text, "\n")
-	if len(lines) < 3 {
-		t.Fatalf("expected summary+header+1 row, got %d lines:\n%s", len(lines), text)
+	if len(lines) < 4 {
+		t.Fatalf("expected summary+header+divider+1 row, got %d lines:\n%s", len(lines), text)
 	}
-	if !strings.HasPrefix(lines[1], "id\tdelivery_id\tfrom\t") {
+	if !strings.HasPrefix(lines[1], "|id|delivery_id|from|") {
 		t.Errorf("bad header: %q", lines[1])
 	}
-	if strings.Contains(lines[2], "line2\twith") {
+	if !strings.HasPrefix(lines[2], "|---|") {
+		t.Errorf("missing markdown divider: %q", lines[2])
+	}
+	if strings.Contains(lines[3], "line2\twith") {
 		t.Error("cell tab not sanitized")
 	}
 
-	res, _ = h.HandleListAgents(ctx, call(map[string]any{"project": "p1", "format": "table"}))
+	res, _ = h.HandleListAgents(ctx, call(map[string]any{"project": "p1"}))
 	text = res.Content[0].(mcp.TextContent).Text
-	if !strings.Contains(text, "scout\texplorer\t") {
+	if !strings.Contains(text, "|scout|explorer|") {
 		t.Errorf("agents table missing row: %s", text)
 	}
 
-	// json default unchanged
-	res, _ = h.HandleListAgents(ctx, call(map[string]any{"project": "p1"}))
+	// json opt-in keeps the structured shape
+	res, _ = h.HandleListAgents(ctx, call(map[string]any{"project": "p1", "format": "json"}))
 	data := parseJSON(t, res)
 	if int(data["count"].(float64)) != 1 {
 		t.Errorf("json default broken: %v", data)

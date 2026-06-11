@@ -122,7 +122,7 @@ func TestListAgents(t *testing.T) {
 	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
 	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b", "role": "qa"}))
 
-	res, _ := h.HandleListAgents(ctx, call(map[string]any{"project": "p1"}))
+	res, _ := h.HandleListAgents(ctx, call(map[string]any{"project": "p1", "format": "json"}))
 	data := parseJSON(t, res)
 	if data["count"].(float64) != 2 {
 		t.Errorf("expected 2 agents, got %v", data["count"])
@@ -140,7 +140,7 @@ func TestDeactivateAgent(t *testing.T) {
 	}
 
 	// Agent should not appear in list (inactive excluded from default list)
-	listRes, _ := h.HandleListAgents(ctx, call(map[string]any{"project": "p1"}))
+	listRes, _ := h.HandleListAgents(ctx, call(map[string]any{"project": "p1", "format": "json"}))
 	listData := parseJSON(t, listRes)
 	// inactive agents ARE shown in list (status IN active, sleeping, inactive)
 	agents := listData["agents"].([]any)
@@ -160,7 +160,7 @@ func TestDeleteAgent(t *testing.T) {
 	}
 
 	// Deleted agents should NOT appear in list
-	listRes, _ := h.HandleListAgents(ctx, call(map[string]any{"project": "p1"}))
+	listRes, _ := h.HandleListAgents(ctx, call(map[string]any{"project": "p1", "format": "json"}))
 	listData := parseJSON(t, listRes)
 	if listData["count"].(float64) != 0 {
 		t.Errorf("expected 0 agents after delete, got %v", listData["count"])
@@ -203,7 +203,7 @@ func TestSendAndGetInbox(t *testing.T) {
 	}
 
 	// Check inbox
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
 		"project":     "p1",
 		"as":          "bot-b",
 		"unread_only": true,
@@ -257,7 +257,7 @@ func TestMarkRead(t *testing.T) {
 	}
 
 	// Inbox should be empty (unread_only)
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
 		"project": "p1", "as": "bot-b", "unread_only": true,
 	}))
 	inbox := parseJSON(t, inboxRes)
@@ -523,14 +523,14 @@ func TestListTasks(t *testing.T) {
 	_, _ = h.HandleDispatchTask(ctx, call(map[string]any{"project": "p1", "as": "bot-a", "profile": "qa", "title": "task3"}))
 
 	// List all
-	res, _ := h.HandleListTasks(ctx, call(map[string]any{"project": "p1"}))
+	res, _ := h.HandleListTasks(ctx, call(map[string]any{"project": "p1", "format": "json"}))
 	data := parseJSON(t, res)
 	if data["count"].(float64) != 3 {
 		t.Errorf("expected 3 tasks, got %v", data["count"])
 	}
 
 	// Filter by profile
-	res2, _ := h.HandleListTasks(ctx, call(map[string]any{"project": "p1", "profile": "dev"}))
+	res2, _ := h.HandleListTasks(ctx, call(map[string]any{"format": "json", "project": "p1", "profile": "dev"}))
 	data2 := parseJSON(t, res2)
 	if data2["count"].(float64) != 2 {
 		t.Errorf("expected 2 dev tasks, got %v", data2["count"])
@@ -649,7 +649,7 @@ func TestMemoryList(t *testing.T) {
 		"project": "p1", "as": "bot-b", "key": "k2", "value": "v2",
 	}))
 
-	res, _ := h.HandleListMemories(ctx, call(map[string]any{
+	res, _ := h.HandleListMemories(ctx, call(map[string]any{"format": "json", 
 		"project": "p1",
 	}))
 	data := parseJSON(t, res)
@@ -842,7 +842,7 @@ func TestGoalLifecycle(t *testing.T) {
 	}
 
 	// List
-	listRes, _ := h.HandleListGoals(ctx, call(map[string]any{
+	listRes, _ := h.HandleListGoals(ctx, call(map[string]any{"format": "json", 
 		"project": "p1",
 	}))
 	listData := parseJSON(t, listRes)
@@ -1074,7 +1074,7 @@ func TestSendBroadcastMessage(t *testing.T) {
 	}
 
 	// bot-b should see it in inbox
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
 		"project": "p1", "as": "bot-b", "unread_only": true,
 	}))
 	inbox := parseJSON(t, inboxRes)

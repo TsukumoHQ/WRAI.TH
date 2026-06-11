@@ -70,8 +70,8 @@ func seedColony(t *testing.T, h *Handlers, project string) {
 	}
 }
 
-// TestTokenReductionTableVsJSON measures the real payload shrink of
-// format=table against the JSON default on seeded data, per tool.
+// TestTokenReductionTableVsJSON measures the real payload shrink of the
+// markdown-table default against format=json on seeded data, per tool.
 func TestTokenReductionTableVsJSON(t *testing.T) {
 	h := testHandlers(t)
 	seedColony(t, h, "bench")
@@ -93,7 +93,12 @@ func TestTokenReductionTableVsJSON(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		jsonRes, err := tc.handler(ctx, call(tc.args))
+		jsonArgs := make(map[string]any, len(tc.args)+1)
+		for k, v := range tc.args {
+			jsonArgs[k] = v
+		}
+		jsonArgs["format"] = "json"
+		jsonRes, err := tc.handler(ctx, call(jsonArgs))
 		if err != nil {
 			t.Fatalf("%s json: %v", tc.tool, err)
 		}
@@ -103,7 +108,7 @@ func TestTokenReductionTableVsJSON(t *testing.T) {
 		for k, v := range tc.args {
 			tableArgs[k] = v
 		}
-		tableArgs["format"] = "table"
+		tableArgs["format"] = "md"
 		tableRes, err := tc.handler(ctx, call(tableArgs))
 		if err != nil {
 			t.Fatalf("%s table: %v", tc.tool, err)
@@ -111,10 +116,10 @@ func TestTokenReductionTableVsJSON(t *testing.T) {
 		tableSize := resultBytes(t, tableRes)
 
 		gain := 1 - float64(tableSize)/float64(jsonSize)
-		t.Logf("%-14s json=%6dB (~%4d tok)  table=%6dB (~%4d tok)  saved %.0f%%",
+		t.Logf("%-14s json=%6dB (~%4d tok)  md=%6dB (~%4d tok)  saved %.0f%%",
 			tc.tool, jsonSize, jsonSize/4, tableSize, tableSize/4, gain*100)
 		if gain < tc.minGain {
-			t.Errorf("%s: table saves only %.0f%% (expected ≥ %.0f%%)", tc.tool, gain*100, tc.minGain*100)
+			t.Errorf("%s: md saves only %.0f%% (expected ≥ %.0f%%)", tc.tool, gain*100, tc.minGain*100)
 		}
 	}
 }

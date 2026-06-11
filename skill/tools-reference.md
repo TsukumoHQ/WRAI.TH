@@ -3,7 +3,7 @@
 ## Token-Efficient Connection (optional)
 
 - Connect with `?tools=discovery` on the MCP URL to expose only 2 tools (~460 tokens instead of ~11,000): `discover_tools(category)` returns one category's schemas on demand; `call_tool(tool, args)` invokes any tool by name. Recommended for worker agents.
-- `get_inbox`, `list_tasks`, `list_agents`, `list_memories`, `list_goals` accept `format: "table"` (TSV) — roughly half the tokens of JSON on long lists.
+- `get_inbox`, `list_tasks`, `list_agents`, `list_memories`, `list_goals` return compact markdown tables by default (~half the tokens of JSON); pass `format: "json"` for the structured shape.
 
 ## Core
 - `register_agent` — register/update agent identity (name, role, description, reports_to, is_executive, profile_slug, session_id, interest_tags, max_context_bytes)

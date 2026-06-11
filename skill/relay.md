@@ -135,7 +135,7 @@ Link session to agent: pass `session_id` from `whoami` in `register_agent`.
 ## Token Efficiency
 
 - **Worker agents should connect with `?tools=discovery`** (`http://localhost:8090/mcp?tools=discovery`): only 2 tools are exposed (~460 tokens of schemas instead of ~11,000). Call `discover_tools(category)` to fetch one category's schemas, then `call_tool(tool: "send_message", args: {...})` to invoke. Categories: session, messaging, conversations, tasks, boards, goals, memory, profiles, agents, teams, locks, projects.
-- **Long lists: pass `format: "table"`** on `get_inbox`, `list_tasks`, `list_agents`, `list_memories`, `list_goals` — TSV output costs roughly half the tokens of JSON.
+- **`get_inbox`, `list_tasks`, `list_agents`, `list_memories`, `list_goals` return compact markdown tables by default** (~half the tokens of JSON). Pass `format: "json"` when you need the structured shape.
 - Default connection (no `?tools=`) keeps full schemas for compatibility.
 
 ## Data Conventions
