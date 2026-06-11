@@ -9,10 +9,7 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css">
   <link rel="stylesheet" href="/style.css">
-  <script src="https://cdn.jsdelivr.net/npm/easymde/dist/easymde.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked/lib/marked.umd.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5/lib/xterm.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0/lib/addon-fit.js"></script>
 </head>
 <body>
   <header id="header">
@@ -49,12 +46,6 @@
         </button>
         <button class="mode-btn" data-mode="kanban" title="Kanban [2]">
           <span class="mode-icon">&#9638;</span>
-        </button>
-        <button class="mode-btn" data-mode="vault" title="Docs [3]">
-          <span class="mode-icon">&#9776;</span>
-        </button>
-        <button class="mode-btn" data-mode="ops" title="Ops [4]">
-          <span class="mode-icon">&#9881;</span>
         </button>
       </div>
     </div>
@@ -97,12 +88,6 @@
 
     <!-- Kanban panel (hidden by default, shown in kanban mode) -->
     <div id="kanban-panel" class="hidden"></div>
-
-    <!-- Vault panel (hidden by default, shown in vault mode) -->
-    <div id="vault-panel" class="hidden"></div>
-
-    <!-- Ops panel (hidden by default, shown in ops mode) -->
-    <div id="ops-panel" class="hidden"></div>
 
     <div id="messages-panel">
       <div id="messages-header">
@@ -240,29 +225,6 @@
       </div>
     </div>
 
-    <!-- Skills -->
-    <div class="dp-section">
-      <div class="dp-section-header" data-toggle="dp-skills-body">SKILLS</div>
-      <div id="dp-skills-body" class="dp-section-body">
-        <div id="detail-skills" class="detail-value"></div>
-      </div>
-    </div>
-
-    <!-- Quotas -->
-    <div class="dp-section">
-      <div class="dp-section-header" data-toggle="dp-quotas-body">QUOTAS</div>
-      <div id="dp-quotas-body" class="dp-section-body">
-        <div id="detail-quotas" class="detail-value"></div>
-      </div>
-    </div>
-
-    <!-- Elevation -->
-    <div class="dp-section">
-      <div class="dp-section-header" data-toggle="dp-elevation-body">ELEVATION</div>
-      <div id="dp-elevation-body" class="dp-section-body">
-        <div id="detail-elevation" class="detail-value"></div>
-      </div>
-    </div>
 
     <!-- Nav arrows -->
     <div class="dp-nav">
@@ -305,8 +267,6 @@
         <ul>
           <li><b>Canvas</b> <kbd>1</kbd> — agents on planet surface, message orb animations</li>
           <li><b>Kanban</b> <kbd>2</kbd> — task boards with drag &amp; drop, sprint columns</li>
-          <li><b>Vault</b> <kbd>3</kbd> — project docs, file tree, inline markdown editor</li>
-          <li><b>Ops</b> <kbd>4</kbd> — OS primitives: triggers, polls, skills, quotas</li>
         </ul>
       </div>
 
@@ -380,27 +340,6 @@
       </div>
 
       <div class="help-section">
-        <h3>Vault (Docs)</h3>
-        <ul>
-          <li>Collapsible file tree sidebar — mirrors project directory</li>
-          <li>Click a doc to view rendered markdown</li>
-          <li>Edit button opens inline markdown editor (auto-saves)</li>
-          <li>Full-text search across all vault documents</li>
-        </ul>
-      </div>
-
-      <div class="help-section">
-        <h3>Ops Console</h3>
-        <ul>
-          <li><b>Triggers</b> — event-driven automation rules (fire on event match)</li>
-          <li><b>Polls</b> — URL polling triggers (check external endpoints on interval)</li>
-          <li><b>Skills</b> — skill registry with proficiency levels, service discovery</li>
-          <li><b>Quotas</b> — per-agent rate limits (tokens, messages, tasks, spawns)</li>
-          <li>Agent detail panel shows Skills, Quotas, and Elevation status</li>
-        </ul>
-      </div>
-
-      <div class="help-section">
         <h3>User Notifications</h3>
         <ul>
           <li>Agents send <code>to: "user"</code> — cards appear bottom-left</li>
@@ -417,8 +356,6 @@
         <table class="help-shortcuts">
           <tr><td><kbd>1</kbd></td><td>Canvas view</td></tr>
           <tr><td><kbd>2</kbd></td><td>Kanban view</td></tr>
-          <tr><td><kbd>3</kbd></td><td>Vault (Docs) view</td></tr>
-          <tr><td><kbd>4</kbd></td><td>Ops view (triggers, polls, skills, quotas)</td></tr>
           <tr><td><kbd>M</kbd></td><td>Messages tab</td></tr>
           <tr><td><kbd>Y</kbd></td><td>Memories tab</td></tr>
           <tr><td><kbd>T</kbd></td><td>Tasks tab</td></tr>

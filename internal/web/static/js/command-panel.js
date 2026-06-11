@@ -662,10 +662,7 @@ export class CommandPanel {
   async _loadCacheLists() {
     if (!this._client || !this._project) return;
     try {
-      [this._profiles, this._cycles] = await Promise.all([
-        this._client.fetchProfiles(this._project),
-        this._client.fetchCycles(this._project),
-      ]);
+      this._profiles = await this._client.fetchProfiles(this._project);
     } catch { /* ignore */ }
   }
 
@@ -677,140 +674,11 @@ export class CommandPanel {
     this._container.innerHTML = '';
     const root = document.createElement('div');
     root.className = 'cmd-root';
-
-    const bar = document.createElement('div');
-    bar.className = 'cmd-creation-bar';
-    const btns = [
-      { label: '+ Agent', form: 'agent' },
-      { label: '+ Cycle', form: 'cycle' },
-      { label: '+ Schedule', form: 'schedule' },
-    ];
-    for (const b of btns) {
-      const btn = document.createElement('button');
-      btn.className = 'cmd-create-btn' + (this._activeCreateForm === b.form ? ' active' : '');
-      btn.textContent = b.label;
-      btn.addEventListener('click', () => {
-        this._activeCreateForm = this._activeCreateForm === b.form ? null : b.form;
-        this._renderCreationBar();
-      });
-      bar.appendChild(btn);
-    }
-    root.appendChild(bar);
-
-    if (this._activeCreateForm) {
-      const area = document.createElement('div');
-      area.className = 'cmd-form-area';
-      if (this._activeCreateForm === 'agent') this._buildAgentCreateForm(area);
-      else if (this._activeCreateForm === 'cycle') this._buildCycleCreateForm(area);
-      else if (this._activeCreateForm === 'schedule') this._buildScheduleCreateForm(area);
-      root.appendChild(area);
-    }
-
+    const hint = document.createElement('div');
+    hint.className = 'cmd-empty-hint';
+    hint.textContent = 'Select an agent to inspect it. Agents register themselves via the relay.';
+    root.appendChild(hint);
     this._container.appendChild(root);
-  }
-
-  _buildAgentCreateForm(area) {
-    const form = document.createElement('div');
-    form.className = 'cmd-form';
-    form.innerHTML = `
-      <div class="cmd-form-row">
-        <span class="cmd-label">SLUG</span>
-        <input class="cmd-input" data-field="slug" placeholder="agent-slug" />
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">NAME</span>
-        <input class="cmd-input" data-field="name" placeholder="Agent Name" />
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">ROLE</span>
-        <input class="cmd-input" data-field="role" placeholder="Role description" />
-      </div>
-      <div class="cmd-form-row wide">
-        <span class="cmd-label">CONTEXT PACK</span>
-        <textarea class="cmd-textarea" data-field="context_pack" rows="2" placeholder="Context pack..."></textarea>
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">PROJECT</span>
-        <input class="cmd-input" data-field="project" value="${esc(this._project)}" readonly />
-        <button class="cmd-btn primary" id="cmd-create-agent-btn">CREATE</button>
-      </div>
-    `;
-    area.appendChild(form);
-    area.querySelector('#cmd-create-agent-btn').addEventListener('click', () => this._doCreateAgent(form));
-  }
-
-  async _doCreateAgent(form) {
-    const get = (f) => form.querySelector(`[data-field="${f}"]`)?.value?.trim() || '';
-    const data = { slug: get('slug'), name: get('name'), role: get('role'), context_pack: get('context_pack'), project: this._project };
-    if (!data.slug) return;
-    const result = await this._client.createProfile(data);
-    if (result) { this._activeCreateForm = null; await this._loadCacheLists(); this._renderCreationBar(); }
-  }
-
-  _buildCycleCreateForm(area) {
-    const form = document.createElement('div');
-    form.className = 'cmd-form';
-    form.innerHTML = `
-      <div class="cmd-form-row">
-        <span class="cmd-label">NAME</span>
-        <input class="cmd-input" data-field="name" placeholder="cycle-name" />
-      </div>
-      <div class="cmd-form-row wide">
-        <span class="cmd-label">PROMPT</span>
-        <textarea class="cmd-textarea" data-field="prompt" rows="2" placeholder="Cycle prompt..."></textarea>
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">TTL</span>
-        <input class="cmd-input" data-field="ttl" placeholder="30m" />
-        <button class="cmd-btn primary" id="cmd-create-cycle-btn">CREATE</button>
-      </div>
-    `;
-    area.appendChild(form);
-    area.querySelector('#cmd-create-cycle-btn').addEventListener('click', () => this._doCreateCycle(form));
-  }
-
-  async _doCreateCycle(form) {
-    const get = (f) => form.querySelector(`[data-field="${f}"]`)?.value?.trim() || '';
-    const data = { name: get('name'), prompt: get('prompt'), ttl: get('ttl'), project: this._project };
-    if (!data.name) return;
-    const result = await this._client.createCycle(data);
-    if (result) { this._activeCreateForm = null; await this._loadCacheLists(); this._renderCreationBar(); }
-  }
-
-  _buildScheduleCreateForm(area) {
-    const form = document.createElement('div');
-    form.className = 'cmd-form';
-    const agentOpts = this._profiles.map(p => `<option value="${esc(p.slug)}">${esc(p.slug)}</option>`).join('');
-    const cycleOpts = this._cycles.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
-    form.innerHTML = `
-      <div class="cmd-form-row">
-        <span class="cmd-label">AGENT</span>
-        <select class="cmd-select" data-field="agent"><option value="">--</option>${agentOpts}</select>
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">CYCLE</span>
-        <select class="cmd-select" data-field="cycle"><option value="">--</option>${cycleOpts}</select>
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">NAME</span>
-        <input class="cmd-input" data-field="name" placeholder="schedule-name" />
-      </div>
-      <div class="cmd-form-row">
-        <span class="cmd-label">CRON</span>
-        <input class="cmd-input" data-field="cron_expr" placeholder="*/30 * * * *" />
-        <button class="cmd-btn primary" id="cmd-create-schedule-btn">CREATE</button>
-      </div>
-    `;
-    area.appendChild(form);
-    area.querySelector('#cmd-create-schedule-btn').addEventListener('click', () => this._doCreateSchedule(form));
-  }
-
-  async _doCreateSchedule(form) {
-    const get = (f) => form.querySelector(`[data-field="${f}"]`)?.value?.trim() || '';
-    const data = { agent: get('agent'), project: this._project, name: get('name'), cron_expr: get('cron_expr'), ttl: '', cycle: get('cycle') };
-    if (!data.agent || !data.cron_expr) return;
-    const result = await this._client.createSchedule(data);
-    if (result) { this._activeCreateForm = null; this._renderCreationBar(); }
   }
 
   // ════════════════════════════════════════════
@@ -844,7 +712,7 @@ export class CommandPanel {
     // Tab bar
     const tabs = document.createElement('div');
     tabs.className = 'cmd-tabs';
-    const tabDefs = ['profile', 'skills', 'quotas', 'schedules', 'comms', 'tasks', 'terminal'];
+    const tabDefs = ['profile', 'comms', 'tasks'];
     for (const t of tabDefs) {
       const btn = document.createElement('button');
       btn.className = 'cmd-tab' + (this._activeTab === t ? ' active' : '');
@@ -858,66 +726,19 @@ export class CommandPanel {
     const content = document.createElement('div');
     content.className = 'cmd-tab-content';
     if (this._activeTab === 'profile') this._renderProfileTab(content);
-    else if (this._activeTab === 'skills') this._renderSkillsTab(content);
-    else if (this._activeTab === 'quotas') this._renderQuotasTab(content);
-    else if (this._activeTab === 'schedules') this._renderSchedulesTab(content);
     else if (this._activeTab === 'comms') this._renderCommsTab(content);
     else if (this._activeTab === 'tasks') this._renderTasksTab(content);
-    else if (this._activeTab === 'terminal') this._renderTerminalTab(content);
     right.appendChild(content);
 
     // Actions bar
     const actions = document.createElement('div');
     actions.className = 'cmd-actions';
 
-    // Terminal spawn button
-    const spawnBtn = document.createElement('button');
-    if (this._termSessionId) {
-      // Terminal is running — show kill button
-      spawnBtn.className = 'cmd-btn danger';
-      spawnBtn.textContent = 'Kill Terminal';
-      spawnBtn.addEventListener('click', async () => {
-        spawnBtn.textContent = 'Killing...';
-        spawnBtn.disabled = true;
-        await this._client.terminalKill(this._termSessionId);
-        this._destroyTerminal();
-        this._renderAgentPanel();
-      });
-    } else {
-      spawnBtn.className = 'cmd-btn success';
-      spawnBtn.textContent = 'Spawn Terminal';
-      spawnBtn.addEventListener('click', async () => {
-        spawnBtn.textContent = 'Spawning...';
-        spawnBtn.disabled = true;
-        const slug = this._agent.slug || this._agent.name;
-        const result = await this._client.terminalSpawn({
-          project: this._project,
-          profile: slug,
-        });
-        if (result && result.session_id) {
-          this._termSessionId = result.session_id;
-          this._activeTab = 'terminal';
-          this._renderAgentPanel();
-        } else {
-          spawnBtn.textContent = 'Failed';
-          spawnBtn.style.color = '#ff6b6b';
-          setTimeout(() => { spawnBtn.textContent = 'Spawn Terminal'; spawnBtn.disabled = false; spawnBtn.style.color = ''; }, 2000);
-        }
-      });
-    }
-    actions.appendChild(spawnBtn);
-
     const msgBtn = document.createElement('button');
     msgBtn.className = 'cmd-btn';
     msgBtn.textContent = 'Message';
     msgBtn.addEventListener('click', () => { this._msgFormOpen = !this._msgFormOpen; this._renderAgentPanel(); });
     actions.appendChild(msgBtn);
-
-    const delBtn = document.createElement('button');
-    delBtn.className = 'cmd-btn danger';
-    delBtn.textContent = 'Delete';
-    delBtn.addEventListener('click', () => this._doDeleteAgent());
-    actions.appendChild(delBtn);
 
     right.appendChild(actions);
 
@@ -1065,216 +886,18 @@ export class CommandPanel {
     form.innerHTML = `
       <div class="cmd-form-row">
         <span class="cmd-label">SLUG</span>
-        <input class="cmd-input" data-field="slug" value="${esc(a.slug || '')}" readonly />
-        <span class="cmd-label" style="min-width:auto">POOL</span>
-        <input class="cmd-input" data-field="pool_size" type="number" value="${a.pool_size || 1}" style="width:50px;flex:none" />
+        <input class="cmd-input" value="${esc(a.slug || '')}" readonly />
       </div>
       <div class="cmd-form-row">
         <span class="cmd-label">NAME</span>
-        <input class="cmd-input" data-field="name" value="${esc(a.name || '')}" />
+        <input class="cmd-input" value="${esc(a.name || '')}" readonly />
       </div>
       <div class="cmd-form-row">
         <span class="cmd-label">ROLE</span>
-        <input class="cmd-input" data-field="role" value="${esc(a.role || '')}" />
+        <input class="cmd-input" value="${esc(a.role || '')}" readonly />
       </div>
-      <div class="cmd-form-row wide">
-        <span class="cmd-label">CONTEXT PACK</span>
-        <textarea class="cmd-textarea" data-field="context_pack" rows="2">${esc(a.context_pack || '')}</textarea>
-      </div>
-      <div class="cmd-form-row wide">
-        <span class="cmd-label">VAULT PATHS</span>
-        <textarea class="cmd-textarea" data-field="vault_paths" rows="1">${esc(a.vault_paths || '')}</textarea>
-      </div>
-      <div class="cmd-form-row wide">
-        <span class="cmd-label">ALLOWED TOOLS</span>
-        <textarea class="cmd-textarea" data-field="allowed_tools" rows="1">${esc(a.allowed_tools || '')}</textarea>
-      </div>
-      <div class="cmd-form-row"><button class="cmd-btn primary" id="cmd-save-profile-btn">Save Profile</button></div>
     `;
     content.appendChild(form);
-    content.querySelector('#cmd-save-profile-btn').addEventListener('click', () => this._doSaveProfile(form));
-  }
-
-  async _doSaveProfile(form) {
-    const get = (f) => form.querySelector(`[data-field="${f}"]`)?.value?.trim() || '';
-    const slug = this._agent.slug || this._agent.name;
-    await this._client.updateProfile(slug, {
-      name: get('name'), role: get('role'), context_pack: get('context_pack'),
-      vault_paths: get('vault_paths'), allowed_tools: get('allowed_tools'),
-      pool_size: parseInt(get('pool_size')) || 1, project: this._project,
-    });
-  }
-
-  _renderSkillsTab(content) {
-    const skills = this._agent._skills || [];
-    if (skills.length === 0) {
-      content.innerHTML = '<div class="cmd-empty">No skills registered</div>';
-    } else {
-      for (const sk of skills) {
-        const item = document.createElement('div');
-        item.className = 'cmd-skill-entry';
-        const hasDesc = sk.description && sk.description.trim();
-        const preview = hasDesc ? (sk.description.length > 80 ? sk.description.slice(0, 78) + '...' : sk.description.split('\n')[0]) : '';
-        item.innerHTML = `
-          <div class="cmd-skill-header" data-toggle-skill="${esc(sk.name)}">
-            <span class="cmd-skill-chevron">${hasDesc ? '\u25B6' : '\u2022'}</span>
-            <span class="cmd-skill-name">${esc(sk.name)}</span>
-            ${preview ? `<span class="cmd-skill-preview">${esc(preview)}</span>` : ''}
-            <button class="cmd-btn danger" data-del-skill="${esc(sk.name)}" style="padding:1px 6px;font-size:8px">x</button>
-          </div>
-          <div class="cmd-skill-body" data-skill-body="${esc(sk.name)}" style="display:none">
-            <pre class="cmd-skill-md">${esc(sk.description || '')}</pre>
-          </div>
-        `;
-        content.appendChild(item);
-      }
-      // Toggle expand/collapse
-      content.querySelectorAll('[data-toggle-skill]').forEach(header => {
-        header.addEventListener('click', (e) => {
-          if (e.target.dataset.delSkill) return; // don't toggle on delete click
-          const name = header.dataset.toggleSkill;
-          const body = content.querySelector(`[data-skill-body="${name}"]`);
-          const chevron = header.querySelector('.cmd-skill-chevron');
-          if (body.style.display === 'none') {
-            body.style.display = 'block';
-            chevron.textContent = '\u25BC';
-          } else {
-            body.style.display = 'none';
-            chevron.textContent = '\u25B6';
-          }
-        });
-      });
-      content.querySelectorAll('[data-del-skill]').forEach(btn => {
-        btn.addEventListener('click', async (e) => {
-          e.stopPropagation();
-          await this._client.deleteSkill(btn.dataset.delSkill, this._project);
-          this._renderAgentPanel();
-        });
-      });
-    }
-    // Add skill form
-    const addBtn = document.createElement('button');
-    addBtn.className = 'cmd-btn';
-    addBtn.textContent = '+ Skill';
-    addBtn.style.marginTop = '8px';
-    addBtn.addEventListener('click', () => {
-      if (content.querySelector('.cmd-inline-form')) return;
-      const f = document.createElement('div');
-      f.className = 'cmd-inline-form';
-      f.innerHTML = `<div class="cmd-form">
-        <div class="cmd-form-row">
-          <span class="cmd-label">NAME</span>
-          <input class="cmd-input" data-field="skill-name" placeholder="e.g. deploy-pipeline" />
-        </div>
-        <div class="cmd-form-row wide">
-          <span class="cmd-label">CONTENT</span>
-          <textarea class="cmd-textarea cmd-skill-textarea" data-field="skill-desc" rows="10" placeholder="Paste full .md skill definition here..."></textarea>
-        </div>
-        <div class="cmd-form-row">
-          <button class="cmd-btn primary" id="cmd-add-skill-btn">Add Skill</button>
-        </div></div>`;
-      content.appendChild(f);
-      f.querySelector('#cmd-add-skill-btn').addEventListener('click', async () => {
-        const name = f.querySelector('[data-field="skill-name"]').value.trim();
-        const desc = f.querySelector('[data-field="skill-desc"]').value;
-        if (!name) return;
-        const slug = this._agent.slug || this._agent.name;
-        await this._client.createSkill({ name, description: desc, proficiency: 3, agent: slug, project: this._project });
-        const skills = await this._client.fetchSkills(this._project, slug);
-        this._agent._skills = skills;
-        this._renderAgentPanel();
-      });
-    });
-    content.appendChild(addBtn);
-  }
-
-  _renderQuotasTab(content) {
-    const q = this._agent._quota || {};
-    const fields = [
-      { key: 'max_tokens_per_day', label: 'Tokens/Day', used: q.tokens_today || 0 },
-      { key: 'max_messages_per_hour', label: 'Msgs/Hour', used: q.messages_this_hour || 0 },
-      { key: 'max_tasks_per_hour', label: 'Tasks/Hour', used: q.tasks_this_hour || 0 },
-      { key: 'max_spawns_per_hour', label: 'Spawns/Hour', used: q.spawns_this_hour || 0 },
-    ];
-    const form = document.createElement('div');
-    form.className = 'cmd-form';
-    for (const f of fields) {
-      const limit = q[f.key] || 0;
-      const pct = limit > 0 ? Math.min(100, (f.used / limit) * 100) : 0;
-      const color = pct > 80 ? '#ff6b6b' : pct > 50 ? '#ffd93d' : '#00e676';
-      const row = document.createElement('div');
-      row.className = 'cmd-quota-row';
-      row.innerHTML = `
-        <span class="cmd-quota-label">${f.label}</span>
-        <div class="cmd-quota-bar-bg"><div class="cmd-quota-bar-fill" style="width:${pct}%;background:${color}"></div></div>
-        <input class="cmd-input" data-field="${f.key}" type="number" value="${limit}" style="width:65px;flex:none;text-align:right" />
-      `;
-      form.appendChild(row);
-    }
-    const saveRow = document.createElement('div');
-    saveRow.className = 'cmd-form-row';
-    saveRow.innerHTML = '<button class="cmd-btn primary" id="cmd-save-quotas-btn">Save Quotas</button>';
-    form.appendChild(saveRow);
-    content.appendChild(form);
-    content.querySelector('#cmd-save-quotas-btn').addEventListener('click', async () => {
-      const get = (f) => parseInt(form.querySelector(`[data-field="${f}"]`)?.value) || 0;
-      const slug = this._agent.slug || this._agent.name;
-      await this._client.updateAgentQuota(slug, {
-        project: this._project,
-        max_tokens_per_day: get('max_tokens_per_day'), max_messages_per_hour: get('max_messages_per_hour'),
-        max_tasks_per_hour: get('max_tasks_per_hour'), max_spawns_per_hour: get('max_spawns_per_hour'),
-      });
-    });
-  }
-
-  async _renderSchedulesTab(content) {
-    const slug = this._agent.slug || this._agent.name;
-    const schedules = await this._client.fetchAgentSchedules(this._project, slug);
-    if (!schedules || schedules.length === 0) {
-      content.innerHTML = '<div class="cmd-empty">No schedules</div>';
-    } else {
-      for (const s of schedules) {
-        const item = document.createElement('div');
-        item.className = 'cmd-list-item';
-        item.innerHTML = `
-          <span class="cmd-list-name">${esc(s.name || s.id)}</span>
-          <span class="cmd-list-meta">${esc(s.cron_expr)} &middot; ${esc(s.cycle || '-')}</span>
-          <div class="cmd-list-actions">
-            <button class="cmd-btn success" data-trigger="${s.id}">Run</button>
-            <button class="cmd-btn danger" data-del="${s.id}">Del</button>
-          </div>
-        `;
-        content.appendChild(item);
-      }
-      content.querySelectorAll('[data-trigger]').forEach(b => b.addEventListener('click', () => this._client.triggerSchedule(b.dataset.trigger)));
-      content.querySelectorAll('[data-del]').forEach(b => b.addEventListener('click', async () => { await this._client.deleteSchedule(b.dataset.del); this._renderAgentPanel(); }));
-    }
-    const addBtn = document.createElement('button');
-    addBtn.className = 'cmd-btn';
-    addBtn.textContent = '+ Schedule';
-    addBtn.style.marginTop = '8px';
-    addBtn.addEventListener('click', () => {
-      if (content.querySelector('.cmd-inline-form')) return;
-      const cycleOpts = this._cycles.map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('');
-      const f = document.createElement('div');
-      f.className = 'cmd-inline-form';
-      f.innerHTML = `<div class="cmd-form">
-        <div class="cmd-form-row">
-          <span class="cmd-label">CRON</span><input class="cmd-input" data-field="sched-cron" placeholder="*/30 * * * *" />
-          <span class="cmd-label" style="min-width:auto">CYCLE</span>
-          <select class="cmd-select" data-field="sched-cycle" style="width:90px;flex:none"><option value="">--</option>${cycleOpts}</select>
-          <button class="cmd-btn primary" id="cmd-add-sched-btn">Create</button>
-        </div></div>`;
-      content.appendChild(f);
-      f.querySelector('#cmd-add-sched-btn').addEventListener('click', async () => {
-        const cron_expr = f.querySelector('[data-field="sched-cron"]').value.trim();
-        const cycle = f.querySelector('[data-field="sched-cycle"]').value;
-        if (!cron_expr) return;
-        await this._client.createSchedule({ agent: slug, project: this._project, name: '', cron_expr, cycle, ttl: '' });
-        this._renderAgentPanel();
-      });
-    });
-    content.appendChild(addBtn);
   }
 
   _renderCommsTab(content) {
@@ -1319,150 +942,6 @@ export class CommandPanel {
       `;
       content.appendChild(item);
     }
-  }
-
-  _renderTerminalTab(content) {
-    if (!this._termSessionId) {
-      content.innerHTML = `<div class="cmd-empty">
-        No terminal session.<br>
-        <span style="color:#5a5e78;font-size:8px">Click "Spawn Terminal" to start an interactive agent.</span>
-      </div>`;
-      return;
-    }
-
-    // Make content a flex column so the terminal fills it
-    content.style.cssText += 'display:flex;flex-direction:column;padding:4px;';
-
-    // If we already have a persistent terminal box, just re-attach it
-    if (this._termBox) {
-      content.appendChild(this._termBox);
-      this._termBox.style.display = 'flex';
-      // Re-fit after re-attach
-      requestAnimationFrame(() => { if (this._termFit) this._termFit.fit(); });
-      return;
-    }
-
-    // First time: create the persistent terminal box + xterm instance
-    const termBox = document.createElement('div');
-    termBox.id = 'cmd-xterm';
-    termBox.style.cssText = 'flex:1;min-height:0;width:100%;display:flex;';
-    this._termBox = termBox;
-    content.appendChild(termBox);
-
-    requestAnimationFrame(() => {
-      const Terminal = window.Terminal;
-      const FitAddon = window.FitAddon?.FitAddon;
-      if (!Terminal) {
-        termBox.innerHTML = '<div class="cmd-empty" style="color:#ff6b6b">xterm.js not loaded</div>';
-        return;
-      }
-
-      const term = new Terminal({
-        fontFamily: "'JetBrains Mono', monospace",
-        fontSize: 12,
-        theme: {
-          background: '#0a0a1a',
-          foreground: '#c8ccd4',
-          cursor: '#a29bfe',
-          cursorAccent: '#0a0a1a',
-          selectionBackground: 'rgba(162, 155, 254, 0.3)',
-          black: '#0a0a12',
-          red: '#ff6b6b',
-          green: '#00e676',
-          yellow: '#ffd93d',
-          blue: '#74b9ff',
-          magenta: '#a29bfe',
-          cyan: '#00cec9',
-          white: '#c8ccd4',
-          brightBlack: '#636e72',
-          brightRed: '#ff6b6b',
-          brightGreen: '#00e676',
-          brightYellow: '#ffd93d',
-          brightBlue: '#74b9ff',
-          brightMagenta: '#d4cfff',
-          brightCyan: '#00cec9',
-          brightWhite: '#e0e0e8',
-        },
-        cursorBlink: true,
-        scrollback: 5000,
-        convertEol: true,
-      });
-
-      term.open(termBox);
-
-      if (FitAddon) {
-        const fit = new FitAddon();
-        term.loadAddon(fit);
-        fit.fit();
-        this._termFit = fit;
-        // Re-fit whenever the box resizes (panel drag, window resize)
-        const ro = new ResizeObserver(() => fit.fit());
-        ro.observe(termBox);
-      }
-
-      this._terminal = term;
-
-      // Connect WebSocket
-      const wsUrl = this._client.terminalWsUrl(this._termSessionId);
-      const ws = new WebSocket(wsUrl);
-      ws.binaryType = 'arraybuffer';
-      this._termWs = ws;
-
-      ws.onopen = () => {
-        term.writeln('\x1b[38;5;141m// Connected to agent terminal\x1b[0m');
-        ws.send(JSON.stringify({ type: 'resize', rows: term.rows, cols: term.cols }));
-      };
-
-      ws.onmessage = (ev) => {
-        if (ev.data instanceof ArrayBuffer) {
-          term.write(new Uint8Array(ev.data));
-        } else {
-          try {
-            const msg = JSON.parse(ev.data);
-            if (msg.type === 'exit') {
-              term.writeln('\r\n\x1b[38;5;203m// Process exited\x1b[0m');
-              this._termSessionId = null;
-            }
-          } catch {
-            term.write(ev.data);
-          }
-        }
-      };
-
-      ws.onclose = () => {
-        term.writeln('\r\n\x1b[38;5;243m// Connection closed\x1b[0m');
-      };
-
-      ws.onerror = () => {
-        term.writeln('\r\n\x1b[38;5;203m// WebSocket error\x1b[0m');
-      };
-
-      term.onData((data) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'input', data }));
-        }
-      });
-
-      term.onResize(({ rows, cols }) => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'resize', rows, cols }));
-        }
-      });
-    });
-  }
-
-  // ── Actions ──
-
-  async _doSpawn() {
-    const slug = this._agent.slug || this._agent.name;
-    return await this._client.spawnWithContext({ project: this._project, profile: slug });
-  }
-
-  async _doDeleteAgent() {
-    const slug = this._agent.slug || this._agent.name;
-    if (!confirm(`Delete agent "${slug}"?`)) return;
-    await this._client.deleteProfile(slug, this._project);
-    this.clearAgent();
   }
 
   async _doSendMessage(form) {
