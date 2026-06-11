@@ -36,6 +36,7 @@ type Relay struct {
 	PTYMgr         *spawn.PTYManager
 	Handlers       *Handlers
 	WorkflowEngine *workflow.Engine
+	Notifier       *Notifier
 	Config         config.Config
 	httpServer     *http.Server
 	StartedAt      time.Time
@@ -91,6 +92,11 @@ func New(database *db.DB, ingester *ingest.Ingester, vaultWatcher *vault.Watcher
 	})
 
 	handlers.SetWorkflowEngine(wfEngine)
+
+	// Initialize notifications subsystem (rules evaluator + digest scheduler).
+	// Seeds default rules on first run.
+	notifier := NewNotifier(database, registry, events)
+	handlers.SetNotifier(notifier)
 
 	// Register all tools
 	mcpSrv.AddTools(
@@ -205,6 +211,7 @@ func New(database *db.DB, ingester *ingest.Ingester, vaultWatcher *vault.Watcher
 		Scheduler:      sched,
 		Handlers:       handlers,
 		WorkflowEngine: wfEngine,
+		Notifier:       notifier,
 		Config:         cfg,
 		StartedAt:      time.Now().UTC(),
 	}

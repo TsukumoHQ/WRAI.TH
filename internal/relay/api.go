@@ -291,6 +291,21 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetWorkflow(w, path)
 	case strings.HasPrefix(path, "/workflow-runs/") && req.Method == http.MethodGet:
 		r.apiGetWorkflowRunDetail(w, path)
+	// Notification rules (configurable event→action→target rules engine)
+	case path == "/notification-rules" && req.Method == http.MethodGet:
+		r.apiGetNotificationRules(w, req)
+	case path == "/notification-rules" && req.Method == http.MethodPost:
+		r.apiCreateNotificationRule(w, req)
+	case strings.HasPrefix(path, "/notification-rules/") && strings.HasSuffix(path, "/test-fire") && req.Method == http.MethodPost:
+		r.apiTestFireNotificationRule(w, req, path)
+	case strings.HasPrefix(path, "/notification-rules/") && req.Method == http.MethodPatch:
+		r.apiPatchNotificationRule(w, req, path)
+	case strings.HasPrefix(path, "/notification-rules/") && req.Method == http.MethodDelete:
+		r.apiDeleteNotificationRule(w, path)
+	case path == "/notification-deliveries" && req.Method == http.MethodGet:
+		r.apiGetNotificationDeliveries(w, req)
+	case path == "/notification-events" && req.Method == http.MethodPost:
+		r.apiEmitNotificationEvent(w, req)
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -1222,7 +1237,33 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		apiError(w, http.StatusBadRequest, "task transition failed", err)
 		return
 	}
+
+	// Emit the matching semantic event so notification rules fire for web-UI
+	// driven transitions too (the MCP handlers emit their own).
+	if evType, line := semanticForStatus(body.Status, task.Title); evType != "" {
+		payload := taskSemantic(task, line)
+		if body.Status == "blocked" && body.Reason != nil {
+			payload["reason"] = *body.Reason
+		}
+		r.Events.EmitSemantic(evType, body.Project, body.Agent, payload)
+	}
+
 	writeJSON(w, task)
+}
+
+// semanticForStatus maps a kanban status to its semantic event type + line.
+func semanticForStatus(status, title string) (string, string) {
+	switch status {
+	case "accepted":
+		return EvTaskClaimed, "Claimed: " + title
+	case "in-progress":
+		return EvTaskInProgress, "In progress: " + title
+	case "done":
+		return EvTaskDone, "Done: " + title
+	case "blocked":
+		return EvTaskBlocked, "Blocked: " + title
+	}
+	return "", ""
 }
 
 func (r *Relay) apiUpdateTask(w http.ResponseWriter, req *http.Request, path string) {

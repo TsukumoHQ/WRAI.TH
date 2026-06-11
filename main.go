@@ -104,6 +104,11 @@ func startServer() {
 	// Start poll trigger background worker
 	r.Handlers.StartPoller(cleanupDone)
 
+	// Start notifications subsystem (rules evaluator + digest scheduler)
+	if r.Notifier != nil {
+		r.Notifier.Start(cleanupDone)
+	}
+
 	// Log ingested events (phase 1: log only, phase 2: TouchAgent + WS broadcast)
 	go func() {
 		for evt := range ingester.Events {
