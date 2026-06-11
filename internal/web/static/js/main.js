@@ -111,7 +111,9 @@ function layoutAgents() {
     if (viewMode !== "galaxy") av.orbit = null;
   }
 
-  if (viewMode === "colony" && colonyProject && projectGroups.has(colonyProject)) {
+  // Note: no projectGroups.has() guard — a freshly created project has zero
+  // agents but must still render its (empty) colony surface, not the galaxy.
+  if (viewMode === "colony" && colonyProject) {
     // --- Colony view: focused project, agents on planet surface ---
     const project = colonyProject;
     const keys = [...(projectGroups.get(project) || new Set())];
