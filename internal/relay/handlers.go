@@ -29,6 +29,13 @@ type Handlers struct {
 	tokenCh      chan db.TokenRecord
 	spawnMgr     *spawn.Manager
 	wfEngine     WorkflowFirer
+	notifier     *Notifier
+}
+
+// SetNotifier connects the notifications subsystem so handlers can emit custom
+// events into the rules engine.
+func (h *Handlers) SetNotifier(n *Notifier) {
+	h.notifier = n
 }
 
 // WorkflowFirer is the interface the dispatcher uses to fire workflows.
@@ -1259,6 +1266,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: agent, Project: project, Target: profile, Label: title})
+	h.events.EmitSemantic(EvTaskDispatched, project, agent, taskSemantic(task, fmt.Sprintf("Dispatched: %s", title)))
 
 	// Fire triggers for task_pending
 	go h.fireTriggers(project, "task_pending", map[string]string{
@@ -1307,6 +1315,7 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultError(fmt.Sprintf("failed to claim task: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
+	h.events.EmitSemantic(EvTaskClaimed, project, agent, taskSemantic(task, fmt.Sprintf("Claimed: %s", task.Title)))
 	return h.resultJSONTracked(project, agent, "claim_task", task)
 }
 
@@ -1327,6 +1336,7 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 		return mcp.NewToolResultError(fmt.Sprintf("failed to start task: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "start", Agent: agent, Project: project, Label: task.Title})
+	h.events.EmitSemantic(EvTaskInProgress, project, agent, taskSemantic(task, fmt.Sprintf("In progress: %s", task.Title)))
 	return h.resultJSONTracked(project, agent, "start_task", task)
 }
 
@@ -1349,6 +1359,7 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "complete", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
+	h.events.EmitSemantic(EvTaskDone, project, agent, taskSemantic(task, fmt.Sprintf("Done: %s", task.Title)))
 
 	// Fire triggers for task_completed
 	go h.fireTriggers(project, "task_completed", map[string]string{
@@ -1404,6 +1415,11 @@ func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest)
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "block", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
+	blockedPayload := taskSemantic(task, fmt.Sprintf("Blocked: %s", task.Title))
+	if reason != nil {
+		blockedPayload["reason"] = *reason
+	}
+	h.events.EmitSemantic(EvTaskBlocked, project, agent, blockedPayload)
 
 	// Fire triggers for task_blocked + signal:alert
 	blockMeta := map[string]string{
