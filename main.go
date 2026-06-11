@@ -86,6 +86,13 @@ func startServer() {
 		r.Notifier.Start(cleanupDone)
 	}
 
+	// Start the Linear connector's reconcile poll (active-cycle mirror freshness).
+	// Only runs when the connector is active; otherwise no goroutine is spawned.
+	if r.LinearConn != nil {
+		r.LinearConn.StartReconcile(cfg.LinearReconcileIval, cleanupDone)
+		log.Printf("  linear connector: active (team=%s, reconcile=%s)", cfg.LinearTeamKey, cfg.LinearReconcileIval)
+	}
+
 	// Log ingested events (phase 1: log only, phase 2: TouchAgent + WS broadcast)
 	go func() {
 		for evt := range ingester.Events {

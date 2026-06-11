@@ -159,6 +159,9 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetNotificationDeliveries(w, req)
 	case path == "/notification-events" && req.Method == http.MethodPost:
 		r.apiEmitNotificationEvent(w, req)
+	// Linear connector inbound webhook (404s unless the connector is active).
+	case path == "/connectors/linear/webhook" && req.Method == http.MethodPost:
+		r.apiLinearWebhook(w, req)
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -191,7 +194,7 @@ func (r *Relay) apiHealth(w http.ResponseWriter) {
 	if v == "" {
 		v = "dev"
 	}
-	writeJSON(w, map[string]any{
+	health := map[string]any{
 		"status":      "ok",
 		"version":     v,
 		"uptime":      time.Since(r.StartedAt).String(),
@@ -199,7 +202,13 @@ func (r *Relay) apiHealth(w http.ResponseWriter) {
 		"db":          stats,
 		"linear_mode": r.Config.LinearMode,
 		"mode":        modeString(r.Config.LinearMode),
-	})
+	}
+	// When the Linear connector is active, surface its live status
+	// (last_webhook_at, last_reconcile_at, writer failure count, cache state).
+	if r.LinearConn != nil {
+		health["linear_connector"] = r.LinearConn.Status()
+	}
+	writeJSON(w, health)
 }
 
 // modeString maps the linear_mode flag to a human-readable mode label the web
@@ -1216,6 +1225,12 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 			payload["reason"] = *body.Reason
 		}
 		r.Events.EmitSemantic(evType, body.Project, body.Agent, payload)
+	}
+
+	// Write-back (Linear mode): a web-driven → In Review fires the one owned
+	// transition + comment, fire-and-forget. No-op in native mode.
+	if body.Status == "in-review" {
+		pushInReviewAsync(r.Connector, task, body.Agent, body.Result)
 	}
 
 	writeJSON(w, task)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-relay/internal/connector"
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
 	"agent-relay/internal/models"
@@ -19,18 +20,25 @@ import (
 )
 
 type Handlers struct {
-	db       *db.DB
-	registry *SessionRegistry
-	ingester *ingest.Ingester
-	events   *EventBus
-	tokenCh  chan db.TokenRecord
-	notifier *Notifier
+	db        *db.DB
+	registry  *SessionRegistry
+	ingester  *ingest.Ingester
+	events    *EventBus
+	tokenCh   chan db.TokenRecord
+	notifier  *Notifier
+	connector connector.TaskConnector
 }
 
 // SetNotifier connects the notifications subsystem so handlers can emit custom
 // events into the rules engine.
 func (h *Handlers) SetNotifier(n *Notifier) {
 	h.notifier = n
+}
+
+// SetConnector wires the task connector so the review handler can fire the one
+// owned write-back (→ In Review + comment) when running in Linear mode.
+func (h *Handlers) SetConnector(c connector.TaskConnector) {
+	h.connector = c
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
@@ -1621,6 +1629,11 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 
 	// Notify dispatcher — work is up for review.
 	h.registry.Notify(project, task.DispatchedBy, agent, fmt.Sprintf("In review: %s", task.Title), task.ID)
+
+	// Write-back (Linear mode): after the local stamp succeeds, fire-and-forget
+	// the agent's one owned transition (→ In Review + comment). No-op in native.
+	comment := optionalString(req.GetString("comment", ""))
+	pushInReviewAsync(h.connector, task, agent, comment)
 
 	return h.resultJSONTracked(project, agent, "review_task", task)
 }

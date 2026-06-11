@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"agent-relay/internal/config"
+	"agent-relay/internal/connector"
+	linearconn "agent-relay/internal/connector/linear"
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
 	"agent-relay/internal/web"
@@ -25,7 +27,13 @@ type Relay struct {
 	Events    *EventBus
 	Handlers  *Handlers
 	Notifier  *Notifier
-	Config    config.Config
+	// Connector is the task source: the Linear connector when active, else a
+	// no-op (native mode). Used for the one owned write-back (→ In Review).
+	Connector connector.TaskConnector
+	// LinearConn is the concrete Linear connector, non-nil only when Linear is
+	// active. Held for the webhook HTTP route + reconcile loop wiring.
+	LinearConn *linearconn.Connector
+	Config     config.Config
 	// Version is the build tag, injected from main.Version.
 	// Defaults to "dev" when built without ldflags.
 	Version    string
@@ -66,6 +74,16 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	notifier := NewNotifier(database, registry, events)
 	handlers.SetNotifier(notifier)
 
+	// Task connector: the Linear connector when configured + enabled, else a
+	// no-op so every call site is branch-free. Inert unless cfg.LinearActive().
+	var taskConn connector.TaskConnector = connector.Noop{}
+	var linearConn *linearconn.Connector
+	if cfg.LinearActive() {
+		linearConn = linearconn.New(database, cfg)
+		taskConn = linearConn
+	}
+	handlers.SetConnector(taskConn)
+
 	serverTools = append(serverTools,
 		server.ServerTool{Tool: discoverToolsTool(), Handler: handlers.HandleDiscoverTools},
 		server.ServerTool{Tool: callToolTool(), Handler: handlers.HandleCallTool},
@@ -80,16 +98,18 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	)
 
 	return &Relay{
-		MCPServer: mcpSrv,
-		HTTP:      httpSrv,
-		DB:        database,
-		Registry:  registry,
-		Ingester:  ingester,
-		Events:    events,
-		Handlers:  handlers,
-		Notifier:  notifier,
-		Config:    cfg,
-		StartedAt: time.Now().UTC(),
+		MCPServer:  mcpSrv,
+		HTTP:       httpSrv,
+		DB:         database,
+		Registry:   registry,
+		Ingester:   ingester,
+		Events:     events,
+		Handlers:   handlers,
+		Notifier:   notifier,
+		Connector:  taskConn,
+		LinearConn: linearConn,
+		Config:     cfg,
+		StartedAt:  time.Now().UTC(),
 	}
 }
 

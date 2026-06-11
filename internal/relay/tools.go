@@ -372,10 +372,11 @@ func startTaskTool() mcp.Tool {
 func reviewTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"review_task",
-		mcp.WithDescription("Mark a task as in-review → 'in-review' (the agent's 'PR up' signal). Stamps in_review_at."),
+		mcp.WithDescription("Mark a task as in-review → 'in-review' (the agent's 'PR up' signal). Stamps in_review_at. In Linear mode, also moves the issue to In Review and posts the optional comment."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+		mcp.WithString("comment", mcp.Description("Optional note (PR link / result) posted to Linear on the In Review transition")),
 	)
 }
 
