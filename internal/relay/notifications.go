@@ -301,7 +301,9 @@ func (n *Notifier) doMessage(rule models.NotificationRule, project string, paylo
 	if subject == "" {
 		subject = rule.Event
 	}
-	content := subject
+	// Content intentionally empty: the line IS the message (tiny payloads by
+	// design); duplicating it as body just doubles the inbox noise.
+	content := ""
 	ttl := opts.TTL
 	if ttl == 0 {
 		ttl = 14400
@@ -479,7 +481,14 @@ func (n *Notifier) maybeEmitDigests() {
 	now := time.Now()
 	for _, project := range projects {
 		last := n.digestLastFired[project]
-		if !last.IsZero() && now.Sub(last) < intervalDur {
+		if last.IsZero() {
+			// Prime on first sight (process boot or new project): the first
+			// digest fires one interval later, not immediately — otherwise
+			// every restart floods one digest per project.
+			n.digestLastFired[project] = now
+			continue
+		}
+		if now.Sub(last) < intervalDur {
 			continue
 		}
 		n.digestLastFired[project] = now
