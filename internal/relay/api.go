@@ -91,6 +91,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// Task endpoints
 	case path == "/tasks/human" && req.Method == http.MethodGet:
 		r.apiGetHumanTasks(w, req)
+	case path == "/tasks/board" && req.Method == http.MethodGet:
+		r.apiGetBoardTasks(w, req)
+	case path == "/cycles" && req.Method == http.MethodGet:
+		r.apiGetCycles(w, req)
 	case path == "/tasks/all" && req.Method == http.MethodGet:
 		r.apiGetAllTasks(w)
 	case path == "/tasks" && req.Method == http.MethodGet:
@@ -976,6 +980,56 @@ func (r *Relay) apiGetHumanTasks(w http.ResponseWriter, req *http.Request) {
 		tasks = []models.Task{}
 	}
 	writeJSON(w, tasks)
+}
+
+// apiGetBoardTasks serves the kanban board: every non-archived, non-cancelled
+// task for a project (or a single cycle), flat, ordered priority → points →
+// dispatched_at. The board nests by parent_task_id and maps linear_state →
+// columns client-side. Single call, zero Linear round-trips (reads the mirror).
+//
+// Params: ?project= (default "default"), ?cycle= (cycle_id | "all" | "active" | "").
+// "active" resolves to the cycle spanning today; empty/"all" returns everything.
+func (r *Relay) apiGetBoardTasks(w http.ResponseWriter, req *http.Request) {
+	project := projectFromRequest(req)
+	cycle := req.URL.Query().Get("cycle")
+
+	if cycle == "active" {
+		cycle = "" // default; resolve below if an active cycle exists
+		if cycles, err := r.DB.ListCycles(project); err == nil {
+			for _, c := range cycles {
+				if c.Active {
+					cycle = c.ID
+					break
+				}
+			}
+		}
+	}
+
+	tasks, err := r.DB.ListBoardTasks(project, cycle, 1000)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to list board tasks", err)
+		return
+	}
+	if tasks == nil {
+		tasks = []models.Task{}
+	}
+	writeJSON(w, tasks)
+}
+
+// apiGetCycles serves the kanban cycle filter: the distinct Linear cycles in the
+// mirror for a project, with the active one (spanning today) flagged. Empty in
+// native mode.
+func (r *Relay) apiGetCycles(w http.ResponseWriter, req *http.Request) {
+	project := projectFromRequest(req)
+	cycles, err := r.DB.ListCycles(project)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to list cycles", err)
+		return
+	}
+	if cycles == nil {
+		cycles = []db.Cycle{}
+	}
+	writeJSON(w, cycles)
 }
 
 func (r *Relay) apiGetAllTasks(w http.ResponseWriter) {

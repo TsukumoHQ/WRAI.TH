@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-relay/internal/config"
 	"agent-relay/internal/db"
@@ -471,6 +472,155 @@ func TestAPIGetAllTasks(t *testing.T) {
 	}
 }
 
+// --- Kanban board + cycle API Tests ---
+
+func strptr(s string) *string { return &s }
+func intptr(i int) *int       { return &i }
+
+// seedCycleTask seeds a Linear mirror task into a cycle for board/cycle tests.
+func seedCycleTask(t *testing.T, r *Relay, id, project, title, state, cycleID, cycleName, start, end string, points int) {
+	t.Helper()
+	err := r.DB.UpsertLinearTask(db.LinearTaskSeed{
+		ID:          id,
+		Project:     project,
+		Title:       title,
+		Priority:    "P1",
+		Status:      "in-progress",
+		LinearKey:   strptr("SYN-" + id),
+		LinearState: strptr(state),
+		Points:      intptr(points),
+		CycleID:     strptr(cycleID),
+		CycleName:   strptr(cycleName),
+		CycleStart:  strptr(start),
+		CycleEnd:    strptr(end),
+	})
+	if err != nil {
+		t.Fatalf("seed cycle task: %v", err)
+	}
+}
+
+func TestAPIGetBoardTasks(t *testing.T) {
+	r := testRelay(t)
+	// One native task + two Linear tasks across two cycles.
+	_, _ = r.DB.DispatchTask("p1", "dev", "user", "native task", "", "P2", nil, nil)
+	seedCycleTask(t, r, "1", "p1", "cycle-A task", "In Progress", "cyc-a", "Cycle A", "2026-06-01", "2026-06-14", 3)
+	seedCycleTask(t, r, "2", "p1", "cycle-B task", "Todo", "cyc-b", "Cycle B", "2026-05-01", "2026-05-14", 5)
+
+	// All tasks (no cycle filter)
+	w := doAPI(r, "GET", "/tasks/board?project=p1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	all := decodeJSONArray(t, w)
+	if len(all) != 3 {
+		t.Fatalf("expected 3 board tasks, got %d", len(all))
+	}
+
+	// Filter to cycle A — only the cycle-A task
+	w2 := doAPI(r, "GET", "/tasks/board?project=p1&cycle=cyc-a", "")
+	if w2.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w2.Code)
+	}
+	cycA := decodeJSONArray(t, w2)
+	if len(cycA) != 1 {
+		t.Fatalf("expected 1 task in cycle A, got %d", len(cycA))
+	}
+	if got := cycA[0].(map[string]any)["title"]; got != "cycle-A task" {
+		t.Errorf("expected 'cycle-A task', got %v", got)
+	}
+}
+
+func TestAPIGetBoardTasksExcludesCancelledAndArchived(t *testing.T) {
+	r := testRelay(t)
+	tk, _ := r.DB.DispatchTask("p1", "dev", "user", "keep me", "", "P2", nil, nil)
+	cn, _ := r.DB.DispatchTask("p1", "dev", "user", "cancel me", "", "P2", nil, nil)
+	_, _ = r.DB.CancelTask(cn.ID, "user", "p1", nil)
+	_ = tk // keep alive
+
+	w := doAPI(r, "GET", "/tasks/board?project=p1", "")
+	tasks := decodeJSONArray(t, w)
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 board task (cancelled excluded), got %d", len(tasks))
+	}
+}
+
+func TestAPIGetBoardTasksActiveCycle(t *testing.T) {
+	r := testRelay(t)
+	today := time.Now().UTC()
+	curStart := today.AddDate(0, 0, -3).Format("2006-01-02")
+	curEnd := today.AddDate(0, 0, 3).Format("2006-01-02")
+	pastStart := today.AddDate(0, 0, -30).Format("2006-01-02")
+	pastEnd := today.AddDate(0, 0, -20).Format("2006-01-02")
+	seedCycleTask(t, r, "1", "p1", "current task", "Todo", "cyc-cur", "Current", curStart, curEnd, 1)
+	seedCycleTask(t, r, "2", "p1", "past task", "Done", "cyc-past", "Past", pastStart, pastEnd, 1)
+
+	// cycle=active should resolve to the cycle spanning today
+	w := doAPI(r, "GET", "/tasks/board?project=p1&cycle=active", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	tasks := decodeJSONArray(t, w)
+	if len(tasks) != 1 {
+		t.Fatalf("expected 1 task in active cycle, got %d", len(tasks))
+	}
+	if got := tasks[0].(map[string]any)["title"]; got != "current task" {
+		t.Errorf("expected 'current task', got %v", got)
+	}
+}
+
+func TestAPIGetCycles(t *testing.T) {
+	r := testRelay(t)
+	today := time.Now().UTC()
+	curStart := today.AddDate(0, 0, -2).Format("2006-01-02")
+	curEnd := today.AddDate(0, 0, 5).Format("2006-01-02")
+	seedCycleTask(t, r, "1", "p1", "t1", "Todo", "cyc-cur", "Current", curStart, curEnd, 1)
+	seedCycleTask(t, r, "2", "p1", "t2", "Todo", "cyc-cur", "Current", curStart, curEnd, 1)
+	seedCycleTask(t, r, "3", "p1", "t3", "Done", "cyc-old", "Old", "2025-01-01", "2025-01-14", 1)
+
+	w := doAPI(r, "GET", "/cycles?project=p1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	cycles := decodeJSONArray(t, w)
+	if len(cycles) != 2 {
+		t.Fatalf("expected 2 cycles, got %d", len(cycles))
+	}
+	// Find current cycle and verify active + count
+	var foundActive bool
+	for _, c := range cycles {
+		cm := c.(map[string]any)
+		if cm["id"] == "cyc-cur" {
+			if cm["active"] != true {
+				t.Errorf("expected cyc-cur active=true, got %v", cm["active"])
+			}
+			if cm["count"].(float64) != 2 {
+				t.Errorf("expected cyc-cur count=2, got %v", cm["count"])
+			}
+			foundActive = true
+		}
+		if cm["id"] == "cyc-old" && cm["active"] != false {
+			t.Errorf("expected cyc-old active=false, got %v", cm["active"])
+		}
+	}
+	if !foundActive {
+		t.Error("active cycle cyc-cur not found in response")
+	}
+}
+
+func TestAPIGetCyclesEmptyNative(t *testing.T) {
+	r := testRelay(t)
+	_, _ = r.DB.DispatchTask("p1", "dev", "user", "native only", "", "P2", nil, nil)
+
+	w := doAPI(r, "GET", "/cycles?project=p1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	cycles := decodeJSONArray(t, w)
+	if len(cycles) != 0 {
+		t.Errorf("expected 0 cycles in native mode, got %d", len(cycles))
+	}
+}
+
 // --- Profile API Tests ---
 
 func TestAPIGetProfiles(t *testing.T) {
@@ -723,4 +873,3 @@ func TestAPIGetActivity(t *testing.T) {
 		t.Errorf("expected 0 sessions with nil ingester, got %d", len(sessions))
 	}
 }
-
