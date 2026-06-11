@@ -565,13 +565,34 @@ func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to get thread: %v", err)), nil
 	}
-	if messages == nil {
-		messages = []models.Message{}
+
+	formatted := make([]map[string]any, len(messages))
+	for i, m := range messages {
+		entry := map[string]any{
+			"id":         m.ID,
+			"from":       m.From,
+			"to":         m.To,
+			"type":       m.Type,
+			"subject":    m.Subject,
+			"content":    m.Content,
+			"created_at": m.CreatedAt,
+			"priority":   m.Priority,
+		}
+		if m.ReplyTo != nil {
+			entry["reply_to"] = *m.ReplyTo
+		}
+		if m.ConversationID != nil {
+			entry["conversation_id"] = *m.ConversationID
+		}
+		if m.Metadata != "" && m.Metadata != "{}" {
+			entry["metadata"] = m.Metadata
+		}
+		formatted[i] = entry
 	}
 
 	return h.resultJSONTracked(resolveProject(ctx, req), "", "get_thread", map[string]any{
-		"count":    len(messages),
-		"messages": messages,
+		"count":    len(formatted),
+		"messages": formatted,
 	})
 }
 
@@ -774,7 +795,9 @@ func (h *Handlers) HandleGetConversationMessages(ctx context.Context, req mcp.Ca
 			entry["content"] = c
 		default: // "full"
 			entry["content"] = m.Content
-			entry["metadata"] = m.Metadata
+			if m.Metadata != "" && m.Metadata != "{}" {
+				entry["metadata"] = m.Metadata
+			}
 		}
 		formatted[i] = entry
 	}
