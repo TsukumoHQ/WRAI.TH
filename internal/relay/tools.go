@@ -74,6 +74,7 @@ func getInboxTool() mcp.Tool {
 		mcp.WithString("from", mcp.Description("Filter by sender")),
 		mcp.WithString("since", mcp.Description("Only messages after this ISO timestamp")),
 		mcp.WithBoolean("exclude_broadcasts", mcp.Description("Exclude broadcasts (default false)")),
+		mcp.WithString("format", mcp.Description("'json' (default) or 'table' (TSV, ~half the tokens)"), mcp.Enum("json", "table")),
 	)
 }
 
@@ -99,6 +100,7 @@ func listAgentsTool() mcp.Tool {
 		"list_agents",
 		mcp.WithDescription("List registered agents and their status."),
 		projectParam,
+		mcp.WithString("format", mcp.Description("'json' (default) or 'table' (TSV, ~half the tokens)"), mcp.Enum("json", "table")),
 	)
 }
 
@@ -254,6 +256,7 @@ func listMemoriesTool() mcp.Tool {
 		mcp.WithArray("tags", mcp.Description("Filter by tags"), mcp.WithStringItems()),
 		mcp.WithString("agent", mcp.Description("Filter by author")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
+		mcp.WithString("format", mcp.Description("'json' (default) or 'table' (TSV, ~half the tokens)"), mcp.Enum("json", "table")),
 	)
 }
 
@@ -439,6 +442,7 @@ func listTasksTool() mcp.Tool {
 		mcp.WithString("board_id", mcp.Description("Filter by board")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
 		mcp.WithBoolean("include_archived", mcp.Description("Include archived (default false)")),
+		mcp.WithString("format", mcp.Description("'json' (default) or 'table' (TSV, ~half the tokens)"), mcp.Enum("json", "table")),
 	)
 }
 

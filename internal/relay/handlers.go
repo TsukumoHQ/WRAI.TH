@@ -86,6 +86,50 @@ func (h *Handlers) resultJSONTracked(project, agent, tool string, data any) (*mc
 	return mcp.NewToolResultText(string(b)), nil
 }
 
+// resultTextTracked records token usage for a plain-text result (table format).
+func (h *Handlers) resultTextTracked(project, agent, tool, text string) (*mcp.CallToolResult, error) {
+	select {
+	case h.tokenCh <- db.TokenRecord{
+		Project:   project,
+		Agent:     agent,
+		Tool:      tool,
+		Bytes:     len(text),
+		CreatedAt: time.Now().UTC().Format(time.RFC3339),
+	}:
+	default:
+	}
+	return mcp.NewToolResultText(text), nil
+}
+
+// renderTable renders rows as TSV: one header line, then one line per row.
+// Keys are paid once instead of once per element — roughly half the tokens
+// of the equivalent JSON for homogeneous lists.
+func renderTable(header []string, rows [][]string) string {
+	var sb strings.Builder
+	sb.WriteString(strings.Join(header, "\t"))
+	for _, row := range rows {
+		sb.WriteByte('\n')
+		for i, cell := range row {
+			if i > 0 {
+				sb.WriteByte('\t')
+			}
+			cell = strings.NewReplacer("\t", "  ", "\n", " ", "\r", "").Replace(cell)
+			if cell == "" {
+				cell = "-"
+			}
+			sb.WriteString(cell)
+		}
+	}
+	return sb.String()
+}
+
+func strOrDash(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
 // HandleWhoami finds the caller's Claude Code session by grepping transcripts for a unique salt.
 func (h *Handlers) HandleWhoami(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	salt := req.GetString("salt", "")
@@ -527,6 +571,19 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 		formatted[i] = entry
 	}
 
+	if req.GetString("format", "json") == "table" {
+		rows := make([][]string, len(messages))
+		for i, m := range messages {
+			content, _ := formatted[i]["content"].(string)
+			rows[i] = []string{
+				m.ID, strOrDash(m.DeliveryID), m.From, m.To, m.Type,
+				m.Priority, m.CreatedAt, m.Subject, content,
+			}
+		}
+		table := renderTable([]string{"id", "delivery_id", "from", "to", "type", "priority", "created_at", "subject", "content"}, rows)
+		return h.resultTextTracked(project, agent, "get_inbox", fmt.Sprintf("%d messages for %s\n%s", len(messages), agent, table))
+	}
+
 	return h.resultJSONTracked(project, agent, "get_inbox", map[string]any{
 		"agent":    agent,
 		"count":    len(messages),
@@ -638,6 +695,19 @@ func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest
 			}
 		}
 		result = append(result, aa)
+	}
+
+	if req.GetString("format", "json") == "table" {
+		rows := make([][]string, len(result))
+		for i, a := range result {
+			exec := ""
+			if a.IsExecutive {
+				exec = "yes"
+			}
+			rows[i] = []string{a.Name, a.Role, a.Status, exec, a.LastSeen, a.Activity, a.Description}
+		}
+		table := renderTable([]string{"name", "role", "status", "executive", "last_seen", "activity", "description"}, rows)
+		return h.resultTextTracked(project, "", "list_agents", fmt.Sprintf("%d agents\n%s", len(result), table))
 	}
 
 	return h.resultJSONTracked(project, "", "list_agents", map[string]any{
@@ -1177,6 +1247,16 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 			"updated_at": m.UpdatedAt,
 			"conflict":   m.ConflictWith != nil,
 		}
+	}
+
+	if req.GetString("format", "json") == "table" {
+		rows := make([][]string, len(memories))
+		for i, m := range memories {
+			val, _ := truncated[i]["value"].(string)
+			rows[i] = []string{m.Key, m.Scope, m.AgentName, m.Confidence, m.Tags, val, m.UpdatedAt}
+		}
+		table := renderTable([]string{"key", "scope", "agent", "confidence", "tags", "value", "updated_at"}, rows)
+		return h.resultTextTracked(project, "", "list_memories", fmt.Sprintf("%d memories\n%s", len(memories), table))
 	}
 
 	return h.resultJSONTracked(project, "", "list_memories", map[string]any{
@@ -1910,6 +1990,18 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 			truncated := (*tasks[i].Result)[:200] + "…"
 			tasks[i].Result = &truncated
 		}
+	}
+
+	if req.GetString("format", "json") == "table" {
+		rows := make([][]string, len(tasks))
+		for i, t := range tasks {
+			rows[i] = []string{
+				t.ID, t.Status, t.Priority, t.ProfileSlug, strOrDash(t.AssignedTo),
+				t.Title, t.Description, strOrDash(t.Result),
+			}
+		}
+		table := renderTable([]string{"id", "status", "priority", "profile", "assigned_to", "title", "description", "result"}, rows)
+		return h.resultTextTracked(project, "", "list_tasks", fmt.Sprintf("%d tasks\n%s", len(tasks), table))
 	}
 
 	return h.resultJSONTracked(project, "", "list_tasks", map[string]any{

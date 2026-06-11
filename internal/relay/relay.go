@@ -45,91 +45,26 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 		server.WithToolCapabilities(false),
 		server.WithLogging(),
 		server.WithRecovery(),
+		server.WithToolFilter(toolsModeFilter),
 	)
 
 	events := NewEventBus()
 	registry := NewSessionRegistry(mcpSrv)
 	handlers := NewHandlers(database, registry, ingester, events)
 
-	// Register all tools
-	mcpSrv.AddTools(
-		server.ServerTool{Tool: whoamiTool(), Handler: handlers.HandleWhoami},
-		server.ServerTool{Tool: registerAgentTool(), Handler: handlers.HandleRegisterAgent},
-		server.ServerTool{Tool: sendMessageTool(), Handler: handlers.HandleSendMessage},
-		server.ServerTool{Tool: getInboxTool(), Handler: handlers.HandleGetInbox},
-		server.ServerTool{Tool: ackDeliveryTool(), Handler: handlers.HandleAckDelivery},
-		server.ServerTool{Tool: getThreadTool(), Handler: handlers.HandleGetThread},
-		server.ServerTool{Tool: listAgentsTool(), Handler: handlers.HandleListAgents},
-		server.ServerTool{Tool: markReadTool(), Handler: handlers.HandleMarkRead},
-		server.ServerTool{Tool: createConversationTool(), Handler: handlers.HandleCreateConversation},
-		server.ServerTool{Tool: listConversationsTool(), Handler: handlers.HandleListConversations},
-		server.ServerTool{Tool: getConversationMessagesTool(), Handler: handlers.HandleGetConversationMessages},
-		server.ServerTool{Tool: inviteToConversationTool(), Handler: handlers.HandleInviteToConversation},
-		server.ServerTool{Tool: leaveConversationTool(), Handler: handlers.HandleLeaveConversation},
-		server.ServerTool{Tool: archiveConversationTool(), Handler: handlers.HandleArchiveConversation},
-		// Memory tools
-		server.ServerTool{Tool: setMemoryTool(), Handler: handlers.HandleSetMemory},
-		server.ServerTool{Tool: getMemoryTool(), Handler: handlers.HandleGetMemory},
-		server.ServerTool{Tool: searchMemoryTool(), Handler: handlers.HandleSearchMemory},
-		server.ServerTool{Tool: listMemoriesTool(), Handler: handlers.HandleListMemories},
-		server.ServerTool{Tool: deleteMemoryTool(), Handler: handlers.HandleDeleteMemory},
-		server.ServerTool{Tool: resolveConflictTool(), Handler: handlers.HandleResolveConflict},
-		// Profile tools
-		server.ServerTool{Tool: registerProfileTool(), Handler: handlers.HandleRegisterProfile},
-		server.ServerTool{Tool: getProfileTool(), Handler: handlers.HandleGetProfile},
-		server.ServerTool{Tool: listProfilesTool(), Handler: handlers.HandleListProfiles},
-		server.ServerTool{Tool: findProfilesTool(), Handler: handlers.HandleFindProfiles},
-		// Task tools
-		server.ServerTool{Tool: dispatchTaskTool(), Handler: handlers.HandleDispatchTask},
-		server.ServerTool{Tool: claimTaskTool(), Handler: handlers.HandleClaimTask},
-		server.ServerTool{Tool: startTaskTool(), Handler: handlers.HandleStartTask},
-		server.ServerTool{Tool: completeTaskTool(), Handler: handlers.HandleCompleteTask},
-		server.ServerTool{Tool: blockTaskTool(), Handler: handlers.HandleBlockTask},
-		server.ServerTool{Tool: resumeTaskTool(), Handler: handlers.HandleResumeTask},
-		server.ServerTool{Tool: cancelTaskTool(), Handler: handlers.HandleCancelTask},
-		server.ServerTool{Tool: getTaskTool(), Handler: handlers.HandleGetTask},
-		server.ServerTool{Tool: listTasksTool(), Handler: handlers.HandleListTasks},
-		server.ServerTool{Tool: updateTaskTool(), Handler: handlers.HandleUpdateTask},
-		server.ServerTool{Tool: archiveTasksTool(), Handler: handlers.HandleArchiveTasks},
-		server.ServerTool{Tool: moveTaskTool(), Handler: handlers.HandleMoveTask},
-		server.ServerTool{Tool: batchCompleteTasksTool(), Handler: handlers.HandleBatchCompleteTasks},
-		server.ServerTool{Tool: batchDispatchTasksTool(), Handler: handlers.HandleBatchDispatchTasks},
-		// Boards
-		server.ServerTool{Tool: createBoardTool(), Handler: handlers.HandleCreateBoard},
-		server.ServerTool{Tool: listBoardsTool(), Handler: handlers.HandleListBoards},
-		server.ServerTool{Tool: archiveBoardTool(), Handler: handlers.HandleArchiveBoard},
-		server.ServerTool{Tool: deleteBoardTool(), Handler: handlers.HandleDeleteBoard},
-		// Goals
-		server.ServerTool{Tool: createGoalTool(), Handler: handlers.HandleCreateGoal},
-		server.ServerTool{Tool: listGoalsTool(), Handler: handlers.HandleListGoals},
-		server.ServerTool{Tool: getGoalTool(), Handler: handlers.HandleGetGoal},
-		server.ServerTool{Tool: updateGoalTool(), Handler: handlers.HandleUpdateGoal},
-		server.ServerTool{Tool: getGoalCascadeTool(), Handler: handlers.HandleGetGoalCascade},
-		// File locks
-		server.ServerTool{Tool: claimFilesTool(), Handler: handlers.HandleClaimFiles},
-		server.ServerTool{Tool: releaseFilesTool(), Handler: handlers.HandleReleaseFiles},
-		server.ServerTool{Tool: listLocksTool(), Handler: handlers.HandleListLocks},
-		// Agent lifecycle
-		server.ServerTool{Tool: deactivateAgentTool(), Handler: handlers.HandleDeactivateAgent},
-		server.ServerTool{Tool: deleteAgentTool(), Handler: handlers.HandleDeleteAgent},
-		server.ServerTool{Tool: sleepAgentTool(), Handler: handlers.HandleSleepAgent},
-		// Project lifecycle
-		server.ServerTool{Tool: createProjectTool(), Handler: handlers.HandleCreateProject},
-		server.ServerTool{Tool: deleteProjectTool(), Handler: handlers.HandleDeleteProject},
-		// Context recall (memory + completed tasks; reduces repeated context)
-		server.ServerTool{Tool: queryContextTool(), Handler: handlers.HandleQueryContext},
-		// Session context
-		server.ServerTool{Tool: getSessionContextTool(), Handler: handlers.HandleGetSessionContext},
-		// Teams + Orgs
-		server.ServerTool{Tool: createOrgTool(), Handler: handlers.HandleCreateOrg},
-		server.ServerTool{Tool: listOrgsTool(), Handler: handlers.HandleListOrgs},
-		server.ServerTool{Tool: createTeamTool(), Handler: handlers.HandleCreateTeam},
-		server.ServerTool{Tool: listTeamsTool(), Handler: handlers.HandleListTeams},
-		server.ServerTool{Tool: addTeamMemberTool(), Handler: handlers.HandleAddTeamMember},
-		server.ServerTool{Tool: removeTeamMemberTool(), Handler: handlers.HandleRemoveTeamMember},
-		server.ServerTool{Tool: getTeamInboxTool(), Handler: handlers.HandleGetTeamInbox},
-		server.ServerTool{Tool: addNotifyChannelTool(), Handler: handlers.HandleAddNotifyChannel},
+	// Register every tool from the registry (single source of truth in
+	// toolset.go), plus the discovery pair used by ?tools=discovery
+	// connections. toolsModeFilter decides which side a session sees.
+	regTools := handlers.toolRegistry()
+	serverTools := make([]server.ServerTool, 0, len(regTools)+2)
+	for _, rt := range regTools {
+		serverTools = append(serverTools, rt.ServerTool)
+	}
+	serverTools = append(serverTools,
+		server.ServerTool{Tool: discoverToolsTool(), Handler: handlers.HandleDiscoverTools},
+		server.ServerTool{Tool: callToolTool(), Handler: handlers.HandleCallTool},
 	)
+	mcpSrv.AddTools(serverTools...)
 
 	httpSrv := server.NewStreamableHTTPServer(
 		mcpSrv,
