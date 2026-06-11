@@ -207,6 +207,21 @@ main.mode-kanban #memories-panel { display: none !important; }
 main.mode-kanban #tasks-panel { display: none !important; }
 main.mode-kanban #vault-panel { display: none !important; }
 main.mode-kanban #ops-panel { display: none !important; }
+main.mode-kanban #stats-panel { display: none !important; }
+
+/* Stats mode — full-width analytics panel */
+main.mode-stats #left-column { display: none !important; }
+main.mode-stats #stats-panel { flex: 1; display: flex !important; }
+main.mode-stats #kanban-panel { display: none !important; }
+main.mode-stats #messages-panel { display: none !important; }
+main.mode-stats #memories-panel { display: none !important; }
+main.mode-stats #tasks-panel { display: none !important; }
+main.mode-stats #vault-panel { display: none !important; }
+main.mode-stats #ops-panel { display: none !important; }
+
+main.mode-canvas #stats-panel { display: none; }
+main.mode-detail #stats-panel { display: none; }
+body.view-galaxy #stats-panel { display: none !important; }
 
 main.mode-vault #left-column { display: none !important; }
 main.mode-vault #vault-panel { flex: 1; display: flex !important; }
