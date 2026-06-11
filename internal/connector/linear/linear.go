@@ -53,14 +53,18 @@ var _ connector.TaskConnector = (*Connector)(nil)
 // New builds a Linear connector from config. The project the mirror is stored
 // under defaults to the lowercased team key, falling back to "default".
 func New(database *db.DB, cfg config.Config) *Connector {
-	return NewWithParams(database, cfg.LinearAPIKey, cfg.LinearTeamKey, cfg.LinearWebhookSecret)
+	return NewWithParams(database, cfg.LinearAPIKey, cfg.LinearTeamKey, cfg.LinearWebhookSecret, "")
 }
 
 // NewWithParams builds a connector from explicit credentials — used by the
 // settings-driven runtime (re)configuration where values come from the DB
-// rather than the environment.
-func NewWithParams(database *db.DB, apiKey, teamKey, secret string) *Connector {
-	project := strings.ToLower(strings.TrimSpace(teamKey))
+// rather than the environment. project overrides the relay project the mirror
+// lives under; empty = lowercased team key.
+func NewWithParams(database *db.DB, apiKey, teamKey, secret, project string) *Connector {
+	project = strings.ToLower(strings.TrimSpace(project))
+	if project == "" {
+		project = strings.ToLower(strings.TrimSpace(teamKey))
+	}
 	if project == "" {
 		project = "default"
 	}

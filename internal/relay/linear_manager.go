@@ -15,6 +15,7 @@ const (
 	setLinearEnabled  = "linear_enabled"  // "1" / "0"
 	setLinearAPIKey   = "linear_api_key"  // lin_api_…
 	setLinearTeamKey  = "linear_team_key" // e.g. SYN
+	setLinearProject  = "linear_project"  // relay project hosting the mirror (default: lowercased team key)
 	setLinearInterval = "linear_reconcile_interval"
 )
 
@@ -75,7 +76,7 @@ func (r *Relay) ReconfigureLinear() {
 		return
 	}
 
-	conn := linearconn.NewWithParams(r.DB, apiKey, teamKey, r.Config.LinearWebhookSecret)
+	conn := linearconn.NewWithParams(r.DB, apiKey, teamKey, r.Config.LinearWebhookSecret, r.DB.GetSetting(setLinearProject))
 	conn.SetEventSink(func(e connector.TaskEvent) {
 		r.Events.EmitSemantic(e.Type, e.Project, e.Agent, e.Payload)
 	})
@@ -92,11 +93,14 @@ func (r *Relay) ReconfigureLinear() {
 // linearProjectName is the relay project the Linear mirror lives under (the
 // lowercased team key). Empty when the connector is disabled — the UI uses it
 // to scope read-only mode to the mirror project instead of globally.
-func linearProjectName(teamKey string, enabled bool) string {
+func (r *Relay) linearProjectName(teamKey string, enabled bool) string {
 	if !enabled {
 		return ""
 	}
-	p := strings.ToLower(strings.TrimSpace(teamKey))
+	p := strings.ToLower(strings.TrimSpace(r.DB.GetSetting(setLinearProject)))
+	if p == "" {
+		p = strings.ToLower(strings.TrimSpace(teamKey))
+	}
 	if p == "" {
 		p = "default"
 	}

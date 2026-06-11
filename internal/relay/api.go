@@ -287,7 +287,7 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 		"linear": map[string]any{
 			"enabled":        enabled,
 			"team_key":       teamKey,
-			"project":        linearProjectName(teamKey, enabled),
+			"project":        r.linearProjectName(teamKey, enabled),
 			"api_key_masked": masked,
 			"interval":       interval.String(),
 			"source":         source,
