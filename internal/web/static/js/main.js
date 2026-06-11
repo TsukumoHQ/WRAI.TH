@@ -1689,7 +1689,8 @@ function _loadDysonSettings() {
     // Mode-awareness: linear → read-only board; native → writable .kb-form.
     if (settings && typeof settings.linear_mode === "boolean") {
       linearMode = settings.linear_mode;
-      kanbanBoard.setMode(linearMode);
+      linearProject = (settings.linear && settings.linear.project) || "";
+      kanbanBoard.setMode(isLinearBoard());
     }
   }).catch(() => {});
 }
@@ -2332,7 +2333,14 @@ function updateConvFilterOptions() {
 
 let currentMode = "canvas"; // "canvas" | "detail" | "kanban"
 let viewMode = "galaxy"; // "galaxy" | "colony" — top-level screen state
-let linearMode = false; // true when the relay mirrors Linear (board is read-only)
+let linearMode = false; // true when the relay mirrors Linear (legacy global flag)
+let linearProject = ""; // the mirror project (e.g. "syn") — only ITS board is read-only
+
+// Read-only applies to the Linear mirror project only; native projects keep
+// their writable board even while the connector runs.
+function isLinearBoard() {
+  return !!linearProject && (focusedProject || "default") === linearProject;
+}
 let projectsData = []; // cached ProjectInfo[] from /api/projects
 let colonyProject = null; // project name when in colony view
 
@@ -2348,7 +2356,7 @@ function setMode(mode) {
 
   // Show/hide kanban — fetch board (mirror read-replica) + cycles BEFORE showing.
   if (mode === "kanban") {
-    kanbanBoard.setMode(!!linearMode);
+    kanbanBoard.setMode(isLinearBoard());
     const project = focusedProject || "default";
     Promise.all([
       client.fetchCycles(project),
@@ -2977,7 +2985,7 @@ shortcuts.register("/", "search", "Focus search", () => {
 });
 shortcuts.register("n", "new-task", "New task", () => {
   if (viewMode !== "colony") return;
-  if (linearMode) return; // read-only in Linear mode — planning lives in Linear
+  if (isLinearBoard()) return; // read-only on the mirror project — planning lives in Linear
   if (currentMode !== "kanban") setMode("kanban");
   kanbanBoard._showCreateForm();
 });
@@ -3113,6 +3121,7 @@ if (settingsBtn && settingsModal) {
     await client.updateSettings(payload);
     const st = await client.fetchSettings();
     linearMode = !!(st && st.linear_mode);
+    linearProject = (st && st.linear && st.linear.project) || "";
     statusEl.textContent = st?.linear?.enabled
       ? `actif — team ${st.linear.team_key}, poll ${st.linear.interval}`
       : "désactivé";

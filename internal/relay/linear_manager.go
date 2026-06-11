@@ -88,3 +88,17 @@ func (r *Relay) ReconfigureLinear() {
 	conn.StartReconcile(interval, stop)
 	log.Printf("[linear] connector active (team=%s, interval=%s, source=%s)", teamKey, interval, source)
 }
+
+// linearProjectName is the relay project the Linear mirror lives under (the
+// lowercased team key). Empty when the connector is disabled — the UI uses it
+// to scope read-only mode to the mirror project instead of globally.
+func linearProjectName(teamKey string, enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	p := strings.ToLower(strings.TrimSpace(teamKey))
+	if p == "" {
+		p = "default"
+	}
+	return p
+}
