@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>wrai.th · v2</title>
+  <link rel="stylesheet" href="./v2.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="hdr">
+      <div class="hdr-left">
+        <span class="wordmark">wrai<span class="dot">.</span>th</span>
+        <span class="ver">v2</span>
+        <nav class="tabs" aria-label="Sections">
+          <button class="tab is-active" aria-current="page">overview</button>
+          <button class="tab is-soon" disabled title="Coming in a later phase">board<span class="soon">soon</span></button>
+          <button class="tab is-soon" disabled title="Coming in a later phase">stats<span class="soon">soon</span></button>
+          <button class="tab is-soon" disabled title="Coming in a later phase">notifications<span class="soon">soon</span></button>
+        </nav>
+      </div>
+      <div class="hdr-right">
+        <span class="live" id="liveStatus" data-state="connecting">
+          <span class="live-dot"></span><span class="live-label" id="liveLabel">connecting</span>
+        </span>
+        <label class="proj">
+          <select id="projectSelect" aria-label="Project"></select>
+        </label>
+      </div>
+    </header>
+
+    <main class="main" id="main">
+      <!-- KPI row -->
+      <section class="kpis" id="kpis" aria-label="Key metrics">
+        <article class="card kpi" data-skel><span class="kpi-label">tasks done</span><span class="kpi-num">—</span><span class="kpi-sub"></span><svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"></svg></article>
+        <article class="card kpi" data-skel><span class="kpi-label">in progress</span><span class="kpi-num">—</span><span class="kpi-sub"></span></article>
+        <article class="card kpi" data-skel><span class="kpi-label">blocked</span><span class="kpi-num">—</span><span class="kpi-sub"></span></article>
+        <article class="card kpi" data-skel><span class="kpi-label">tokens · 24h</span><span class="kpi-num">—</span><span class="kpi-sub"></span></article>
+      </section>
+
+      <!-- Distribution -->
+      <section class="card dist" id="dist" aria-label="Status distribution" data-skel>
+        <div class="card-head"><span class="card-label">status distribution</span><span class="card-meta" id="distTotal"></span></div>
+        <div class="distbar" id="distBar"></div>
+        <div class="legend" id="distLegend"></div>
+      </section>
+
+      <!-- Two-column zone -->
+      <section class="zone">
+        <article class="card load" id="loadCard" aria-label="Agent load" data-skel>
+          <div class="card-head"><span class="card-label">agent load</span><span class="card-meta" id="loadMeta"></span></div>
+          <div class="load-body" id="loadBody"></div>
+        </article>
+        <article class="card feed" id="feedCard" aria-label="Activity feed">
+          <div class="card-head"><span class="card-label">activity</span><span class="card-meta" id="feedMeta">live</span></div>
+          <div class="feed-body" id="feedBody"></div>
+        </article>
+      </section>
+    </main>
+  </div>
+  <script type="module" src="./v2.js"></script>
+</body>
+</html>
