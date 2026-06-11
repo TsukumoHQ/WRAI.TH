@@ -42,7 +42,7 @@ func TestConcurrentReadsAndWrite(t *testing.T) {
 	d := testDB(t)
 
 	// Seed an agent
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 
 	var wg sync.WaitGroup
 	var errors atomic.Int32
@@ -89,7 +89,7 @@ func TestConcurrentReadsAndWrite(t *testing.T) {
 func TestConcurrentWriters(t *testing.T) {
 	d := testDB(t)
 
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 
 	var wg sync.WaitGroup
 	var errors atomic.Int32
@@ -122,7 +122,7 @@ func TestOptimizeNoCorruption(t *testing.T) {
 	d := testDB(t)
 
 	// Insert some data
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	for i := 0; i < 10; i++ {
 		_, _ = d.InsertMessage("default", "bot-a", "bot-b", "notification", "test", fmt.Sprintf("msg-%d", i), "{}", "P2", 3600, nil, nil)
 	}
@@ -173,7 +173,7 @@ func TestReadAfterWrite(t *testing.T) {
 	d := testDB(t)
 
 	// Write via writer
-	_, _, _ = d.RegisterAgent("default", "bot-a", "tester", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "tester", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 
 	// Read via reader should see the write (WAL visibility)
 	agents, err := d.ListAgents("default")
@@ -190,7 +190,7 @@ func TestReadAfterWrite(t *testing.T) {
 
 func TestReadsNeverBlockedByWrite(t *testing.T) {
 	d := testDB(t)
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 
 	// Start a long write transaction on the writer
 	tx, err := d.conn.Begin()
@@ -226,7 +226,7 @@ func TestReadsNeverBlockedByWrite(t *testing.T) {
 
 func TestWritesDontUseManyConns(t *testing.T) {
 	d := testDB(t)
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 
 	// Writer pool has MaxOpenConns=1. Concurrent writes should serialize, not error.
 	var wg sync.WaitGroup
@@ -257,7 +257,7 @@ func TestMixedReadWriteFunction(t *testing.T) {
 	d := testDB(t)
 
 	// RegisterAgent reads (check existing) then writes (insert) — tests mixed path
-	agent1, isRespawn1, err := d.RegisterAgent("default", "bot-a", "tester", "", nil, nil, false, nil, "[]", 0)
+	agent1, isRespawn1, err := d.RegisterAgent("default", "bot-a", "tester", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("register agent: %v", err)
 	}
@@ -269,7 +269,7 @@ func TestMixedReadWriteFunction(t *testing.T) {
 	}
 
 	// Re-register same agent — should read existing via writer, then update
-	agent2, isRespawn2, err := d.RegisterAgent("default", "bot-a", "updated", "", nil, nil, false, nil, "[]", 0)
+	agent2, isRespawn2, err := d.RegisterAgent("default", "bot-a", "updated", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("re-register agent: %v", err)
 	}
@@ -323,7 +323,7 @@ func TestCloseCheckpoint(t *testing.T) {
 	d := &DB{conn: writer, reader: reader, path: dbPath}
 
 	// Insert data to create WAL entries
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	for i := 0; i < 50; i++ {
 		_, _ = d.InsertMessage("default", "bot-a", "bot-b", "notification", "test", fmt.Sprintf("msg-%d", i), "{}", "P2", 3600, nil, nil)
 	}
@@ -344,10 +344,130 @@ func TestCloseCheckpoint(t *testing.T) {
 	}
 }
 
+func strptr(s string) *string { return &s }
+
+// TestRegisterAgentPreservesProfileSlugOnOmit reproduces the production bug:
+// orchestrator registers an agent WITH profile_slug, then the agent's own
+// in-pane /relay register re-registers WITHOUT profile_slug (per skill/relay.md).
+// The slug must survive — NULLing it hides the agent's dispatched/pending tasks.
+func TestRegisterAgentPreservesProfileSlugOnOmit(t *testing.T) {
+	d := testDB(t)
+
+	// Orchestrator registers with a profile slug.
+	_, _, err := d.RegisterAgent("default", "bot-a", "dev", "", nil, strptr("backend"), false, nil, "[]", 0, RegisterOptions{
+		ProfileSlugSet: true,
+	})
+	if err != nil {
+		t.Fatalf("initial register: %v", err)
+	}
+
+	// Agent self-registers WITHOUT profile_slug (omitted → nil, not "set").
+	agent, isRespawn, err := d.RegisterAgent("default", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if !isRespawn {
+		t.Fatal("expected respawn on re-register")
+	}
+	if agent.ProfileSlug == nil || *agent.ProfileSlug != "backend" {
+		t.Fatalf("profile_slug must survive omitted re-register, got %v", agent.ProfileSlug)
+	}
+
+	// Verify persisted (not just the returned struct).
+	got, _ := d.GetAgent("default", "bot-a")
+	if got.ProfileSlug == nil || *got.ProfileSlug != "backend" {
+		t.Fatalf("persisted profile_slug must survive, got %v", got.ProfileSlug)
+	}
+}
+
+// TestRegisterAgentPreservesReportsToOnOmit ensures org hierarchy survives respawn.
+func TestRegisterAgentPreservesReportsToOnOmit(t *testing.T) {
+	d := testDB(t)
+
+	_, _, _ = d.RegisterAgent("default", "lead", "lead", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
+	_, _, err := d.RegisterAgent("default", "bot-a", "dev", "", strptr("lead"), nil, false, nil, "[]", 0, RegisterOptions{
+		ReportsToSet: true,
+	})
+	if err != nil {
+		t.Fatalf("initial register: %v", err)
+	}
+
+	agent, _, err := d.RegisterAgent("default", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if agent.ReportsTo == nil || *agent.ReportsTo != "lead" {
+		t.Fatalf("reports_to must survive omitted re-register, got %v", agent.ReportsTo)
+	}
+}
+
+// TestRegisterAgentPreservesIsExecutiveOnOmit ensures executive flag survives respawn.
+func TestRegisterAgentPreservesIsExecutiveOnOmit(t *testing.T) {
+	d := testDB(t)
+
+	_, _, err := d.RegisterAgent("default", "cto", "cto", "", nil, nil, true, nil, "[]", 0, RegisterOptions{
+		IsExecutiveSet: true,
+	})
+	if err != nil {
+		t.Fatalf("initial register: %v", err)
+	}
+
+	agent, _, err := d.RegisterAgent("default", "cto", "cto", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if !agent.IsExecutive {
+		t.Fatal("is_executive must survive omitted re-register")
+	}
+}
+
+// TestRegisterAgentPreservesSessionIDOnOmit ensures activity-tracking session survives respawn.
+func TestRegisterAgentPreservesSessionIDOnOmit(t *testing.T) {
+	d := testDB(t)
+
+	_, _, _ = d.RegisterAgent("default", "bot-a", "dev", "", nil, nil, false, strptr("sess-123"), "[]", 0, RegisterOptions{
+		SessionIDSet: true,
+	})
+	agent, _, err := d.RegisterAgent("default", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if agent.SessionID == nil || *agent.SessionID != "sess-123" {
+		t.Fatalf("session_id must survive omitted re-register, got %v", agent.SessionID)
+	}
+}
+
+// TestRegisterAgentExplicitFieldsStillUpdate ensures preserve-on-omit does NOT
+// block legitimate updates: when a field IS provided, it must overwrite.
+func TestRegisterAgentExplicitFieldsStillUpdate(t *testing.T) {
+	d := testDB(t)
+
+	_, _, _ = d.RegisterAgent("default", "bot-a", "dev", "old", nil, strptr("backend"), false, nil, "[]", 0, RegisterOptions{
+		ProfileSlugSet: true,
+	})
+
+	// Re-register with a DIFFERENT profile slug (explicitly set) — must update.
+	agent, _, err := d.RegisterAgent("default", "bot-a", "dev2", "new", nil, strptr("frontend"), false, nil, "[]", 0, RegisterOptions{
+		ProfileSlugSet: true,
+	})
+	if err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	if agent.ProfileSlug == nil || *agent.ProfileSlug != "frontend" {
+		t.Fatalf("explicit profile_slug must update, got %v", agent.ProfileSlug)
+	}
+	if agent.Role != "dev2" {
+		t.Fatalf("role must update, got %s", agent.Role)
+	}
+	if agent.Description != "new" {
+		t.Fatalf("description must update, got %s", agent.Description)
+	}
+}
+
 func TestHeavyLoad(t *testing.T) {
 	d := testDB(t)
 
-	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("default", "bot-a", "test", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 
 	var wg sync.WaitGroup
 	var writeErrors, readErrors atomic.Int32

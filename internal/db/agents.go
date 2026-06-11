@@ -17,7 +17,20 @@ func scanAgent(row interface{ Scan(...any) error }) (models.Agent, error) {
 	return a, err
 }
 
-func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, profileSlug *string, isExecutive bool, sessionID *string, interestTags string, maxContextBytes int) (*models.Agent, bool, error) {
+// RegisterOptions carries presence flags for identity fields whose absence must be
+// distinguished from an explicit clear. At the MCP layer, an omitted optional param and
+// an explicitly-empty one both arrive as a nil *string (or zero bool), so the caller sets
+// the *Set flag only when the field was actually provided. On a re-register (respawn),
+// fields that were NOT provided are preserved from the existing row instead of being
+// clobbered to NULL/false. The flags are ignored on the initial insert.
+type RegisterOptions struct {
+	ReportsToSet   bool
+	ProfileSlugSet bool
+	IsExecutiveSet bool
+	SessionIDSet   bool
+}
+
+func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, profileSlug *string, isExecutive bool, sessionID *string, interestTags string, maxContextBytes int, opts RegisterOptions) (*models.Agent, bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	if interestTags == "" {
 		interestTags = "[]"
@@ -62,7 +75,26 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 		return nil, false, fmt.Errorf("query agent: %w", err)
 	}
 
-	// Existing agent — this is a respawn
+	// Existing agent — this is a respawn. Preserve identity fields that were NOT
+	// provided on this call (reports_to, profile_slug, is_executive, session_id), so a
+	// bare re-register (e.g. the agent's own in-pane /relay register, which omits
+	// profile_slug) does not clobber values set by the orchestrator. Fields like role,
+	// description, interest_tags and max_context_bytes always update — updating them is
+	// the point of a respawn. To clear an identity field, use the dedicated flows
+	// (deactivate_agent / delete_agent / remove_team_member).
+	if !opts.ReportsToSet {
+		reportsTo = a.ReportsTo
+	}
+	if !opts.ProfileSlugSet {
+		profileSlug = a.ProfileSlug
+	}
+	if !opts.IsExecutiveSet {
+		isExecutive = a.IsExecutive
+	}
+	if !opts.SessionIDSet {
+		sessionID = a.SessionID
+	}
+
 	_, err = d.conn.Exec(
 		"UPDATE agents SET role = ?, description = ?, last_seen = ?, reports_to = ?, profile_slug = ?, is_executive = ?, session_id = ?, interest_tags = ?, max_context_bytes = ?, status = 'active', deactivated_at = NULL WHERE name = ? AND project = ?",
 		role, description, now, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, name, project,

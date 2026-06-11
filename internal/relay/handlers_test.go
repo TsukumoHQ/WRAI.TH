@@ -108,6 +108,93 @@ func TestRegisterAgentRespawn(t *testing.T) {
 	}
 }
 
+// TestRegisterAgentRespawnPreservesProfileSlug reproduces the production bug end-to-end:
+// the orchestrator registers an agent WITH profile_slug, then the agent's own in-pane
+// /relay register (per skill/relay.md — never passes profile_slug) re-registers without it.
+// The slug must survive so list_tasks / session_context can route the agent's tasks.
+func TestRegisterAgentRespawnPreservesProfileSlug(t *testing.T) {
+	h := testHandlers(t)
+
+	// Orchestrator registers WITH profile_slug.
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project":      "test-proj",
+		"name":         "bot-a",
+		"role":         "developer",
+		"profile_slug": "backend",
+	}))
+
+	// Agent self-registers WITHOUT profile_slug (key omitted entirely).
+	res, _ := h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj",
+		"name":    "bot-a",
+		"role":    "developer",
+	}))
+	data := parseJSON(t, res)
+	agent := data["agent"].(map[string]any)
+	if agent["profile_slug"] != "backend" {
+		t.Fatalf("profile_slug must survive omitted re-register, got %v", agent["profile_slug"])
+	}
+}
+
+// TestRegisterAgentRespawnPreservesReportsTo ensures org hierarchy survives a respawn
+// that omits reports_to.
+func TestRegisterAgentRespawnPreservesReportsTo(t *testing.T) {
+	h := testHandlers(t)
+
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "lead", "role": "lead",
+	}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "bot-a", "role": "dev", "reports_to": "lead",
+	}))
+
+	res, _ := h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "bot-a", "role": "dev",
+	}))
+	data := parseJSON(t, res)
+	agent := data["agent"].(map[string]any)
+	if agent["reports_to"] != "lead" {
+		t.Fatalf("reports_to must survive omitted re-register, got %v", agent["reports_to"])
+	}
+}
+
+// TestRegisterAgentRespawnPreservesIsExecutive ensures the executive flag (and its
+// leadership-team membership) survives a respawn that omits is_executive.
+func TestRegisterAgentRespawnPreservesIsExecutive(t *testing.T) {
+	h := testHandlers(t)
+
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "cto", "role": "lead", "is_executive": true,
+	}))
+
+	res, _ := h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "cto", "role": "lead",
+	}))
+	data := parseJSON(t, res)
+	agent := data["agent"].(map[string]any)
+	if agent["is_executive"] != true {
+		t.Fatalf("is_executive must survive omitted re-register, got %v", agent["is_executive"])
+	}
+}
+
+// TestRegisterAgentExplicitSlugStillUpdates ensures preserve-on-omit does not block a
+// legitimate slug change when profile_slug IS provided on re-register.
+func TestRegisterAgentExplicitSlugStillUpdates(t *testing.T) {
+	h := testHandlers(t)
+
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "bot-a", "role": "dev", "profile_slug": "backend",
+	}))
+	res, _ := h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": "test-proj", "name": "bot-a", "role": "dev", "profile_slug": "frontend",
+	}))
+	data := parseJSON(t, res)
+	agent := data["agent"].(map[string]any)
+	if agent["profile_slug"] != "frontend" {
+		t.Fatalf("explicit profile_slug must update, got %v", agent["profile_slug"])
+	}
+}
+
 func TestRegisterAgentMissingName(t *testing.T) {
 	h := testHandlers(t)
 	res, _ := h.HandleRegisterAgent(ctx, call(map[string]any{
