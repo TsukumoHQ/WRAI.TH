@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	linearconn "agent-relay/internal/connector/linear"
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
 	"agent-relay/internal/models"
@@ -91,6 +92,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// Task endpoints
 	case path == "/tasks/human" && req.Method == http.MethodGet:
 		r.apiGetHumanTasks(w, req)
+	case path == "/tasks/board" && req.Method == http.MethodGet:
+		r.apiGetBoardTasks(w, req)
+	case path == "/cycles" && req.Method == http.MethodGet:
+		r.apiGetCycles(w, req)
 	case path == "/tasks/all" && req.Method == http.MethodGet:
 		r.apiGetAllTasks(w)
 	case path == "/tasks" && req.Method == http.MethodGet:
@@ -123,19 +128,6 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetTeams(w, req)
 	case strings.HasPrefix(path, "/teams/") && strings.HasSuffix(path, "/members") && req.Method == http.MethodGet:
 		r.apiGetTeamMembers(w, req, path)
-	// Goal endpoints
-	case path == "/goals/all" && req.Method == http.MethodGet:
-		r.apiGetAllGoals(w)
-	case path == "/goals/cascade" && req.Method == http.MethodGet:
-		r.apiGetGoalCascade(w, req)
-	case path == "/goals" && req.Method == http.MethodGet:
-		r.apiGetGoals(w, req)
-	case path == "/goals" && req.Method == http.MethodPost:
-		r.apiCreateGoal(w, req)
-	case strings.HasPrefix(path, "/goals/") && req.Method == http.MethodPut:
-		r.apiUpdateGoal(w, req, path)
-	case strings.HasPrefix(path, "/goals/") && req.Method == http.MethodGet:
-		r.apiGetGoal(w, req, path)
 	// Board endpoints
 	case path == "/boards" && req.Method == http.MethodGet:
 		r.apiGetBoards(w, req)
@@ -150,6 +142,31 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetTokenUsageByAgent(w, req)
 	case path == "/token-usage/timeseries" && req.Method == http.MethodGet:
 		r.apiGetTokenTimeSeries(w, req)
+	// Agentic analytics (stats panel)
+	case path == "/stats" && req.Method == http.MethodGet:
+		r.apiGetAgentStats(w, req)
+	// Notification rules (configurable event→action→target rules engine)
+	case path == "/notification-rules" && req.Method == http.MethodGet:
+		r.apiGetNotificationRules(w, req)
+	case path == "/notification-rules" && req.Method == http.MethodPost:
+		r.apiCreateNotificationRule(w, req)
+	case strings.HasPrefix(path, "/notification-rules/") && strings.HasSuffix(path, "/test-fire") && req.Method == http.MethodPost:
+		r.apiTestFireNotificationRule(w, req, path)
+	case strings.HasPrefix(path, "/notification-rules/") && req.Method == http.MethodPatch:
+		r.apiPatchNotificationRule(w, req, path)
+	case strings.HasPrefix(path, "/notification-rules/") && req.Method == http.MethodDelete:
+		r.apiDeleteNotificationRule(w, path)
+	case path == "/notification-deliveries" && req.Method == http.MethodGet:
+		r.apiGetNotificationDeliveries(w, req)
+	case path == "/notification-events" && req.Method == http.MethodPost:
+		r.apiEmitNotificationEvent(w, req)
+	// Linear connector inbound webhook (404s unless the connector is active).
+	case path == "/connectors/linear/webhook" && req.Method == http.MethodPost:
+		r.apiLinearWebhook(w, req)
+	case path == "/linear/teams" && req.Method == http.MethodGet:
+		r.apiLinearTeams(w, req)
+	case path == "/agents/avatar" && req.Method == http.MethodPut:
+		r.apiSetAgentAvatar(w, req)
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -182,13 +199,30 @@ func (r *Relay) apiHealth(w http.ResponseWriter) {
 	if v == "" {
 		v = "dev"
 	}
-	writeJSON(w, map[string]any{
-		"status":  "ok",
-		"version": v,
-		"uptime":  time.Since(r.StartedAt).String(),
-		"started": r.StartedAt.Format(time.RFC3339),
-		"db":      stats,
-	})
+	health := map[string]any{
+		"status":      "ok",
+		"version":     v,
+		"uptime":      time.Since(r.StartedAt).String(),
+		"started":     r.StartedAt.Format(time.RFC3339),
+		"db":          stats,
+		"linear_mode": r.Config.LinearMode,
+		"mode":        modeString(r.Config.LinearMode),
+	}
+	// When the Linear connector is active, surface its live status
+	// (last_webhook_at, last_reconcile_at, writer failure count, cache state).
+	if lc := r.LinearConnector(); lc != nil {
+		health["linear_connector"] = lc.Status()
+	}
+	writeJSON(w, health)
+}
+
+// modeString maps the linear_mode flag to a human-readable mode label the web
+// UI uses to switch behavior (writable native board vs. read-replica mirror).
+func modeString(linear bool) string {
+	if linear {
+		return "linear"
+	}
+	return "native"
 }
 
 func (r *Relay) apiGetProject(w http.ResponseWriter, name string) {
@@ -240,7 +274,27 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 	if sunType == "" {
 		sunType = "1"
 	}
-	writeJSON(w, map[string]string{"sun_type": sunType})
+	apiKey, teamKey, enabled, interval, source := r.effectiveLinearConfig()
+	masked := ""
+	if apiKey != "" {
+		masked = "set"
+		if len(apiKey) > 8 {
+			masked = "…" + apiKey[len(apiKey)-4:]
+		}
+	}
+	writeJSON(w, map[string]any{
+		"sun_type":    sunType,
+		"linear_mode": enabled,
+		"mode":        modeString(enabled),
+		"linear": map[string]any{
+			"enabled":        enabled,
+			"team_key":       teamKey,
+			"project":        r.linearProjectName(teamKey, enabled),
+			"api_key_masked": masked,
+			"interval":       interval.String(),
+			"source":         source,
+		},
+	})
 }
 
 func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
@@ -249,10 +303,37 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
+	linearChanged := false
 	for k, v := range body {
 		r.DB.SetSetting(k, v)
+		if strings.HasPrefix(k, "linear_") {
+			linearChanged = true
+		}
+	}
+	if linearChanged {
+		// Hot-reload the connector — no restart needed.
+		r.ReconfigureLinear()
 	}
 	writeJSON(w, map[string]string{"ok": "true"})
+}
+
+// apiLinearTeams lists the Linear workspace teams using the effective API key
+// (or one passed as ?key= for pre-save validation in the settings UI).
+func (r *Relay) apiLinearTeams(w http.ResponseWriter, req *http.Request) {
+	apiKey, _, _, _, _ := r.effectiveLinearConfig()
+	if k := strings.TrimSpace(req.URL.Query().Get("key")); k != "" {
+		apiKey = k
+	}
+	if apiKey == "" {
+		http.Error(w, `{"error":"no linear api key configured"}`, http.StatusBadRequest)
+		return
+	}
+	teams, err := linearconn.ListTeams(req.Context(), apiKey)
+	if err != nil {
+		apiError(w, http.StatusBadGateway, "linear teams fetch failed", err)
+		return
+	}
+	writeJSON(w, teams)
 }
 
 type apiTeamRef struct {
@@ -275,6 +356,7 @@ type apiAgent struct {
 	Status       string       `json:"status"`
 	IsExecutive  bool         `json:"is_executive"`
 	SessionID    *string      `json:"session_id,omitempty"`
+	AvatarURL    *string      `json:"avatar_url,omitempty"`
 	Activity     string       `json:"activity,omitempty"`
 	ActivityTool string       `json:"activity_tool,omitempty"`
 	Teams        []apiTeamRef `json:"teams,omitempty"`
@@ -319,6 +401,7 @@ func (r *Relay) apiGetAgents(w http.ResponseWriter, req *http.Request) {
 			Status:       a.Status,
 			IsExecutive:  a.IsExecutive,
 			SessionID:    a.SessionID,
+			AvatarURL:    a.AvatarURL,
 			Teams:        teamsByAgent[key],
 		}
 		online := false
@@ -389,6 +472,7 @@ func (r *Relay) apiGetAllAgents(w http.ResponseWriter) {
 			Status:       a.Status,
 			IsExecutive:  a.IsExecutive,
 			SessionID:    a.SessionID,
+			AvatarURL:    a.AvatarURL,
 			Teams:        teamsByAgent[a.Project+":"+a.Name],
 		}
 		if a.SessionID != nil {
@@ -976,6 +1060,56 @@ func (r *Relay) apiGetHumanTasks(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, tasks)
 }
 
+// apiGetBoardTasks serves the kanban board: every non-archived, non-cancelled
+// task for a project (or a single cycle), flat, ordered priority → points →
+// dispatched_at. The board nests by parent_task_id and maps linear_state →
+// columns client-side. Single call, zero Linear round-trips (reads the mirror).
+//
+// Params: ?project= (default "default"), ?cycle= (cycle_id | "all" | "active" | "").
+// "active" resolves to the cycle spanning today; empty/"all" returns everything.
+func (r *Relay) apiGetBoardTasks(w http.ResponseWriter, req *http.Request) {
+	project := projectFromRequest(req)
+	cycle := req.URL.Query().Get("cycle")
+
+	if cycle == "active" {
+		cycle = "" // default; resolve below if an active cycle exists
+		if cycles, err := r.DB.ListCycles(project); err == nil {
+			for _, c := range cycles {
+				if c.Active {
+					cycle = c.ID
+					break
+				}
+			}
+		}
+	}
+
+	tasks, err := r.DB.ListBoardTasks(project, cycle, 1000)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to list board tasks", err)
+		return
+	}
+	if tasks == nil {
+		tasks = []models.Task{}
+	}
+	writeJSON(w, tasks)
+}
+
+// apiGetCycles serves the kanban cycle filter: the distinct Linear cycles in the
+// mirror for a project, with the active one (spanning today) flagged. Empty in
+// native mode.
+func (r *Relay) apiGetCycles(w http.ResponseWriter, req *http.Request) {
+	project := projectFromRequest(req)
+	cycles, err := r.DB.ListCycles(project)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to list cycles", err)
+		return
+	}
+	if cycles == nil {
+		cycles = []db.Cycle{}
+	}
+	writeJSON(w, cycles)
+}
+
 func (r *Relay) apiGetAllTasks(w http.ResponseWriter) {
 	tasks, err := r.DB.ListAllTasks(200)
 	if err != nil {
@@ -1056,7 +1190,6 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 		Priority     string  `json:"priority"`
 		ParentTaskID *string `json:"parent_task_id,omitempty"`
 		BoardID      *string `json:"board_id,omitempty"`
-		GoalID       *string `json:"goal_id,omitempty"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -1070,7 +1203,7 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 		body.Project = "default"
 	}
 
-	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID, body.GoalID)
+	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "failed to dispatch task", err)
 		return
@@ -1118,6 +1251,8 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		task, err = r.DB.ClaimTask(taskID, body.Agent, body.Project)
 	case "in-progress":
 		task, err = r.DB.StartTask(taskID, body.Agent, body.Project)
+	case "in-review":
+		task, err = r.DB.ReviewTask(taskID, body.Agent, body.Project)
 	case "done":
 		task, err = r.DB.CompleteTask(taskID, body.Agent, body.Project, body.Result)
 	case "blocked":
@@ -1132,7 +1267,41 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		apiError(w, http.StatusBadRequest, "task transition failed", err)
 		return
 	}
+
+	// Emit the matching semantic event so notification rules fire for web-UI
+	// driven transitions too (the MCP handlers emit their own).
+	if evType, line := semanticForStatus(body.Status, task.Title); evType != "" {
+		payload := taskSemantic(task, line)
+		if body.Status == "blocked" && body.Reason != nil {
+			payload["reason"] = *body.Reason
+		}
+		r.Events.EmitSemantic(evType, body.Project, body.Agent, payload)
+	}
+
+	// Write-back (Linear mode): a web-driven → In Review fires the one owned
+	// transition + comment, fire-and-forget. No-op in native mode.
+	if body.Status == "in-review" {
+		pushInReviewAsync(r.TaskConn(), task, body.Agent, body.Result)
+	}
+
 	writeJSON(w, task)
+}
+
+// semanticForStatus maps a kanban status to its semantic event type + line.
+func semanticForStatus(status, title string) (string, string) {
+	switch status {
+	case "accepted":
+		return EvTaskClaimed, "Claimed: " + title
+	case "in-progress":
+		return EvTaskInProgress, "In progress: " + title
+	case "in-review":
+		return EvTaskInReview, "In review: " + title
+	case "done":
+		return EvTaskDone, "Done: " + title
+	case "blocked":
+		return EvTaskBlocked, "Blocked: " + title
+	}
+	return "", ""
 }
 
 func (r *Relay) apiUpdateTask(w http.ResponseWriter, req *http.Request, path string) {
@@ -1149,7 +1318,6 @@ func (r *Relay) apiUpdateTask(w http.ResponseWriter, req *http.Request, path str
 		Description *string `json:"description,omitempty"`
 		Priority    *string `json:"priority,omitempty"`
 		BoardID     *string `json:"board_id,omitempty"`
-		GoalID      *string `json:"goal_id,omitempty"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -1159,7 +1327,7 @@ func (r *Relay) apiUpdateTask(w http.ResponseWriter, req *http.Request, path str
 		body.Project = "default"
 	}
 
-	task, err := r.DB.UpdateTaskFields(taskID, body.Project, body.Title, body.Description, body.Priority, body.BoardID, body.GoalID)
+	task, err := r.DB.UpdateTaskFields(taskID, body.Project, body.Title, body.Description, body.Priority, body.BoardID)
 	if err != nil {
 		apiError(w, http.StatusBadRequest, "failed to update task", err)
 		return
@@ -1304,127 +1472,6 @@ func (r *Relay) apiGetProfile(w http.ResponseWriter, req *http.Request, path str
 	writeJSON(w, profile)
 }
 
-// --- Goal API endpoints ---
-
-func (r *Relay) apiGetAllGoals(w http.ResponseWriter) {
-	goals, err := r.DB.ListAllGoals(200)
-	if err != nil {
-		http.Error(w, `{"error":"failed to list goals"}`, http.StatusInternalServerError)
-		return
-	}
-	if goals == nil {
-		goals = []models.Goal{}
-	}
-	writeJSON(w, goals)
-}
-
-func (r *Relay) apiGetGoals(w http.ResponseWriter, req *http.Request) {
-	project := projectFromRequest(req)
-	goalType := req.URL.Query().Get("type")
-	status := req.URL.Query().Get("status")
-
-	goals, err := r.DB.ListGoals(project, goalType, status, nil, 100)
-	if err != nil {
-		http.Error(w, `{"error":"failed to list goals"}`, http.StatusInternalServerError)
-		return
-	}
-	if goals == nil {
-		goals = []models.Goal{}
-	}
-	writeJSON(w, goals)
-}
-
-func (r *Relay) apiGetGoalCascade(w http.ResponseWriter, req *http.Request) {
-	project := projectFromRequest(req)
-	cascade, err := r.DB.GetGoalCascade(project)
-	if err != nil {
-		http.Error(w, `{"error":"failed to get goal cascade"}`, http.StatusInternalServerError)
-		return
-	}
-	writeJSON(w, cascade)
-}
-
-func (r *Relay) apiCreateGoal(w http.ResponseWriter, req *http.Request) {
-	var body struct {
-		Project      string  `json:"project"`
-		Type         string  `json:"type"`
-		Title        string  `json:"title"`
-		Description  string  `json:"description"`
-		OwnerAgent   *string `json:"owner_agent,omitempty"`
-		ParentGoalID *string `json:"parent_goal_id,omitempty"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
-		return
-	}
-	if body.Title == "" {
-		http.Error(w, `{"error":"title is required"}`, http.StatusBadRequest)
-		return
-	}
-	if body.Project == "" {
-		body.Project = "default"
-	}
-	if body.Type == "" {
-		body.Type = "agent_goal"
-	}
-
-	goal, err := r.DB.CreateGoal(body.Project, body.Type, body.Title, body.Description, "user", body.OwnerAgent, body.ParentGoalID)
-	if err != nil {
-		apiError(w, http.StatusInternalServerError, "failed to create goal", err)
-		return
-	}
-	writeJSON(w, goal)
-}
-
-func (r *Relay) apiUpdateGoal(w http.ResponseWriter, req *http.Request, path string) {
-	goalID := strings.TrimPrefix(path, "/goals/")
-	if goalID == "" {
-		http.Error(w, `{"error":"missing goal id"}`, http.StatusBadRequest)
-		return
-	}
-
-	var body struct {
-		Project     string  `json:"project"`
-		Title       *string `json:"title,omitempty"`
-		Description *string `json:"description,omitempty"`
-		Status      *string `json:"status,omitempty"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
-		return
-	}
-	if body.Project == "" {
-		body.Project = "default"
-	}
-
-	goal, err := r.DB.UpdateGoal(goalID, body.Project, body.Title, body.Description, body.Status)
-	if err != nil {
-		apiError(w, http.StatusBadRequest, "failed to update goal", err)
-		return
-	}
-	writeJSON(w, goal)
-}
-
-func (r *Relay) apiGetGoal(w http.ResponseWriter, req *http.Request, path string) {
-	project := projectFromRequest(req)
-	goalID := strings.TrimPrefix(path, "/goals/")
-	if goalID == "" {
-		http.Error(w, `{"error":"missing goal id"}`, http.StatusBadRequest)
-		return
-	}
-
-	gwp, err := r.DB.GetGoalWithProgress(goalID, project)
-	if err != nil {
-		http.Error(w, `{"error":"failed to get goal"}`, http.StatusInternalServerError)
-		return
-	}
-	if gwp == nil {
-		http.Error(w, `{"error":"goal not found"}`, http.StatusNotFound)
-		return
-	}
-	writeJSON(w, gwp)
-}
-
 func (r *Relay) apiGetBoards(w http.ResponseWriter, req *http.Request) {
 	project := projectFromRequest(req)
 	boards, err := r.DB.ListBoards(project)
@@ -1537,4 +1584,30 @@ func (r *Relay) apiGetTokenTimeSeries(w http.ResponseWriter, req *http.Request) 
 		data = []db.TokenTimeBucket{}
 	}
 	writeJSON(w, data)
+}
+
+// apiSetAgentAvatar sets or clears an agent's avatar image URL (photo/gif).
+func (r *Relay) apiSetAgentAvatar(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Project string `json:"project"`
+		Name    string `json:"name"`
+		URL     string `json:"url"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Name == "" {
+		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	u := strings.TrimSpace(body.URL)
+	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "data:image/") {
+		http.Error(w, `{"error":"url must be http(s) or data:image"}`, http.StatusBadRequest)
+		return
+	}
+	if err := r.DB.SetAgentAvatar(body.Project, body.Name, u); err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to set avatar", err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "agent": body.Name, "avatar_url": u})
 }

@@ -81,6 +81,15 @@ func startServer() {
 	relay.StartCleanup(database, cleanupDone)
 	relay.StartACKChecker(database, r.Registry, cleanupDone)
 
+	// Start notifications subsystem (rules evaluator + digest scheduler)
+	if r.Notifier != nil {
+		r.Notifier.Start(cleanupDone)
+	}
+
+	// Wire the Linear connector from effective config (env or settings table).
+	// Inert when unconfigured; hot-reloaded on settings changes without restart.
+	r.ReconfigureLinear()
+
 	// Log ingested events (phase 1: log only, phase 2: TouchAgent + WS broadcast)
 	go func() {
 		for evt := range ingester.Events {

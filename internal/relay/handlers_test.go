@@ -203,7 +203,7 @@ func TestSendAndGetInbox(t *testing.T) {
 	}
 
 	// Check inbox
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json",
 		"project":     "p1",
 		"as":          "bot-b",
 		"unread_only": true,
@@ -257,7 +257,7 @@ func TestMarkRead(t *testing.T) {
 	}
 
 	// Inbox should be empty (unread_only)
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json",
 		"project": "p1", "as": "bot-b", "unread_only": true,
 	}))
 	inbox := parseJSON(t, inboxRes)
@@ -649,7 +649,7 @@ func TestMemoryList(t *testing.T) {
 		"project": "p1", "as": "bot-b", "key": "k2", "value": "v2",
 	}))
 
-	res, _ := h.HandleListMemories(ctx, call(map[string]any{"format": "json", 
+	res, _ := h.HandleListMemories(ctx, call(map[string]any{"format": "json",
 		"project": "p1",
 	}))
 	data := parseJSON(t, res)
@@ -807,50 +807,6 @@ func TestCreateBoardMissingFields(t *testing.T) {
 	expectError(t, res)
 }
 
-// --- Goal Tests ---
-
-func TestGoalLifecycle(t *testing.T) {
-	h := testHandlers(t)
-
-	// Create
-	createRes, _ := h.HandleCreateGoal(ctx, call(map[string]any{
-		"project": "p1", "as": "bot-a", "title": "Ship v2", "type": "agent_goal",
-	}))
-	createBody := parseJSON(t, createRes)
-	goal := createBody["goal"].(map[string]any)
-	goalID := goal["id"].(string)
-	if goal["title"] != "Ship v2" {
-		t.Errorf("expected 'Ship v2', got %v", goal["title"])
-	}
-
-	// Get
-	getRes, _ := h.HandleGetGoal(ctx, call(map[string]any{
-		"project": "p1", "goal_id": goalID,
-	}))
-	got := parseJSON(t, getRes)
-	if got["title"] != "Ship v2" {
-		t.Errorf("expected 'Ship v2', got %v", got["title"])
-	}
-
-	// Update
-	updateRes, _ := h.HandleUpdateGoal(ctx, call(map[string]any{
-		"project": "p1", "goal_id": goalID, "status": "completed",
-	}))
-	updated := parseJSON(t, updateRes)
-	if updated["status"] != "completed" {
-		t.Errorf("expected completed, got %v", updated["status"])
-	}
-
-	// List
-	listRes, _ := h.HandleListGoals(ctx, call(map[string]any{"format": "json", 
-		"project": "p1",
-	}))
-	listData := parseJSON(t, listRes)
-	if listData["count"].(float64) != 1 {
-		t.Errorf("expected 1 goal, got %v", listData["count"])
-	}
-}
-
 // --- Org / Team Tests ---
 
 func TestOrgAndTeamLifecycle(t *testing.T) {
@@ -966,34 +922,6 @@ func TestResolveConflictMissingFields(t *testing.T) {
 	expectError(t, res2)
 }
 
-// --- Goal Cascade Tests ---
-
-func TestGoalCascade(t *testing.T) {
-	h := testHandlers(t)
-
-	// Create parent goal
-	parentRes, _ := h.HandleCreateGoal(ctx, call(map[string]any{
-		"project": "p1", "as": "bot-a", "title": "Mission", "type": "mission",
-	}))
-	parent := parseJSON(t, parentRes)["goal"].(map[string]any)
-	parentID := parent["id"].(string)
-
-	// Create child goal
-	_, _ = h.HandleCreateGoal(ctx, call(map[string]any{
-		"project": "p1", "as": "bot-a", "title": "Sub-goal", "type": "project_goal",
-		"parent_goal_id": parentID,
-	}))
-
-	// Get cascade
-	cascadeRes, _ := h.HandleGetGoalCascade(ctx, call(map[string]any{
-		"project": "p1",
-	}))
-	if cascadeRes.IsError {
-		t.Fatalf("cascade error: %v", cascadeRes.Content)
-	}
-	// cascade returns a structure -- just verify it doesn't error
-}
-
 // --- Team Inbox Tests ---
 
 func TestTeamInbox(t *testing.T) {
@@ -1074,7 +1002,7 @@ func TestSendBroadcastMessage(t *testing.T) {
 	}
 
 	// bot-b should see it in inbox
-	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json", 
+	inboxRes, _ := h.HandleGetInbox(ctx, call(map[string]any{"format": "json",
 		"project": "p1", "as": "bot-b", "unread_only": true,
 	}))
 	inbox := parseJSON(t, inboxRes)

@@ -88,7 +88,7 @@ func (d *DB) Optimize() {
 // GetHealthStats returns aggregate database statistics for the /health endpoint.
 func (d *DB) GetHealthStats() map[string]int64 {
 	stats := map[string]int64{}
-	tables := []string{"agents", "messages", "tasks", "projects", "memories", "boards", "goals", "conversations"}
+	tables := []string{"agents", "messages", "tasks", "projects", "memories", "boards", "conversations"}
 	for _, t := range tables {
 		var c int64
 		_ = d.ro().QueryRow("SELECT COUNT(*) FROM " + t).Scan(&c)
@@ -235,6 +235,7 @@ func migrate(conn *sql.DB) error {
 		"org_id":            "TEXT",
 		"interest_tags":     "TEXT NOT NULL DEFAULT '[]'",
 		"max_context_bytes": "INTEGER NOT NULL DEFAULT 16384",
+		"avatar_url":        "TEXT",
 	})
 
 	// Projects table (planet_type assigned per project)
@@ -382,13 +383,40 @@ func migrate(conn *sql.DB) error {
 		"ack_escalated_at": "TEXT",
 		"parent_task_id":   "TEXT",
 		"board_id":         "TEXT",
-		"goal_id":          "TEXT",
 		"archived_at":      "TEXT",
+
+		// --- Linear zone (read-only, replicated from Linear SSOT) ---
+		"source":          "TEXT NOT NULL DEFAULT 'native'", // 'native' | 'linear'
+		"linear_issue_id": "TEXT",
+		"linear_key":      "TEXT", // e.g. SYN-123
+		"external_url":    "TEXT",
+		"points":          "INTEGER",
+		"labels":          "TEXT NOT NULL DEFAULT '[]'", // json array
+		"linear_state":    "TEXT",
+		"assignee":        "TEXT",
+		"cycle_id":        "TEXT",
+		"cycle_name":      "TEXT",
+		"cycle_start":     "TEXT",
+		"cycle_end":       "TEXT",
+		// priority already exists on the base table.
+
+		// --- Execution overlay (relay-owned, auto-stamped temporal trail) ---
+		// dispatched_at / started_at / completed_at already exist — reused, not duplicated.
+		// done_at is an explicit alias of completed_at (stamped together on → done).
+		"claimed_by":      "TEXT",
+		"claimed_at":      "TEXT",
+		"blocked_periods": "TEXT NOT NULL DEFAULT '[]'", // json array of {start,end} (blocked_at[])
+		"in_review_at":    "TEXT",
+		"done_at":         "TEXT",
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_board ON tasks(board_id)`)
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_goal ON tasks(goal_id)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_linear_issue ON tasks(linear_issue_id)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_cycle ON tasks(cycle_id)`)
+	// Goals subsystem removed — drop the table and its stale index for existing DBs.
+	_, _ = conn.Exec(`DROP INDEX IF EXISTS idx_tasks_goal`)
+	_, _ = conn.Exec(`DROP TABLE IF EXISTS goals`)
 
 	// Task progress notes (surfaced in web UI between claim and complete)
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS task_progress_notes (
@@ -400,6 +428,17 @@ func migrate(conn *sql.DB) error {
 		created_at TEXT NOT NULL
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_task_progress_notes_task ON task_progress_notes(task_id, created_at)`)
+
+	// Linear connector sync log (capped audit trail of write-back outcomes).
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS linear_sync_log (
+		id        INTEGER PRIMARY KEY AUTOINCREMENT,
+		ts        TEXT NOT NULL,
+		issue_id  TEXT NOT NULL DEFAULT '',
+		action    TEXT NOT NULL DEFAULT '',
+		outcome   TEXT NOT NULL DEFAULT '',
+		detail    TEXT NOT NULL DEFAULT ''
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_linear_sync_log_ts ON linear_sync_log(id DESC)`)
 
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
@@ -463,25 +502,6 @@ func migrate(conn *sql.DB) error {
 	ensureColumns(conn, "boards", map[string]string{
 		"archived_at": "TEXT",
 	})
-
-	// Goals
-	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS goals (
-		id              TEXT PRIMARY KEY,
-		project         TEXT NOT NULL DEFAULT 'default',
-		type            TEXT NOT NULL DEFAULT 'agent_goal',
-		title           TEXT NOT NULL,
-		description     TEXT NOT NULL DEFAULT '',
-		owner_agent     TEXT,
-		parent_goal_id  TEXT,
-		status          TEXT NOT NULL DEFAULT 'active',
-		created_by      TEXT NOT NULL DEFAULT 'user',
-		created_at      TEXT NOT NULL,
-		updated_at      TEXT NOT NULL,
-		completed_at    TEXT
-	)`)
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_goals_project_status ON goals(project, status)`)
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_goals_parent ON goals(parent_goal_id)`)
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_goals_type ON goals(project, type)`)
 
 	// Vaults (per-project config)
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS vaults (
@@ -740,6 +760,40 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_cycles_project ON cycles(project)`)
 
+	// Notification rules: configurable event→action→target rules engine.
+	// match/opts are JSON blobs. Human-authored via the web UI (no MCP tools).
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS notification_rules (
+		id          TEXT PRIMARY KEY,
+		project     TEXT NOT NULL DEFAULT 'default',
+		name        TEXT NOT NULL,
+		enabled     INTEGER NOT NULL DEFAULT 1,
+		event       TEXT NOT NULL,
+		match_json  TEXT NOT NULL DEFAULT '{}',
+		action      TEXT NOT NULL,
+		target      TEXT NOT NULL DEFAULT '',
+		opts_json   TEXT NOT NULL DEFAULT '{}',
+		created_at  TEXT NOT NULL,
+		updated_at  TEXT NOT NULL
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_rules_event ON notification_rules(project, event, enabled)`)
+
+	// Notification deliveries: capped delivery log for debugging launcher wiring.
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS notification_deliveries (
+		id          TEXT PRIMARY KEY,
+		project     TEXT NOT NULL DEFAULT 'default',
+		rule_id     TEXT NOT NULL,
+		rule_name   TEXT NOT NULL DEFAULT '',
+		event       TEXT NOT NULL,
+		action      TEXT NOT NULL DEFAULT '',
+		target      TEXT NOT NULL DEFAULT '',
+		outcome     TEXT NOT NULL DEFAULT '',
+		status_code INTEGER NOT NULL DEFAULT 0,
+		error       TEXT NOT NULL DEFAULT '',
+		payload     TEXT NOT NULL DEFAULT '',
+		created_at  TEXT NOT NULL
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_notification_deliveries_created ON notification_deliveries(created_at)`)
+
 	// Lowercase all agent names for case-insensitive matching
 	migrateLowercaseAgentNames(conn)
 
@@ -984,8 +1038,6 @@ func migrateLowercaseAgentNames(conn *sql.DB) {
 		"UPDATE agent_notify_channels SET agent_name = LOWER(agent_name) WHERE agent_name != LOWER(agent_name)",
 		"UPDATE message_reads SET agent_name = LOWER(agent_name) WHERE agent_name != LOWER(agent_name)",
 		"UPDATE boards SET created_by = LOWER(created_by) WHERE created_by != LOWER(created_by)",
-		"UPDATE goals SET owner_agent = LOWER(owner_agent) WHERE owner_agent IS NOT NULL AND owner_agent != LOWER(owner_agent)",
-		"UPDATE goals SET created_by = LOWER(created_by) WHERE created_by != LOWER(created_by)",
 	}
 
 	for _, s := range stmts {

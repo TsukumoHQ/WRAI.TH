@@ -5,9 +5,12 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"agent-relay/internal/config"
+	"agent-relay/internal/connector"
+	linearconn "agent-relay/internal/connector/linear"
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
 	"agent-relay/internal/web"
@@ -24,7 +27,14 @@ type Relay struct {
 	Ingester  *ingest.Ingester
 	Events    *EventBus
 	Handlers  *Handlers
-	Config    config.Config
+	Notifier  *Notifier
+	// Linear connector runtime — swapped at runtime by ReconfigureLinear()
+	// (settings-driven, no restart). Read through LinearConnector()/TaskConn().
+	linearMu   sync.RWMutex
+	linearConn *linearconn.Connector   // nil when inactive
+	taskConn   connector.TaskConnector // Noop when inactive
+	linearStop chan struct{}           // closes the current reconcile loop
+	Config     config.Config
 	// Version is the build tag, injected from main.Version.
 	// Defaults to "dev" when built without ldflags.
 	Version    string
@@ -60,6 +70,15 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	for _, rt := range regTools {
 		serverTools = append(serverTools, rt.ServerTool)
 	}
+	// Initialize notifications subsystem (rules evaluator + digest scheduler).
+	// Seeds default rules on first run.
+	notifier := NewNotifier(database, registry, events)
+	handlers.SetNotifier(notifier)
+
+	// The Linear connector is wired after construction via ReconfigureLinear()
+	// (env or settings driven); until then every call site sees Noop.
+	handlers.SetConnector(connector.Noop{})
+
 	serverTools = append(serverTools,
 		server.ServerTool{Tool: discoverToolsTool(), Handler: handlers.HandleDiscoverTools},
 		server.ServerTool{Tool: callToolTool(), Handler: handlers.HandleCallTool},
@@ -81,6 +100,8 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 		Ingester:  ingester,
 		Events:    events,
 		Handlers:  handlers,
+		Notifier:  notifier,
+		taskConn:  connector.Noop{},
 		Config:    cfg,
 		StartedAt: time.Now().UTC(),
 	}

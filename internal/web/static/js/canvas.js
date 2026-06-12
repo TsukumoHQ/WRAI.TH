@@ -8,19 +8,34 @@ export class CanvasEngine {
     this.running = false;
     this.lastTime = 0;
     this.camera = new Camera();
+    this.onResize = null; // optional callback fired after the bitmap is re-rasterized
 
     this.resize();
     window.addEventListener("resize", () => this.resize());
+    // Re-rasterize whenever the container box changes (panel overlays, mode
+    // switches, dock drags) — not just on window resize. Without this the
+    // bitmap gets CSS-stretched and sprites deform.
+    if (typeof ResizeObserver !== "undefined") {
+      this._ro = new ResizeObserver(() => this.resize());
+      this._ro.observe(this.canvas.parentElement);
+    }
   }
 
   resize() {
     const container = this.canvas.parentElement;
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    // Container hidden (display:none mode) — keep the last good bitmap.
+    if (!w || !h) return;
     const dpr = window.devicePixelRatio || 1;
-    this.canvas.width = container.clientWidth * dpr;
-    this.canvas.height = container.clientHeight * dpr;
+    // No-op if nothing actually changed (synthetic resize events).
+    if (w === this.width && h === this.height && this.canvas.width === Math.round(w * dpr)) return;
+    this.canvas.width = Math.round(w * dpr);
+    this.canvas.height = Math.round(h * dpr);
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.width = container.clientWidth;
-    this.height = container.clientHeight;
+    this.width = w;
+    this.height = h;
+    if (this.onResize) this.onResize();
   }
 
   add(renderable) {

@@ -20,7 +20,7 @@ func resultBytes(t *testing.T, res *mcp.CallToolResult) int {
 }
 
 // seedColony populates a project with a realistic mid-sprint load:
-// 10 agents, 30 messages to one inbox, 25 tasks, 15 memories, 5 goals.
+// 10 agents, 30 messages to one inbox, 25 tasks, 15 memories.
 func seedColony(t *testing.T, h *Handlers, project string) {
 	t.Helper()
 	ctx := context.Background()
@@ -62,12 +62,6 @@ func seedColony(t *testing.T, h *Handlers, project string) {
 			"tags": []any{"payments", "refunds"},
 		}))
 	}
-	for i := 0; i < 5; i++ {
-		_, _ = h.HandleCreateGoal(ctx, call(map[string]any{
-			"project": project, "as": "worker-0", "type": "project_goal",
-			"title": fmt.Sprintf("Ship refund pipeline milestone %d", i),
-		}))
-	}
 }
 
 // TestTokenReductionTableVsJSON measures the real payload shrink of the
@@ -89,7 +83,6 @@ func TestTokenReductionTableVsJSON(t *testing.T) {
 		{"list_tasks", h.HandleListTasks, map[string]any{"project": "bench"}, 0.30},
 		{"list_agents", h.HandleListAgents, map[string]any{"project": "bench"}, 0.15},
 		{"list_memories", h.HandleListMemories, map[string]any{"project": "bench"}, 0.25},
-		{"list_goals", h.HandleListGoals, map[string]any{"project": "bench"}, 0.30},
 	}
 
 	for _, tc := range cases {

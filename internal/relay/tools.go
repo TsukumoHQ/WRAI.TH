@@ -346,7 +346,6 @@ func dispatchTaskTool() mcp.Tool {
 		),
 		mcp.WithString("parent_task_id", mcp.Description("Parent task ID (subtasks)")),
 		mcp.WithString("board_id", mcp.Description("Board to assign to")),
-		mcp.WithString("goal_id", mcp.Description("Goal to link to")),
 	)
 }
 
@@ -367,6 +366,17 @@ func startTaskTool() mcp.Tool {
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+	)
+}
+
+func reviewTaskTool() mcp.Tool {
+	return mcp.NewTool(
+		"review_task",
+		mcp.WithDescription("Mark a task as in-review → 'in-review' (the agent's 'PR up' signal). Stamps in_review_at. In Linear mode, also moves the issue to In Review and posts the optional comment."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+		mcp.WithString("comment", mcp.Description("Optional note (PR link / result) posted to Linear on the In Review transition")),
 	)
 }
 
@@ -462,19 +472,18 @@ func batchDispatchTasksTool() mcp.Tool {
 		mcp.WithDescription("Dispatch multiple tasks at once."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\",\"goal_id\":\"...\"}]. Only profile and title required."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\"}]. Only profile and title required."), mcp.Required()),
 	)
 }
 
 func moveTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"move_task",
-		mcp.WithDescription("Move a task to a different board and/or goal."),
+		mcp.WithDescription("Move a task to a different board."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("board_id", mcp.Description("New board ID (empty string unassigns)")),
-		mcp.WithString("goal_id", mcp.Description("New goal ID (empty string unassigns)")),
 	)
 }
 
@@ -531,7 +540,6 @@ func updateTaskTool() mcp.Tool {
 		mcp.WithString("description", mcp.Description("New description")),
 		mcp.WithString("priority", mcp.Description("New priority"), mcp.Enum("P0", "P1", "P2", "P3")),
 		mcp.WithString("board_id", mcp.Description("Move to board")),
-		mcp.WithString("goal_id", mcp.Description("Link to goal")),
 		mcp.WithString("progress_note", mcp.Description("Short progress note (does not change status)")),
 	)
 }
@@ -544,78 +552,6 @@ func archiveTasksTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("status", mcp.Description("'done', 'cancelled', or empty for both"), mcp.Enum("done", "cancelled", "")),
 		mcp.WithString("board_id", mcp.Description("Only this board (empty = all)")),
-	)
-}
-
-// --- Goals ---
-
-func createGoalTool() mcp.Tool {
-	return mcp.NewTool(
-		"create_goal",
-		mcp.WithDescription("Create a goal in the cascade: mission > project_goal > agent_goal. Goals are NOT tasks (not on boards) — create work items via dispatch_task with goal_id. Progress = count of linked tasks."),
-		asParam,
-		projectParam,
-		mcp.WithString("type",
-			mcp.Description("Cascade level"),
-			mcp.Enum("mission", "project_goal", "agent_goal"),
-			mcp.Required(),
-		),
-		mcp.WithString("title", mcp.Description("Goal title"), mcp.Required()),
-		mcp.WithString("description", mcp.Description("Description")),
-		mcp.WithString("parent_goal_id", mcp.Description("Parent goal ID")),
-		mcp.WithString("owner_agent", mcp.Description("Owning agent (typically for agent_goal)")),
-	)
-}
-
-func listGoalsTool() mcp.Tool {
-	return mcp.NewTool(
-		"list_goals",
-		mcp.WithDescription("List goals with progress."),
-		projectParam,
-		mcp.WithString("type",
-			mcp.Description("Filter by type"),
-			mcp.Enum("mission", "project_goal", "agent_goal"),
-		),
-		mcp.WithString("status",
-			mcp.Description("Filter by status"),
-			mcp.Enum("active", "completed", "paused"),
-		),
-		mcp.WithString("owner_agent", mcp.Description("Filter by owner")),
-		mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
-		mcp.WithString("format", mcp.Description("'md' (default, markdown table — ~half the tokens) or 'json'"), mcp.Enum("md", "json")),
-	)
-}
-
-func getGoalTool() mcp.Tool {
-	return mcp.NewTool(
-		"get_goal",
-		mcp.WithDescription("Get goal details: ancestry chain, progress, children."),
-		projectParam,
-		mcp.WithString("goal_id", mcp.Description("Goal ID"), mcp.Required()),
-	)
-}
-
-func updateGoalTool() mcp.Tool {
-	return mcp.NewTool(
-		"update_goal",
-		mcp.WithDescription("Update a goal's title, description, or status."),
-		asParam,
-		projectParam,
-		mcp.WithString("goal_id", mcp.Description("Goal ID"), mcp.Required()),
-		mcp.WithString("title", mcp.Description("New title")),
-		mcp.WithString("description", mcp.Description("New description")),
-		mcp.WithString("status",
-			mcp.Description("New status"),
-			mcp.Enum("active", "completed", "paused"),
-		),
-	)
-}
-
-func getGoalCascadeTool() mcp.Tool {
-	return mcp.NewTool(
-		"get_goal_cascade",
-		mcp.WithDescription("Get the full goal hierarchy tree with progress per node."),
-		projectParam,
 	)
 }
 
@@ -684,7 +620,7 @@ func sleepAgentTool() mcp.Tool {
 func deleteProjectTool() mcp.Tool {
 	return mcp.NewTool(
 		"delete_project",
-		mcp.WithDescription("Permanently delete a project and ALL its data (agents, tasks, messages, memories, boards, goals). Irreversible."),
+		mcp.WithDescription("Permanently delete a project and ALL its data (agents, tasks, messages, memories, boards). Irreversible."),
 		mcp.WithString("project", mcp.Description("Project name"), mcp.Required()),
 	)
 }
@@ -694,7 +630,7 @@ func deleteProjectTool() mcp.Tool {
 func createProjectTool() mcp.Tool {
 	return mcp.NewTool(
 		"create_project",
-		mcp.WithDescription("Set up a new project — the FIRST tool to call. Creates the project and returns an onboarding plan you execute step by step as the setup agent: analyze the codebase, store knowledge, create the org, profiles, goals, and board."),
+		mcp.WithDescription("Set up a new project — the FIRST tool to call. Creates the project and returns an onboarding plan you execute step by step as the setup agent: analyze the codebase, store knowledge, create the org, profiles, and board."),
 		mcp.WithString("name", mcp.Description("Project name (lowercase, no spaces)"), mcp.Required()),
 		mcp.WithString("description", mcp.Description("One-line description")),
 		mcp.WithString("cwd", mcp.Description("Absolute path to the project root")),

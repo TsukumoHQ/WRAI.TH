@@ -7,23 +7,14 @@ import (
 // This file implements the paper's Def. 7 (Budget Projection):
 //   M_boot = top-k(M_db, U, B_max), |M_boot| ≤ B_max
 //
-// Raw entities (Task, Goal, vault doc Content) are projected into compact
-// summaries bounded by a byte budget before being injected into session_context
-// or spawn prompts. The agent can always pay-for-what-you-use by calling
-// get_task / get_goal / get_vault_doc for full content.
+// Raw entities (Task, vault doc Content) are projected into compact summaries
+// bounded by a byte budget before being injected into session_context or spawn
+// prompts. The agent can always pay-for-what-you-use by calling
+// get_task / get_vault_doc for full content.
 
 // taskDescPreview is the byte ceiling for a single task's description preview
 // in a projection. Full descriptions are fetched via get_task(id) on demand.
 const taskDescPreview = 200
-
-// goalDescPreview bounds the goal description surfaced in goal_context.
-const goalDescPreview = 200
-
-// goalAncestryCap limits the ancestry depth in projected goal_context.
-const goalAncestryCap = 3
-
-// goalContextCap limits the number of unique goals surfaced in session_context.
-const goalContextCap = 10
 
 // sessionUnreadBudget bounds the total bytes spent on unread_messages in
 // session_context. With msgContentPreview=300, ~15 messages fit; P0 messages
@@ -155,7 +146,6 @@ type TaskSummary struct {
 	ProfileSlug   string  `json:"profile_slug,omitempty"`
 	AssignedTo    *string `json:"assigned_to,omitempty"`
 	DispatchedBy  string  `json:"dispatched_by,omitempty"`
-	GoalID        *string `json:"goal_id,omitempty"`
 	BoardID       *string `json:"board_id,omitempty"`
 	DispatchedAt  string  `json:"dispatched_at,omitempty"`
 	DescPreview   string  `json:"desc_preview,omitempty"`
@@ -188,7 +178,6 @@ func summarizeTask(t models.Task) TaskSummary {
 		ProfileSlug:  t.ProfileSlug,
 		AssignedTo:   t.AssignedTo,
 		DispatchedBy: t.DispatchedBy,
-		GoalID:       t.GoalID,
 		BoardID:      t.BoardID,
 		DispatchedAt: t.DispatchedAt,
 	}
@@ -209,9 +198,6 @@ func taskSummaryBytes(s TaskSummary) int {
 		len(s.ProfileSlug) + len(s.DispatchedBy) + len(s.DispatchedAt) + len(s.DescPreview)
 	if s.AssignedTo != nil {
 		n += len(*s.AssignedTo)
-	}
-	if s.GoalID != nil {
-		n += len(*s.GoalID)
 	}
 	if s.BoardID != nil {
 		n += len(*s.BoardID)
@@ -266,26 +252,3 @@ func projectTasks(tasks []models.Task, maxBytes int) []TaskSummary {
 	}
 	return out
 }
-
-// projectGoal returns a copy of the goal with its description truncated to
-// goalDescPreview bytes. The full description is available via get_goal(id).
-func projectGoal(g models.Goal) models.Goal {
-	if len(g.Description) > goalDescPreview {
-		g.Description = g.Description[:goalDescPreview] + "…"
-	}
-	return g
-}
-
-// projectGoalAncestry truncates each ancestor and caps chain length.
-func projectGoalAncestry(chain []models.Goal) []models.Goal {
-	if len(chain) > goalAncestryCap {
-		// Keep the root-most ancestors (the chain is already root-first).
-		chain = chain[:goalAncestryCap]
-	}
-	out := make([]models.Goal, len(chain))
-	for i, g := range chain {
-		out[i] = projectGoal(g)
-	}
-	return out
-}
-

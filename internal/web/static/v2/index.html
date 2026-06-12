@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>wrai.th · v2</title>
+  <link rel="stylesheet" href="./v2.css" />
+</head>
+<body data-scope="home">
+  <div class="app">
+    <!-- Header -->
+    <header class="hdr">
+      <div class="hdr-left">
+        <a class="wordmark-link" href="#/" aria-label="Project home">
+          <span class="wordmark">wrai<span class="dot">.</span>th</span>
+        </a>
+        <span class="ver">v2</span>
+
+        <!-- project identity (project scope only) -->
+        <div class="proj-id" id="projId" hidden>
+          <a class="back-chip" href="#/" aria-label="Back to all projects">
+            <svg viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M10 3 5 8l5 5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            projects
+          </a>
+          <span class="proj-sep" aria-hidden="true">/</span>
+          <span class="proj-id-name" id="projIdName"></span>
+          <a class="linear-badge" id="projLinearBadge" hidden target="_blank" rel="noopener" title="Mirrored from Linear — open Linear">
+            <span class="lin-diamond" aria-hidden="true">◆</span><span class="lin-team" id="projLinearTeam"></span>
+            <span class="lin-arrow" aria-hidden="true">↗</span>
+          </a>
+        </div>
+      </div>
+      <div class="hdr-right">
+        <span class="live" id="liveStatus" data-state="connecting">
+          <span class="live-dot"></span><span class="live-label" id="liveLabel">connecting</span>
+        </span>
+      </div>
+    </header>
+
+    <!-- per-project tabs (project scope only) -->
+    <nav class="proj-tabs" id="projTabs" hidden aria-label="Project sections">
+      <a class="tab" data-route="overview">overview</a>
+      <a class="tab" data-route="board">board</a>
+      <a class="tab" data-route="stats">stats</a>
+      <a class="tab" data-route="notifications">notifications</a>
+      <a class="tab tab-team" data-route="team">team<span class="tab-pulse" aria-hidden="true"></span></a>
+    </nav>
+
+    <!-- Linear connector strip (mirror project only) -->
+    <div class="linear-strip" id="linearStrip" hidden role="status" aria-label="Linear connector status"></div>
+
+    <main class="view" id="view">
+      <!-- ============ PROJECT HOME ============ -->
+      <section class="page page-home" data-page="home">
+        <div class="home-hero">
+          <div class="home-hero-text">
+            <h1 class="home-title">control room</h1>
+            <p class="home-sub">each project is a place — enter one to watch its board, its agents, its conversations.</p>
+          </div>
+          <div class="home-agg" id="homeAgg" aria-label="All-projects summary"></div>
+        </div>
+        <div class="bento" id="bento" aria-label="Projects"></div>
+      </section>
+
+      <!-- ============ OVERVIEW ============ -->
+      <section class="page main" data-page="overview">
+        <section class="kpis" id="kpis" aria-label="Key metrics">
+          <article class="card kpi" data-skel><span class="kpi-label">tasks done</span><span class="kpi-num">—</span><span class="kpi-sub"></span><svg class="kpi-spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true"></svg></article>
+          <article class="card kpi" data-skel><span class="kpi-label">in progress</span><span class="kpi-num">—</span><span class="kpi-sub"></span></article>
+          <article class="card kpi" data-skel><span class="kpi-label">blocked</span><span class="kpi-num">—</span><span class="kpi-sub"></span></article>
+          <article class="card kpi" data-skel><span class="kpi-label">tokens · 24h</span><span class="kpi-num">—</span><span class="kpi-sub"></span></article>
+        </section>
+
+        <section class="card dist" id="dist" aria-label="Status distribution" data-skel>
+          <div class="card-head"><span class="card-label">status distribution</span><span class="card-meta" id="distTotal"></span></div>
+          <div class="distbar" id="distBar"></div>
+          <div class="legend" id="distLegend"></div>
+        </section>
+
+        <section class="zone">
+          <article class="card load" id="loadCard" aria-label="Agent load" data-skel>
+            <div class="card-head"><span class="card-label">agent load</span><span class="card-meta" id="loadMeta"></span></div>
+            <div class="load-body" id="loadBody"></div>
+          </article>
+          <article class="card feed" id="feedCard" aria-label="Activity feed">
+            <div class="card-head"><span class="card-label">activity</span><span class="card-meta" id="feedMeta">live</span></div>
+            <div class="feed-body" id="feedBody"></div>
+          </article>
+        </section>
+      </section>
+
+      <!-- ============ BOARD ============ -->
+      <section class="page" data-page="board" hidden>
+        <div class="board-bar">
+          <div class="distbar board-dist" id="boardDist" aria-label="Status distribution"></div>
+          <div class="board-controls">
+            <div class="cycle-filter" id="cycleFilter" hidden></div>
+            <span class="board-mode" id="boardMode"></span>
+          </div>
+        </div>
+        <div class="board" id="board" aria-label="Kanban board"></div>
+      </section>
+
+      <!-- ============ STATS ============ -->
+      <section class="page main" data-page="stats" hidden>
+        <div class="stats-head">
+          <div class="cycle-filter" id="statsCycleFilter" hidden></div>
+        </div>
+        <section class="kpis" id="statKpis" aria-label="Key metrics"></section>
+        <section class="zone">
+          <article class="card" id="cardThroughput" aria-label="Throughput"></article>
+          <article class="card" id="cardBurndown" aria-label="Burndown"></article>
+        </section>
+        <section class="zone">
+          <article class="card" id="cardTimeState" aria-label="Time in state"></article>
+          <article class="card" id="cardPerAgent" aria-label="Per agent"></article>
+        </section>
+        <section class="card" id="cardBlocked" aria-label="Currently blocked"></section>
+      </section>
+
+      <!-- ============ NOTIFICATIONS ============ -->
+      <section class="page main" data-page="notifications" hidden>
+        <article class="card" id="rulesCard" aria-label="Notification rules">
+          <div class="card-head"><span class="card-label">notification rules</span><span class="card-meta" id="rulesMeta"></span></div>
+          <div class="rules-body" id="rulesBody"></div>
+        </article>
+        <article class="card" id="deliveriesCard" aria-label="Delivery log">
+          <div class="card-head"><span class="card-label">delivery log</span><span class="card-meta" id="deliveriesMeta"></span></div>
+          <div class="deliveries-body" id="deliveriesBody"></div>
+        </article>
+      </section>
+
+      <!-- ============ TEAM · MESSAGE CINEMA ============ -->
+      <section class="page page-team" data-page="team" hidden>
+        <div class="cinema">
+          <div class="stage" id="stage" aria-label="Agent constellation">
+            <svg class="stage-wires" id="stageWires" aria-hidden="true" preserveAspectRatio="none">
+              <defs>
+                <filter id="cometGlow" x="-60%" y="-60%" width="220%" height="220%">
+                  <feGaussianBlur stdDeviation="2.2" result="b" />
+                  <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+                </filter>
+              </defs>
+              <g class="stage-links" id="stageLinks"></g>
+              <g class="stage-pulses" id="stagePulses"></g>
+            </svg>
+            <div class="stage-nodes" id="stageNodes"></div>
+            <div class="stage-captions" id="stageCaptions" aria-hidden="true"></div>
+            <div class="stage-empty" id="stageEmpty" hidden></div>
+          </div>
+          <aside class="transcript" id="transcript" aria-label="Live transcript">
+            <div class="card-head">
+              <span class="card-label">transcript</span>
+              <span class="card-meta" id="transcriptMeta">live</span>
+            </div>
+            <div class="transcript-body" id="transcriptBody"></div>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Slide-over (board card detail) -->
+  <div class="sheet-scrim" id="sheetScrim" hidden></div>
+  <aside class="sheet" id="sheet" hidden aria-label="Task detail" role="dialog" aria-modal="true"></aside>
+
+  <script type="module" src="./v2.js"></script>
+</body>
+</html>

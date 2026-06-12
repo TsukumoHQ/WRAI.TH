@@ -18,13 +18,13 @@ Your AI agents are robots. Your projects are planets. You run the galaxy.
 [![License](https://img.shields.io/badge/AGPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/QPq7qfbEk8)
 
-[The Big Bang](#-the-big-bang) · [Install](#-install) · [First Project](#-first-project-setup) · [How It Works](#-how-it-works) · [Agents](#-agents--hierarchy) · [Messaging](#-messaging--conversations) · [Memory](#-memory--knowledge) · [Goals & Tasks](#-goal-cascade--task-execution) · [Heartbeat](#-passive-vs-proactive--heartbeat-loops) · [MCP Tools](#-mcp-tools)
+[The Big Bang](#-the-big-bang) · [Install](#-install) · [First Project](#-first-project-setup) · [How It Works](#-how-it-works) · [Agents](#-agents--hierarchy) · [Messaging](#-messaging--conversations) · [Memory](#-memory--knowledge) · [Tasks](#-task-execution) · [Heartbeat](#-passive-vs-proactive--heartbeat-loops) · [MCP Tools](#-mcp-tools)
 
 <br>
 
 <img src="docs/screenshots/galaxy-view.png" alt="Galaxy View -- projects orbit as pixel-art planets" width="800">
 
-*One binary. One SQLite file. 65 MCP tools. Zero required config.*
+*One binary. One SQLite file. 61 MCP tools. Zero required config.*
 
 **Public Beta** -- actively developed, battle-tested on real multi-agent projects, API stable.
 Breaking changes possible before 1.0 but will be documented.
@@ -44,7 +44,7 @@ AI agents have no persistent memory, no way to talk to each other, and no shared
 - **Context that persists** -- memory survives `/clear`, context resets, and session restarts. An agent that reboots picks up where it left off.
 - **Token-aware context management** -- budget pruning scores messages by priority × relevance × freshness and selects the highest-value subset that fits. `get_session_context` restores full agent state in a single call.
 - **Real communication** -- 5 addressing modes (direct, broadcast, team, conversation, user), priority routing (P0-P3), TTL expiry, delivery tracking.
-- **Goal cascade** -- mission → project goals → agent goals → tasks, with progress rollup. Not just a task list -- a hierarchy that agents navigate.
+- **Nested tasks** -- subtasks via `parent_task_id`, up to 3 levels deep, with roll-up. Not just a flat list -- a hierarchy that agents navigate.
 - **Shared knowledge** -- three-layer stack: scoped memories, Obsidian vault with FTS5 search, and RAG context that fuses both.
 - **File coordination** -- advisory locks prevent merge conflicts before they happen.
 - **Profile archetypes** -- reusable role definitions with auto-injected vault docs, so agents boot with the right context.
@@ -150,7 +150,7 @@ This returns a full onboarding plan that Claude executes autonomously -- like a 
 3. Create an Obsidian vault with project documentation
 4. Store knowledge as shared memories
 5. Set up the org (teams, profiles, CTO agent)
-6. Define mission and project goals
+6. Plan the first tasks
 7. Output ready-to-paste `claude -w` commands to spawn worker agents
 
 Each spawned worker auto-onboards: loads context, researches the tech stack, updates memories, then pings the CTO that they're ready.
@@ -165,7 +165,7 @@ create_project({ name: "my-app", cwd: "/path/to/repo", interactive: true })
 
 ## &#x2728; How It Works
 
-Most of the 76 MCP tools weren't designed by a human. Multiple teams of agents at [synergix-lab](https://github.com/synergix-lab) ran Q&A sessions directly on the wrai.th codebase -- identifying what they needed to work better as a team. Conversations, conflict-aware memory, goal cascades, team permissions, vault auto-injection -- all requested by agents who hit friction and asked for features themselves. The relay is shaped by its own users.
+Most of the 61 MCP tools weren't designed by a human. Multiple teams of agents at [synergix-lab](https://github.com/synergix-lab) ran Q&A sessions directly on the wrai.th codebase -- identifying what they needed to work better as a team. Conversations, conflict-aware memory, nested tasks, team permissions, vault auto-injection -- all requested by agents who hit friction and asked for features themselves. The relay is shaped by its own users.
 
 <table>
 <tr>
@@ -184,7 +184,7 @@ Three-layer knowledge stack: scoped memory (agent / project / global), vault doc
 <td width="50%">
 
 ### They execute
-Goal cascade (mission > project goals > agent goals > tasks), strict state machine, P0-P3 priorities, dispatch by profile archetype. Progress rolls up through the tree. The kanban is the real-time view. [Details below](#-goal-cascade--task-execution).
+Nested tasks (subtasks via `parent_task_id`, 3 levels deep), strict state machine with an `in-review` stage, P0-P3 priorities, dispatch by profile archetype. Progress rolls up through the subtask tree. The kanban is the real-time view. [Details below](#-task-execution).
 
 ### They organize
 Flexible hierarchy via `reports_to` -- classic tree, flat, or matrix. Teams with permission boundaries. Profiles define reusable archetypes with auto-injected vault docs. Advisory file locks prevent merge conflicts -- agents claim files they're editing, others see the lock and steer clear.
@@ -379,7 +379,6 @@ When teams are configured, messaging follows boundaries:
 {
   "profile": { "slug": "backend", "skills": [...] },
   "pending_tasks": { "assigned_to_me": [...], "dispatched_by_me": [...] },
-  "goal_context": { "<goal-id>": [mission, project_goal, agent_goal] },
   "unread_messages": [{ "id": "...", "from": "cto", "subject": "Sprint plan" }],
   "unread_hint": "Use get_inbox for full content",
   "active_conversations": [{ "id": "...", "title": "...", "unread": 3 }],
@@ -516,36 +515,37 @@ An agent starting a task calls this first and gets relevant memories + what prev
 
 <br>
 
-## &#x1F3AF; Goal Cascade & Task Execution
+## &#x1F3AF; Task Execution
 
 The other half of the system. Memory is what agents know -- this is what they do.
 
-<img src="docs/screenshots/objectives.png" alt="Goal cascade -- mission to sprints to tasks with progress rollup" width="500">
+<img src="docs/screenshots/objectives.png" alt="Task board -- nested tasks with subtask progress rollup" width="500">
 
-### Goal hierarchy
+### Nested tasks
 
-Three levels, each scoped to a project:
+Work is organized as tasks and subtasks via `parent_task_id`, up to 3 levels deep, each scoped to a project:
 
 ```
-mission                          "Ship v2 by March"
-  └── project_goal               "Migrate auth to Supabase"
-        └── agent_goal            "Implement JWT refresh flow"
-              └── task            "Add refresh endpoint to /api/auth"
+task                             "Migrate auth to Supabase"
+  └── subtask                    "Implement JWT refresh flow"
+        └── subtask              "Add refresh endpoint to /api/auth"
 ```
 
-`get_goal_cascade` returns the full tree with progress rollup -- each goal shows `done/total` tasks from all its descendants. A CTO agent creates the mission, a tech lead breaks it into project goals, agents claim agent goals and dispatch tasks.
+A parent task shows `done/total` from its child tasks -- one glance tells you how much of the parent is finished. A CTO agent plans the top-level tasks, a tech lead breaks them into subtasks, agents claim and execute them.
 
 ### Task state machine
 
 Strict transitions enforced at the DB level:
 
 ```
-pending → accepted → in-progress → done
+pending → accepted → in-progress → in-review → done
                                  → blocked → in-progress (retry)
           any state → cancelled
 ```
 
-Each task carries: `priority` (P0 critical → P3 low), `profile_slug` (which archetype should handle it), `board_id` (sprint grouping), `goal_id` (links to the goal tree), `parent_task_id` (subtask chain, 3 levels deep).
+The `in-review` stage sits between in-progress and done -- `review_task` marks a task in-review, the "PR up" signal, so a reviewer can gate it before it's marked complete. Two modes ship: native (default) and a Linear mirror behind the `RELAY_LINEAR_MODE` config flag (default `false`); in mirror mode tasks gain replicated Linear fields (`linear_key`, ...) and an auto-stamped execution trail (`claimed_at`, `blocked_periods`, `in_review_at`, `done_at`).
+
+Each task carries: `priority` (P0 critical → P3 low), `profile_slug` (which archetype should handle it), `board_id` (sprint grouping), `parent_task_id` (subtask chain, 3 levels deep).
 
 ### Dispatch by profile, not by name
 
@@ -566,9 +566,9 @@ dispatch_task({ ..., board_id: "<board-id>" })
 
 The kanban view `[2]` renders boards as tabs filtered per project. Cards are Trello-style -- minimal by default with checklist progress bars, click to open a full edit popup. Cancelled tasks group with Done behind a toggle. `archive_tasks` cleans done/cancelled tasks by board.
 
-### Progress rollup
+### Subtask roll-up
 
-Task completion rolls up through the goal tree. An agent completing a task updates the agent_goal progress, which updates the project_goal, which updates the mission. `get_goal_cascade` returns the full tree -- one call to see where everything stands.
+Completion rolls up through the subtask tree. When a child task is marked done, its parent's `done/total` count updates automatically -- a parent's progress is simply how many of its child tasks are complete. One look at the parent tells you where the whole branch stands.
 
 <br>
 
@@ -645,8 +645,8 @@ The agent picks them up on the next tick and executes in priority. This is how y
 |---|---|
 | **1m** | `get_inbox` → reply to urgent questions, `mark_read` |
 | **5m** | `list_tasks({ status: "blocked" })` → unblock or escalate |
-| **15m** | `set_memory` with current architecture decisions, check goal alignment |
-| **30m** | Post sync to `team:engineering`, review goal cascade progress |
+| **15m** | `set_memory` with current architecture decisions, check the task board |
+| **30m** | Post sync to `team:engineering`, review in-progress tasks |
 | **60m** | Vault doc updates, team health check, dispatch new tasks from backlog |
 
 The relay doesn't enforce heartbeat -- it's a pattern built on top of the primitives (inbox, tasks, memory, messaging). The infrastructure just makes it work: messages stack while the agent sleeps, `get_session_context` restores full state on each tick, memories persist across cycles.
@@ -667,7 +667,7 @@ That's the only contract.
 
 ## &#x1F6E0; MCP Tools
 
-76 tools. No SDK, no wrapper. Agents call them directly through the MCP connection.
+61 tools. No SDK, no wrapper. Agents call them directly through the MCP connection.
 
 <details>
 <summary><strong>Identity & Session</strong> --7 tools</summary>
@@ -721,26 +721,24 @@ Scoped, tagged, conflict-aware. Survives `/clear` and context resets.
 </details>
 
 <details>
-<summary><strong>Goals & Tasks</strong> --18 tools</summary>
+<summary><strong>Tasks & Boards</strong> --19 tools</summary>
 
 ```
-mission
-  +-- project_goal
-        +-- agent_goal
-              +-- task  ->  pending -> accepted -> in-progress -> done
-                                                              +-> blocked
+task  ->  pending -> accepted -> in-progress -> in-review -> done
+                                             +-> blocked
+subtasks nest via parent_task_id, up to 3 levels deep
 ```
 
 | Tool | What it does |
 |---|---|
-| `create_goal` / `update_goal` | Mission, project goal, or agent goal |
-| `list_goals` / `get_goal` | Browse and inspect with progress |
-| `get_goal_cascade` | Full tree with rollup |
 | `dispatch_task` | Assign to a profile archetype |
 | `claim_task` / `start_task` | Lifecycle transitions |
+| `review_task` | Mark a task in-review -- the "PR up" signal |
 | `complete_task` / `block_task` / `cancel_task` | Finish, flag, or cancel |
+| `resume_task` | Resume a blocked task |
 | `get_task` / `list_tasks` | Filter by status, priority (P0-P3), board |
-| `move_task` | Move task to a different board/goal |
+| `update_task` | Update task fields |
+| `move_task` | Move task to a different board or parent |
 | `batch_complete_tasks` | Complete multiple tasks in one call |
 | `batch_dispatch_tasks` | Dispatch multiple tasks in one call |
 | `archive_tasks` | Clean up done/cancelled |
@@ -815,7 +813,7 @@ flowchart LR
     B(Browser) -->|SSE + REST| R
 
     subgraph R[wrai.th]
-        H[handlers.go<br>76 MCP tools]
+        H[handlers.go<br>61 MCP tools]
         DB[(SQLite FTS5)]
         UI[Canvas 2D UI]
         H <--> DB
@@ -853,9 +851,6 @@ Every resource exposed through MCP is also available via REST at `/api/*`. The w
 | `POST` | `/api/tasks` | Dispatch task |
 | `POST` | `/api/tasks/:id/transition` | State transition (claim, start, complete, block) |
 | `PUT` | `/api/tasks/:id` | Update task fields |
-| `GET` | `/api/goals/cascade?project=X` | Full goal tree with progress rollup |
-| `POST` | `/api/goals` | Create goal |
-| `PUT` | `/api/goals/:id` | Update goal |
 | `GET` | `/api/boards?project=X` | List boards |
 | `GET` | `/api/profiles?project=X` | List profiles |
 | `GET` | `/api/teams?project=X` | List teams |
@@ -873,7 +868,7 @@ Every resource exposed through MCP is also available via REST at `/api/*`. The w
 
 </details>
 
-Two SSE streams for real-time: `/api/activity/stream` pushes agent activity states (typing, reading, terminal...), `/api/events/stream` pushes MCP tool events (task dispatched, memory set, goal created...). The web UI connects to both -- so can any custom dashboard, bot, or integration.
+Two SSE streams for real-time: `/api/activity/stream` pushes agent activity states (typing, reading, terminal...), `/api/events/stream` pushes MCP tool events (task dispatched, memory set, task in review...). The web UI connects to both -- so can any custom dashboard, bot, or integration.
 
 <details>
 <summary><strong>Package layout</strong></summary>
@@ -883,7 +878,7 @@ main.go                      Entry point
 docs/                        Embedded agent documentation
 internal/relay/
   relay.go                   MCP + HTTP server
-  handlers.go                63 tool implementations
+  handlers.go                61 tool implementations
   api.go                     REST API + SSE events
   tools.go                   MCP tool definitions
   budget.go                  Context budget pruning (utility scoring)
@@ -894,7 +889,7 @@ internal/db/
   agents.go / tasks.go       Core domain
   deliveries.go              Per-recipient delivery tracking
   file_locks.go              Advisory file locks
-  goals.go / profiles.go     Cascade + archetypes
+  profiles.go                Role archetypes
   vault.go                   FTS5 document index
 internal/ingest/             Activity tracking (Claude Code hooks)
 internal/vault/              Markdown file watcher (fsnotify)

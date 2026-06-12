@@ -12,7 +12,6 @@ const COLORS = {
   block:    { core: "#ff1744", glow: "#d50000", accent: "#ff8a80" },  // red
   register: { core: "#7c4dff", glow: "#6200ea", accent: "#b388ff" },  // purple
   sleep:    { core: "#9575cd", glow: "#512da8", accent: "#d1c4e9" },  // lavender
-  goal:     { core: "#ffd740", glow: "#ffab00", accent: "#fff8e1" },  // gold
 };
 
 // ─── FLOATING TEXT ──────────────────────────────────────────────────
@@ -272,9 +271,6 @@ export class MCPEffects {
       case "register":
         this._registerEffect(pos, evt);
         break;
-      case "goal":
-        this._goalEffect(pos, evt);
-        break;
     }
   }
 
@@ -369,16 +365,6 @@ export class MCPEffects {
         this.effects.push(new FloatingText(x, y - 45, "OFFLINE", COLORS.sleep.core, 1.5));
         break;
     }
-  }
-
-  // ─── GOAL EFFECTS ─────────────────────────────────────────────
-  _goalEffect(pos, evt) {
-    const { x, y } = pos;
-    // Gold star rising
-    this.effects.push(new GlyphRise(x, y - 30, "★", COLORS.goal.core, COLORS.goal.glow, 2.5));
-    this.effects.push(new Shockwave(x, y - 10, COLORS.goal.core, 45, 0.7));
-    this.effects.push(new PixelBurst(x, y - 15, COLORS.goal.accent, 6, 30, 0.5, -10));
-    this.effects.push(new FloatingText(x, y - 55, "GOAL", COLORS.goal.core, 1.5));
   }
 
   // ─── UPDATE & RENDER ──────────────────────────────────────────

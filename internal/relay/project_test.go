@@ -89,32 +89,6 @@ func TestProjectTasks_SortsByPriority(t *testing.T) {
 	}
 }
 
-func TestProjectGoal_TruncatesDescription(t *testing.T) {
-	g := models.Goal{
-		Title:       "g",
-		Description: strings.Repeat("y", 5000),
-	}
-	out := projectGoal(g)
-	// +1 char for trailing "…"
-	if len(out.Description) > goalDescPreview+4 {
-		t.Fatalf("goal desc not truncated: len=%d", len(out.Description))
-	}
-}
-
-func TestProjectGoalAncestry_CapsChain(t *testing.T) {
-	chain := []models.Goal{
-		{ID: "g1", Title: "g1"},
-		{ID: "g2", Title: "g2"},
-		{ID: "g3", Title: "g3"},
-		{ID: "g4", Title: "g4"},
-		{ID: "g5", Title: "g5"},
-	}
-	out := projectGoalAncestry(chain)
-	if len(out) != goalAncestryCap {
-		t.Fatalf("ancestry not capped: len=%d want %d", len(out), goalAncestryCap)
-	}
-}
-
 func TestSummarizeMessage_TruncatesLongContent(t *testing.T) {
 	s := summarizeMessage(models.Message{
 		ID: "m1", From: "prometheus", Priority: "P1",

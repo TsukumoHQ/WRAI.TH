@@ -85,7 +85,7 @@ func (d *DB) DeleteProject(name string) error {
 	// Delete all related data (tables with a project column)
 	tables := []string{
 		"token_usage", "deliveries", "agent_notify_channels", "team_members", "teams",
-		"goals", "boards", "vault_docs", "vaults", "file_locks",
+		"boards", "vault_docs", "vaults", "file_locks",
 		"memories", "profiles", "tasks", "conversations", "messages", "agents",
 	}
 	for _, t := range tables {

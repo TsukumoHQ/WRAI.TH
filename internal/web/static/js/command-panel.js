@@ -883,16 +883,27 @@ export class CommandPanel {
     this._renderAgentPanel();
   }
 
-  // ── Resize ──
+  // ── Resize / collapse ──
+  // Drag the grab bar = resize. Plain click (< 4px movement) = collapse to
+  // just the bar / expand back. Height + collapsed state persist.
 
   _initResize() {
-    let startY = 0, startH = 0, active = false;
+    let startY = 0, startH = 0, active = false, moved = false;
+
+    const savedH = parseInt(localStorage.getItem('cmdDockHeight'), 10);
+    if (savedH >= 120) this._container.style.height = savedH + 'px';
+    if (localStorage.getItem('cmdDockCollapsed') === '1') this._setCollapsed(true);
+
     const onMove = (e) => {
       if (!active) return;
       const dy = startY - e.clientY;
+      if (Math.abs(dy) > 4) moved = true;
+      if (!moved) return;
+      if (this._collapsed) this._setCollapsed(false);
       const newH = Math.max(120, Math.min(window.innerHeight * 0.6, startH + dy));
       this._container.style.height = newH + 'px';
-      window.dispatchEvent(new Event('resize'));
+      // No resize dispatch: the dock floats over the canvas stage, so its
+      // height never reflows the scene.
     };
     const onUp = () => {
       if (!active) return;
@@ -901,16 +912,32 @@ export class CommandPanel {
       document.body.style.cursor = '';
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      if (moved) {
+        localStorage.setItem('cmdDockHeight', String(this._container.offsetHeight));
+      } else {
+        this._setCollapsed(!this._collapsed);
+      }
     };
     this._resizeHandle.addEventListener('mousedown', (e) => {
       e.preventDefault();
       active = true;
+      moved = false;
       startY = e.clientY;
-      startH = this._container.offsetHeight;
+      startH = this._collapsed
+        ? (parseInt(localStorage.getItem('cmdDockHeight'), 10) || 200)
+        : this._container.offsetHeight;
       document.body.style.userSelect = 'none';
       document.body.style.cursor = 'ns-resize';
       document.addEventListener('mousemove', onMove);
       document.addEventListener('mouseup', onUp);
     });
+    this._resizeHandle.title = 'Glisser : redimensionner · Clic : replier/déplier';
+  }
+
+  _setCollapsed(collapsed) {
+    this._collapsed = collapsed;
+    this._container.classList.toggle('dock-collapsed', collapsed);
+    this._resizeHandle.classList.toggle('dock-collapsed', collapsed);
+    localStorage.setItem('cmdDockCollapsed', collapsed ? '1' : '0');
   }
 }

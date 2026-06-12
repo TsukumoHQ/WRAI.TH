@@ -20,33 +20,30 @@ type Task struct {
 	AckNotifiedAt  *string `json:"ack_notified_at,omitempty"`
 	AckEscalatedAt *string `json:"ack_escalated_at,omitempty"`
 	BoardID        *string `json:"board_id,omitempty"`
-	GoalID         *string `json:"goal_id,omitempty"`
 	ArchivedAt     *string `json:"archived_at,omitempty"`
-	Subtasks       []Task  `json:"subtasks,omitempty"`
-}
 
-type Goal struct {
-	ID           string  `json:"id"`
-	Project      string  `json:"project"`
-	Type         string  `json:"type"`
-	Title        string  `json:"title"`
-	Description  string  `json:"description"`
-	OwnerAgent   *string `json:"owner_agent,omitempty"`
-	ParentGoalID *string `json:"parent_goal_id,omitempty"`
-	Status       string  `json:"status"`
-	CreatedBy    string  `json:"created_by"`
-	CreatedAt    string  `json:"created_at"`
-	UpdatedAt    string  `json:"updated_at"`
-	CompletedAt  *string `json:"completed_at,omitempty"`
-}
+	// --- Linear zone (read-only, replicated from Linear SSOT) ---
+	Source        string  `json:"source"` // 'native' | 'linear'
+	LinearIssueID *string `json:"linear_issue_id,omitempty"`
+	LinearKey     *string `json:"linear_key,omitempty"` // e.g. SYN-123
+	ExternalURL   *string `json:"external_url,omitempty"`
+	Points        *int    `json:"points,omitempty"`
+	Labels        string  `json:"labels"` // json array
+	LinearState   *string `json:"linear_state,omitempty"`
+	Assignee      *string `json:"assignee,omitempty"`
+	CycleID       *string `json:"cycle_id,omitempty"`
+	CycleName     *string `json:"cycle_name,omitempty"`
+	CycleStart    *string `json:"cycle_start,omitempty"`
+	CycleEnd      *string `json:"cycle_end,omitempty"`
 
-type GoalWithProgress struct {
-	Goal
-	TotalTasks int                `json:"total_tasks"`
-	DoneTasks  int                `json:"done_tasks"`
-	Progress   float64            `json:"progress"`
-	Children   []GoalWithProgress `json:"children,omitempty"`
-	Ancestry   []Goal             `json:"ancestry,omitempty"`
+	// --- Execution overlay (relay-owned, auto-stamped temporal trail) ---
+	ClaimedBy      *string `json:"claimed_by,omitempty"`
+	ClaimedAt      *string `json:"claimed_at,omitempty"`
+	BlockedPeriods string  `json:"blocked_periods"` // json array of {start,end}
+	InReviewAt     *string `json:"in_review_at,omitempty"`
+	DoneAt         *string `json:"done_at,omitempty"`
+
+	Subtasks []Task `json:"subtasks,omitempty"`
 }
 
 type Board struct {

@@ -1,44 +1,96 @@
-// kanban.js — Tokyo Neon Night Kanban Board
-// 8-bit aesthetic task board for agent-relay dashboard
+// kanban.js — agentic task board (read-replica of the Linear mirror + relay overlay)
+//
+// Renders the local `tasks` table only — one fetch per cycle, zero Linear
+// round-trips. Columns: Backlog (collapsed) / Todo / In Progress / In Review /
+// Done. State maps from linear_state when source=linear, else from native
+// status. Cards carry the execution overlay (claimed-by agent color, blocked
+// badge, "in review N min"), child roll-up, and a read-only detail panel.
+//
+// Mode-aware: linear_mode → read-only (cards link out to external_url, no create
+// form); native → writable .kb-form create/edit. SSE drives in-place upserts
+// with animated column moves (respecting prefers-reduced-motion).
 
-const STATUS_ORDER = ['pending', 'accepted', 'in-progress', 'done', 'blocked', 'cancelled'];
+import { PALETTE_COLORS } from "./sprite.js";
 
-const VALID_TRANSITIONS = {
-  'pending':     ['accepted', 'in-progress', 'cancelled'],
-  'accepted':    ['in-progress', 'done', 'cancelled'],
-  'in-progress': ['done', 'blocked', 'cancelled'],
-  'blocked':     ['in-progress', 'done', 'cancelled'],
-  'done':        ['cancelled'],
-  'cancelled':   [],
+// ── Columns ──────────────────────────────────────────────────────────────
+// The five board columns in render order. Backlog is collapsed by default.
+const COLUMNS = ["backlog", "todo", "in-progress", "in-review", "done"];
+
+const COLUMN_LABELS = {
+  backlog: "BACKLOG",
+  todo: "TODO",
+  "in-progress": "IN PROGRESS",
+  "in-review": "IN REVIEW",
+  done: "DONE",
 };
 
-const STATUS_COLORS = {
-  'pending':     '#ffd93d',
-  'accepted':    '#74b9ff',
-  'in-progress': '#00e676',
-  'done':        '#636e72',
-  'blocked':     '#ff6b6b',
-  'cancelled':   '#b2bec3',
+const COLUMN_COLORS = {
+  backlog: "#636e72",
+  todo: "#ffd93d",
+  "in-progress": "#00e676",
+  "in-review": "#74b9ff",
+  done: "#6c5ce7",
 };
 
 const PRIORITY_COLORS = {
-  P0: '#ff6b6b',
-  P1: '#ffa502',
-  P2: '#a29bfe',
-  P3: '#636e72',
+  P0: "#ff6b6b",
+  P1: "#ffa502",
+  P2: "#a29bfe",
+  P3: "#636e72",
 };
 
-const STATUS_LABELS = {
-  'pending':     'PENDING',
-  'accepted':    'ACCEPTED',
-  'in-progress': 'IN PROGRESS',
-  'done':        'DONE',
-  'blocked':     'BLOCKED',
-  'cancelled':   'CANCELLED',
+// Native status → board column. `blocked` keeps its underlying column (we badge
+// it rather than giving it a lane), so it falls through to whatever it was.
+const NATIVE_STATUS_COLUMN = {
+  pending: "todo",
+  accepted: "in-progress",
+  "in-progress": "in-progress",
+  "in-review": "in-review",
+  done: "done",
+  cancelled: "done",
 };
 
+// Linear workflow state (by lowercased name) → board column. Linear uses state
+// *types* (backlog/unstarted/started/completed) plus free-text names; we match
+// common names and fall back to the type-ish keywords.
+function linearStateColumn(state) {
+  if (!state) return "todo";
+  const s = String(state).toLowerCase();
+  if (s.includes("backlog")) return "backlog";
+  if (s.includes("review")) return "in-review";
+  if (s.includes("progress") || s.includes("started") || s.includes("doing")) return "in-progress";
+  if (s.includes("done") || s.includes("complete") || s.includes("merged") || s.includes("closed") || s.includes("cancel")) return "done";
+  if (s.includes("todo") || s.includes("to do") || s.includes("unstarted") || s.includes("ready") || s.includes("triage")) return "todo";
+  return "todo";
+}
+
+// columnFor maps a task to its board column, source-aware.
+function columnFor(task) {
+  if (task.source === "linear" && task.linear_state) {
+    return linearStateColumn(task.linear_state);
+  }
+  return NATIVE_STATUS_COLUMN[task.status] || "todo";
+}
+
+// ── Agent color (reused from the canvas sprite system) ─────────────────────
+// Same hash the sprite generator uses, so a claimed card "belongs" to its agent
+// with the identical neon accent shown on the canvas.
+function hashName(name) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function agentColor(name) {
+  if (!name) return "#a29bfe";
+  return PALETTE_COLORS[hashName(name) % PALETTE_COLORS.length];
+}
+
+// ── Time helpers ──────────────────────────────────────────────────────────
 function timeAgo(dateStr) {
-  if (!dateStr) return '';
+  if (!dateStr) return "";
   const diff = Date.now() - new Date(dateStr).getTime();
   const secs = Math.floor(diff / 1000);
   if (secs < 60) return `${secs}s ago`;
@@ -46,753 +98,318 @@ function timeAgo(dateStr) {
   if (mins < 60) return `${mins}m ago`;
   const hrs = Math.floor(mins / 60);
   if (hrs < 24) return `${hrs}h ago`;
-  const days = Math.floor(hrs / 24);
-  return `${days}d ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
+}
+
+function minsSince(dateStr) {
+  if (!dateStr) return 0;
+  return Math.max(0, Math.floor((Date.now() - new Date(dateStr).getTime()) / 60000));
+}
+
+function fmtTS(ts) {
+  if (!ts) return "—";
+  return new Date(ts).toLocaleString(undefined, {
+    month: "short", day: "numeric", hour: "2-digit", minute: "2-digit",
+  });
 }
 
 function esc(str) {
-  if (!str) return '';
-  const d = document.createElement('div');
-  d.textContent = str;
+  if (str === undefined || str === null) return "";
+  const d = document.createElement("div");
+  d.textContent = String(str);
   return d.innerHTML;
 }
 
+function parseLabels(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+function parseBlockedPeriods(raw) {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? v : [];
+  } catch {
+    return [];
+  }
+}
+
+function isBlocked(task) {
+  if (task.status === "blocked") return true;
+  // An open blocked window (no end) means currently blocked even if linear_state moved on.
+  return parseBlockedPeriods(task.blocked_periods).some((p) => p && p.start && !p.end);
+}
+
+// PR/branch link derived from linear_key (SYN-123 → conventional branch name).
+function branchHint(task) {
+  if (!task.linear_key) return null;
+  return task.linear_key.toLowerCase();
+}
+
+const REDUCE_MOTION = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
 const KANBAN_STYLES = `
-@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
-
-@keyframes p0pulse {
-  0%, 100% { box-shadow: 0 0 6px rgba(255,107,107,0.4), 0 0 12px rgba(255,107,107,0.2); border-color: rgba(255,107,107,0.6); }
-  50%      { box-shadow: 0 0 14px rgba(255,107,107,0.8), 0 0 28px rgba(255,107,107,0.4); border-color: rgba(255,107,107,1); }
+@keyframes kb-slideIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes kb-formIn { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+@keyframes kb-p0pulse {
+  0%, 100% { box-shadow: 0 0 6px rgba(255,107,107,0.4); border-color: rgba(255,107,107,0.6); }
+  50%      { box-shadow: 0 0 14px rgba(255,107,107,0.8); border-color: rgba(255,107,107,1); }
 }
-
-@keyframes slideIn {
-  from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
+@keyframes kb-moved {
+  0%   { box-shadow: 0 0 0 0 rgba(108,92,231,0.0); }
+  30%  { box-shadow: 0 0 18px 2px rgba(108,92,231,0.55); border-color: rgba(108,92,231,0.9); }
+  100% { box-shadow: 0 0 0 0 rgba(108,92,231,0.0); }
 }
-
-@keyframes formIn {
-  from { opacity: 0; transform: scale(0.95); }
-  to   { opacity: 1; transform: scale(1); }
+@keyframes kb-flash {
+  0%, 100% { box-shadow: 0 0 16px rgba(108,92,231,0.3); }
+  50% { box-shadow: 0 0 24px rgba(108,92,231,0.6); border-color: rgba(108,92,231,1); }
 }
 
 .kb-root {
   font-family: 'JetBrains Mono', monospace;
-  background: #0a0a12;
-  color: #dfe6e9;
-  width: 100%;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  position: relative;
+  background: #0a0a12; color: #dfe6e9;
+  width: 100%; height: 100%;
+  display: flex; flex-direction: column;
+  overflow: hidden; position: relative;
 }
 
-/* ── Header ── */
+/* Header */
 .kb-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 20px 10px;
-  border-bottom: 1px solid rgba(108,92,231,0.2);
-  flex-shrink: 0;
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 12px 20px 10px; gap: 16px;
+  border-bottom: 1px solid rgba(108,92,231,0.2); flex-shrink: 0;
 }
+.kb-header-left { display: flex; align-items: baseline; gap: 14px; min-width: 0; }
 .kb-header h2 {
-  margin: 0;
-  font-size: 15px;
-  font-weight: 700;
-  letter-spacing: 2px;
-  text-transform: uppercase;
-  color: #6c5ce7;
-  text-shadow: 0 0 10px rgba(108,92,231,0.5);
+  margin: 0; font-size: 15px; font-weight: 700; letter-spacing: 2px;
+  text-transform: uppercase; color: #6c5ce7; text-shadow: 0 0 10px rgba(108,92,231,0.5);
 }
+.kb-cycle-info { font-size: 10px; color: #8d8da3; letter-spacing: 0.5px; white-space: nowrap; }
+.kb-cycle-info b { color: #a29bfe; font-weight: 600; }
+.kb-mode-badge {
+  font-size: 8px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
+  padding: 2px 6px; border-radius: 2px; border: 1px solid;
+}
+.kb-mode-badge--linear { color: #74b9ff; border-color: rgba(116,185,255,0.4); background: rgba(116,185,255,0.08); }
+.kb-mode-badge--native { color: #00e676; border-color: rgba(0,230,118,0.35); background: rgba(0,230,118,0.06); }
+.kb-header-right { display: flex; align-items: center; gap: 10px; }
+.kb-cycle-select {
+  background: rgba(30,30,50,0.6); border: 1px solid rgba(108,92,231,0.25);
+  color: #dfe6e9; font-family: 'JetBrains Mono', monospace; font-size: 10px;
+  padding: 4px 8px; border-radius: 2px; outline: none; cursor: pointer;
+}
+.kb-cycle-select:focus { border-color: rgba(108,92,231,0.6); }
 .kb-add-btn {
-  width: 32px; height: 32px;
-  background: rgba(108,92,231,0.15);
-  border: 1px solid rgba(108,92,231,0.35);
-  color: #6c5ce7;
-  font-size: 20px;
-  font-family: 'JetBrains Mono', monospace;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: all 0.2s;
-  line-height: 1;
+  width: 30px; height: 30px; background: rgba(108,92,231,0.15);
+  border: 1px solid rgba(108,92,231,0.35); color: #6c5ce7;
+  font-size: 18px; font-family: 'JetBrains Mono', monospace; cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s; line-height: 1;
 }
-.kb-add-btn:hover {
-  background: rgba(108,92,231,0.3);
-  box-shadow: 0 0 12px rgba(108,92,231,0.4);
-  transform: scale(1.1);
-}
+.kb-add-btn:hover { background: rgba(108,92,231,0.3); box-shadow: 0 0 12px rgba(108,92,231,0.4); }
+.kb-add-btn:focus-visible { outline: 2px solid #a29bfe; outline-offset: 2px; }
 
-/* ── Board tabs ── */
-.kb-tab {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 9px;
-  font-weight: 600;
-  padding: 3px 8px;
-  background: transparent;
-  border: 1px solid rgba(108,92,231,0.15);
-  color: #636e72;
-  cursor: pointer;
-  letter-spacing: 1px;
-  transition: all 0.15s;
-  border-radius: 2px;
-}
-.kb-tab:hover {
-  border-color: rgba(108,92,231,0.4);
-  color: #a29bfe;
-}
-.kb-tab--active {
-  background: rgba(108,92,231,0.2);
-  border-color: rgba(108,92,231,0.5);
-  color: #6c5ce7;
-  text-shadow: 0 0 6px rgba(108,92,231,0.4);
-}
+/* Board */
+.kb-board { display: flex; gap: 12px; padding: 14px 16px; flex: 1; overflow-x: auto; overflow-y: hidden; }
 
-/* ── Board ── */
-.kb-board {
-  display: flex;
-  gap: 12px;
-  padding: 14px 16px;
-  flex: 1;
-  overflow-x: auto;
-  overflow-y: hidden;
-}
-
-/* ── Column ── */
+/* Column */
 .kb-col {
-  flex: 1;
-  min-width: 220px;
-  max-width: 340px;
-  display: flex;
-  flex-direction: column;
-  background: rgba(15,15,26,0.95);
-  border: 1px solid rgba(108,92,231,0.15);
-  border-radius: 4px;
-  overflow: hidden;
+  flex: 1; min-width: 220px; max-width: 360px;
+  display: flex; flex-direction: column;
+  background: rgba(15,15,26,0.95); border: 1px solid rgba(108,92,231,0.15);
+  border-radius: 4px; overflow: hidden;
 }
-.kb-col.kb-col--blocked {
-  background: rgba(30,12,12,0.95);
-  border-color: rgba(255,107,107,0.2);
-}
+.kb-col--collapsed { flex: 0 0 44px; min-width: 44px; max-width: 44px; }
 .kb-col-header {
-  padding: 10px 12px 8px;
-  text-transform: uppercase;
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 2px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border-bottom: 2px solid rgba(108,92,231,0.25);
-  flex-shrink: 0;
+  padding: 10px 12px 8px; text-transform: uppercase; font-size: 11px; font-weight: 700;
+  letter-spacing: 2px; display: flex; align-items: center; gap: 8px;
+  border-bottom: 2px solid rgba(108,92,231,0.25); flex-shrink: 0; cursor: pointer; user-select: none;
 }
-.kb-col--blocked .kb-col-header {
-  border-bottom-color: rgba(255,107,107,0.3);
+.kb-col--collapsed .kb-col-header {
+  writing-mode: vertical-rl; transform: rotate(180deg);
+  border-bottom: none; height: 100%; justify-content: flex-start; padding: 12px 12px;
 }
 .kb-col-count {
-  font-size: 10px;
-  background: rgba(108,92,231,0.15);
-  color: #a29bfe;
-  padding: 1px 6px;
-  border-radius: 2px;
+  font-size: 10px; background: rgba(108,92,231,0.15); color: #a29bfe;
+  padding: 1px 6px; border-radius: 2px;
 }
-.kb-col-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
+.kb-col--collapsed .kb-col-body { display: none; }
+.kb-col-body { flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .kb-col-body::-webkit-scrollbar { width: 4px; }
-.kb-col-body::-webkit-scrollbar-track { background: transparent; }
 .kb-col-body::-webkit-scrollbar-thumb { background: rgba(108,92,231,0.3); border-radius: 2px; }
-.kb-col.kb-drag-over {
-  border-color: rgba(108,92,231,0.6);
-  box-shadow: inset 0 0 20px rgba(108,92,231,0.1);
+.kb-col-empty {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  color: #444; font-size: 10px; letter-spacing: 1px; text-transform: uppercase; padding: 20px 0;
 }
 
-/* ── Card ── */
+/* Card */
 .kb-card {
-  background: rgba(30,30,50,0.6);
-  border: 1px solid rgba(108,92,231,0.15);
-  border-radius: 3px;
-  padding: 10px;
-  cursor: grab;
-  transition: all 0.15s;
-  animation: slideIn 0.25s ease-out;
-  position: relative;
+  background: rgba(30,30,50,0.6); border: 1px solid rgba(108,92,231,0.15);
+  border-radius: 3px; padding: 10px; cursor: pointer; transition: all 0.15s; position: relative;
+  animation: kb-slideIn 0.25s ease-out;
 }
-.kb-card:hover {
-  border-color: rgba(108,92,231,0.4);
-  box-shadow: 0 0 10px rgba(108,92,231,0.15);
-  transform: translateY(-1px);
+.kb-card:hover { border-color: rgba(108,92,231,0.4); box-shadow: 0 0 10px rgba(108,92,231,0.15); transform: translateY(-1px); }
+.kb-card:focus-visible { outline: 2px solid #a29bfe; outline-offset: 2px; }
+.kb-card.kb-p0 { border-color: rgba(255,107,107,0.6); animation: kb-p0pulse 2s ease-in-out infinite, kb-slideIn 0.25s ease-out; }
+.kb-card.kb-blocked { border-left: 3px solid #ff6b6b; background: rgba(40,16,16,0.6); }
+.kb-card.kb-moved { animation: kb-moved 1.1s ease-out; }
+.kb-card.kb-highlight { animation: kb-flash 0.6s ease-in-out 3; border-color: rgba(108,92,231,0.8); }
+.kb-card[data-claimed] { border-left: 3px solid var(--kb-agent-color, #a29bfe); }
+
+.kb-card-top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; flex-wrap: wrap; }
+.kb-key {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.5px; padding: 1px 5px; border-radius: 2px;
+  color: #74b9ff; background: rgba(116,185,255,0.12); border: 1px solid rgba(116,185,255,0.3);
 }
-.kb-card.kb-dragging {
-  opacity: 0.5;
-  transform: scale(0.97);
+.kb-badge { font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: 2px; letter-spacing: 1px; }
+.kb-points {
+  font-size: 9px; font-weight: 700; color: #ffd93d; background: rgba(255,217,61,0.12);
+  border: 1px solid rgba(255,217,61,0.3); padding: 1px 5px; border-radius: 2px;
 }
-.kb-card.kb-p0 {
-  border-color: rgba(255,107,107,0.6);
-  animation: p0pulse 2s ease-in-out infinite, slideIn 0.25s ease-out;
+.kb-time { font-size: 9px; color: #636e72; margin-left: auto; }
+.kb-card-title { font-size: 12px; font-weight: 600; color: #dfe6e9; margin-bottom: 6px; line-height: 1.35; word-break: break-word; }
+
+.kb-card-meta { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 10px; }
+.kb-label {
+  font-size: 8px; padding: 0 5px; border-radius: 8px; color: #b2bec3;
+  background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); line-height: 1.5;
 }
-.kb-card.kb-founder {
-  border-left: 3px solid #ffd93d;
-  background: rgba(255,217,61,0.06);
+.kb-assignee { color: #8d8da3; }
+
+/* Overlay row (execution state) */
+.kb-overlay-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 7px; font-size: 9px; }
+.kb-claim { display: flex; align-items: center; gap: 4px; font-weight: 600; }
+.kb-claim-dot { width: 8px; height: 8px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
+.kb-blocked-badge {
+  font-size: 8px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+  color: #ff6b6b; background: rgba(255,107,107,0.15); border: 1px solid rgba(255,107,107,0.4);
+  padding: 1px 5px; border-radius: 2px;
 }
-.kb-card.kb-highlight {
-  animation: kb-flash 0.6s ease-in-out 3;
-  border-color: rgba(108,92,231,0.8);
-  box-shadow: 0 0 16px rgba(108,92,231,0.3), 0 0 4px rgba(108,92,231,0.2);
-}
-@keyframes kb-flash {
-  0%, 100% { box-shadow: 0 0 16px rgba(108,92,231,0.3); }
-  50% { box-shadow: 0 0 24px rgba(108,92,231,0.6), 0 0 8px rgba(108,92,231,0.4); border-color: rgba(108,92,231,1); }
-}
-.kb-founder-tag {
-  font-size: 8px;
-  font-weight: 700;
-  color: #ffd93d;
-  background: rgba(255,217,61,0.15);
-  border: 1px solid rgba(255,217,61,0.3);
-  padding: 0 4px;
-  border-radius: 2px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-}
-.kb-card-top {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 6px;
-}
-.kb-badge {
-  font-size: 9px;
-  font-weight: 700;
-  padding: 1px 5px;
-  border-radius: 2px;
-  letter-spacing: 1px;
-}
-.kb-time {
-  font-size: 9px;
-  color: #636e72;
-}
-.kb-card-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: #dfe6e9;
-  margin-bottom: 6px;
-  line-height: 1.35;
-  word-break: break-word;
-}
-.kb-card-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  font-size: 10px;
-}
-.kb-profile {
-  color: #a29bfe;
-}
-.kb-agent {
-  color: #00e676;
-}
-.kb-card-checklist {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin-top: 4px;
-}
-.kb-card-cl-header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.kb-card-cl-bar {
-  flex: 1;
-  height: 3px;
-  background: rgba(255,255,255,0.08);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.kb-card-cl-fill {
-  height: 100%;
-  background: #00e676;
-  border-radius: 2px;
-  transition: width 0.2s;
-}
-.kb-card-cl-text {
-  font: 9px 'JetBrains Mono', monospace;
-  color: rgba(255,255,255,0.35);
-  white-space: nowrap;
-}
-.kb-card-cl-items {
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  margin-top: 3px;
-}
-.kb-card-cl-row {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font: 9px/1.3 'JetBrains Mono', monospace;
-  color: rgba(255,255,255,0.55);
-  cursor: pointer;
-  padding: 1px 0;
-}
-.kb-card-cl-row:hover {
-  color: rgba(255,255,255,0.75);
-}
-.kb-card-cl-row input[type="checkbox"] {
-  width: 10px;
-  height: 10px;
-  margin: 0;
-  cursor: pointer;
-  accent-color: #00e676;
-  flex-shrink: 0;
-}
-.kb-card-cl-row span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.kb-card-cl-row.kb-cl-done span {
-  text-decoration: line-through;
-  color: rgba(255,255,255,0.25);
-}
-.kb-card-actions {
-  position: absolute;
-  bottom: 6px;
-  right: 6px;
-  display: none;
-}
-.kb-card:hover .kb-card-actions { display: flex; gap: 4px; }
-.kb-action-btn {
-  width: 18px; height: 18px;
-  background: rgba(108,92,231,0.2);
-  border: 1px solid rgba(108,92,231,0.3);
-  color: #a29bfe;
-  font-size: 10px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: 'JetBrains Mono', monospace;
-  transition: all 0.15s;
-  padding: 0;
-  line-height: 1;
-}
-.kb-action-btn:hover {
-  background: rgba(108,92,231,0.4);
-  color: #fff;
-}
-.kb-action-btn.kb-action-block {
-  border-color: rgba(255,107,107,0.3);
-  color: #ff6b6b;
-}
-.kb-action-btn.kb-action-block:hover {
-  background: rgba(255,107,107,0.3);
+.kb-review-timer {
+  font-size: 8px; font-weight: 700; letter-spacing: 0.5px; text-transform: uppercase;
+  color: #74b9ff; background: rgba(116,185,255,0.12); border: 1px solid rgba(116,185,255,0.35);
+  padding: 1px 5px; border-radius: 2px;
 }
 
-/* ── Card detail ── */
+/* Child roll-up */
+.kb-rollup { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+.kb-rollup-bar { flex: 1; height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px; overflow: hidden; }
+.kb-rollup-fill { height: 100%; background: #00e676; border-radius: 2px; transition: width 0.25s; }
+.kb-rollup-text { font: 9px 'JetBrains Mono', monospace; color: rgba(255,255,255,0.45); white-space: nowrap; }
+.kb-expand {
+  background: none; border: none; color: #8d8da3; cursor: pointer; font-size: 10px;
+  padding: 0; font-family: 'JetBrains Mono', monospace;
+}
+.kb-expand:hover { color: #a29bfe; }
+.kb-children { margin-top: 8px; padding-left: 10px; border-left: 1px dashed rgba(108,92,231,0.25); display: flex; flex-direction: column; gap: 6px; }
+.kb-child {
+  background: rgba(20,20,34,0.7); border: 1px solid rgba(108,92,231,0.12); border-radius: 3px;
+  padding: 6px 8px; font-size: 10px; cursor: pointer; transition: border-color 0.15s;
+}
+.kb-child:hover { border-color: rgba(108,92,231,0.4); }
+.kb-child-row { display: flex; align-items: center; gap: 6px; }
+.kb-child-state { font-size: 8px; padding: 0 4px; border-radius: 2px; flex-shrink: 0; }
+.kb-child-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* External link affordance */
+.kb-extlink { color: #74b9ff; font-size: 9px; text-decoration: none; }
+.kb-extlink:hover { text-decoration: underline; }
+
+/* Detail panel (slide-over) */
+.kb-detail-overlay { position: absolute; inset: 0; background: rgba(5,5,10,0.55); z-index: 120; display: flex; justify-content: flex-end; }
 .kb-detail {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(108,92,231,0.15);
-  font-size: 10px;
-  color: #b2bec3;
-  animation: slideIn 0.2s ease-out;
+  width: 440px; max-width: 92%; height: 100%;
+  background: rgba(13,13,24,0.99); border-left: 1px solid rgba(108,92,231,0.3);
+  box-shadow: -10px 0 40px rgba(0,0,0,0.5); overflow-y: auto; padding: 22px;
+  animation: kb-slideIn 0.2s ease-out;
 }
-.kb-detail-row {
-  margin-bottom: 4px;
-  line-height: 1.4;
+.kb-detail::-webkit-scrollbar { width: 5px; }
+.kb-detail::-webkit-scrollbar-thumb { background: rgba(108,92,231,0.3); border-radius: 2px; }
+.kb-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+.kb-detail-title { font-size: 15px; font-weight: 700; color: #dfe6e9; line-height: 1.35; }
+.kb-detail-close {
+  background: none; border: 1px solid rgba(108,92,231,0.25); color: #8d8da3;
+  font-size: 14px; width: 26px; height: 26px; cursor: pointer; border-radius: 2px; flex-shrink: 0; line-height: 1;
 }
-.kb-detail-label {
-  color: #636e72;
-  text-transform: uppercase;
-  font-size: 9px;
-  letter-spacing: 1px;
-}
+.kb-detail-close:hover { color: #fff; border-color: rgba(108,92,231,0.6); }
+.kb-detail-section { margin-bottom: 16px; }
+.kb-detail-label { color: #636e72; text-transform: uppercase; font-size: 9px; letter-spacing: 1px; margin-bottom: 5px; }
 .kb-detail-desc {
-  white-space: pre-wrap;
-  word-break: break-word;
-  margin: 4px 0;
-  padding: 6px;
-  background: rgba(10,10,18,0.5);
-  border-radius: 2px;
-  max-height: 120px;
-  overflow-y: auto;
+  white-space: pre-wrap; word-break: break-word; font-size: 11px; color: #b2bec3;
+  background: rgba(10,10,18,0.5); border-radius: 3px; padding: 10px; line-height: 1.5;
 }
-.kb-subtask-list {
-  padding-left: 12px;
-  margin: 4px 0;
-}
-.kb-subtask-item {
-  margin-bottom: 2px;
-}
-.kb-subtask-status {
-  font-size: 9px;
-  padding: 0 3px;
-  border-radius: 2px;
-  margin-left: 4px;
+.kb-detail-meta { display: flex; flex-wrap: wrap; gap: 8px; }
+.kb-detail-pill {
+  font-size: 9px; padding: 2px 7px; border-radius: 3px; color: #b2bec3;
+  background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
 }
 
-/* ── Dispatch form ── */
-.kb-overlay {
-  position: absolute;
-  inset: 0;
-  background: rgba(5,5,10,0.85);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 100;
+/* Temporal trail */
+.kb-trail { display: flex; flex-direction: column; gap: 0; }
+.kb-trail-step { display: flex; gap: 10px; align-items: flex-start; position: relative; padding-bottom: 12px; }
+.kb-trail-step:last-child { padding-bottom: 0; }
+.kb-trail-dot { width: 9px; height: 9px; border-radius: 50%; margin-top: 3px; flex-shrink: 0; box-shadow: 0 0 6px currentColor; }
+.kb-trail-step:not(:last-child)::before {
+  content: ''; position: absolute; left: 4px; top: 12px; bottom: 0; width: 1px; background: rgba(108,92,231,0.25);
+}
+.kb-trail-body { display: flex; flex-direction: column; }
+.kb-trail-step-label { font-size: 11px; color: #dfe6e9; }
+.kb-trail-step-time { font-size: 9px; color: #636e72; }
+.kb-trail-step--blocked .kb-trail-step-label { color: #ff6b6b; }
+
+.kb-comment { background: rgba(10,10,18,0.5); border-radius: 3px; padding: 8px 10px; margin-bottom: 6px; }
+.kb-comment-head { display: flex; justify-content: space-between; font-size: 9px; color: #8d8da3; margin-bottom: 3px; }
+.kb-comment-agent { color: #a29bfe; font-weight: 600; }
+.kb-comment-body { font-size: 11px; color: #b2bec3; white-space: pre-wrap; word-break: break-word; }
+.kb-detail-extlink {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: #74b9ff;
+  text-decoration: none; padding: 6px 10px; border: 1px solid rgba(116,185,255,0.3);
+  border-radius: 3px; background: rgba(116,185,255,0.06);
+}
+.kb-detail-extlink:hover { background: rgba(116,185,255,0.14); }
+
+/* Create/edit form (native mode only) */
+.kb-form-overlay {
+  position: absolute; inset: 0; background: rgba(5,5,10,0.85);
+  display: flex; align-items: center; justify-content: center; z-index: 130;
 }
 .kb-form {
-  background: rgba(15,15,26,0.98);
-  border: 1px solid rgba(108,92,231,0.3);
-  border-radius: 4px;
-  padding: 24px;
-  width: 560px;
-  max-width: 90%;
-  max-height: 85vh;
-  overflow-y: auto;
-  animation: formIn 0.2s ease-out;
-  box-shadow: 0 0 30px rgba(108,92,231,0.15);
+  background: rgba(15,15,26,0.98); border: 1px solid rgba(108,92,231,0.3); border-radius: 4px;
+  padding: 24px; width: 560px; max-width: 90%; max-height: 85vh; overflow-y: auto;
+  animation: kb-formIn 0.2s ease-out; box-shadow: 0 0 30px rgba(108,92,231,0.15);
 }
-.kb-form::-webkit-scrollbar { width: 4px; }
-.kb-form::-webkit-scrollbar-track { background: transparent; }
-.kb-form::-webkit-scrollbar-thumb { background: rgba(108,92,231,0.3); border-radius: 2px; }
-.kb-form h3 {
-  margin: 0 0 16px;
-  font-size: 13px;
-  color: #6c5ce7;
-  text-transform: uppercase;
-  letter-spacing: 2px;
-  text-shadow: 0 0 8px rgba(108,92,231,0.4);
+.kb-form h3 { margin: 0 0 16px; font-size: 13px; color: #6c5ce7; text-transform: uppercase; letter-spacing: 2px; }
+.kb-field { margin-bottom: 12px; }
+.kb-field label { display: block; font-size: 10px; color: #636e72; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+.kb-field input, .kb-field textarea, .kb-field select {
+  width: 100%; background: rgba(30,30,50,0.6); border: 1px solid rgba(108,92,231,0.2);
+  color: #dfe6e9; font-family: 'JetBrains Mono', monospace; font-size: 12px;
+  padding: 7px 10px; border-radius: 2px; outline: none; box-sizing: border-box;
 }
-.kb-field {
-  margin-bottom: 12px;
-}
-.kb-field label {
-  display: block;
-  font-size: 10px;
-  color: #636e72;
-  text-transform: uppercase;
-  letter-spacing: 1px;
-  margin-bottom: 4px;
-}
-.kb-field input,
-.kb-field textarea,
-.kb-field select {
-  width: 100%;
-  background: rgba(30,30,50,0.6);
-  border: 1px solid rgba(108,92,231,0.2);
-  color: #dfe6e9;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 12px;
-  padding: 7px 10px;
-  border-radius: 2px;
-  outline: none;
-  transition: border-color 0.15s;
-  box-sizing: border-box;
-}
-.kb-field input:focus,
-.kb-field textarea:focus,
-.kb-field select:focus {
-  border-color: rgba(108,92,231,0.6);
-  box-shadow: 0 0 8px rgba(108,92,231,0.2);
-}
-.kb-field textarea {
-  resize: vertical;
-  min-height: 200px;
-}
-.kb-field-row {
-  display: flex;
-  gap: 12px;
-}
-.kb-field-row .kb-field {
-  flex: 1;
-}
-.kb-field--meta {
-  display: flex;
-  gap: 16px;
-  font: 9px 'JetBrains Mono', monospace;
-  color: rgba(99,110,114,0.6);
-  padding-top: 4px;
-  border-top: 1px solid rgba(108,92,231,0.1);
-}
-
-/* ── Checklist ── */
-.kb-checklist {
-  margin-top: 4px;
-}
-.kb-checklist-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 8px;
-  border-radius: 2px;
-  transition: background 0.1s;
-}
-.kb-checklist-item:hover {
-  background: rgba(108,92,231,0.08);
-}
-.kb-checklist-item input[type="checkbox"] {
-  width: 14px;
-  height: 14px;
-  accent-color: #6c5ce7;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-.kb-checklist-item input[type="text"] {
-  flex: 1;
-  background: transparent;
-  border: none;
-  color: #dfe6e9;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  padding: 2px 4px;
-  outline: none;
-}
-.kb-checklist-item input[type="text"]:focus {
-  border-bottom: 1px solid rgba(108,92,231,0.4);
-}
-.kb-checklist-item.kb-checked input[type="text"] {
-  text-decoration: line-through;
-  color: #636e72;
-}
-.kb-checklist-remove {
-  background: none;
-  border: none;
-  color: #636e72;
-  font-size: 14px;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s;
-}
-.kb-checklist-item:hover .kb-checklist-remove {
-  opacity: 1;
-}
-.kb-checklist-remove:hover {
-  color: #ff6b6b;
-}
-.kb-checklist-add {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding: 4px 8px;
-  background: none;
-  border: 1px dashed rgba(108,92,231,0.2);
-  border-radius: 2px;
-  color: #636e72;
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 10px;
-  cursor: pointer;
-  transition: all 0.15s;
-  width: 100%;
-}
-.kb-checklist-add:hover {
-  border-color: rgba(108,92,231,0.5);
-  color: #a29bfe;
-  background: rgba(108,92,231,0.05);
-}
-.kb-checklist-progress {
-  font-size: 9px;
-  color: #636e72;
-  margin-top: 4px;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-.kb-checklist-bar {
-  flex: 1;
-  height: 3px;
-  background: rgba(108,92,231,0.15);
-  border-radius: 2px;
-  overflow: hidden;
-}
-.kb-checklist-bar-fill {
-  height: 100%;
-  background: #6c5ce7;
-  border-radius: 2px;
-  transition: width 0.2s;
-}
-.kb-form-btns {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 16px;
-}
+.kb-field input:focus, .kb-field textarea:focus, .kb-field select:focus { border-color: rgba(108,92,231,0.6); }
+.kb-field textarea { resize: vertical; min-height: 120px; }
+.kb-form-btns { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 .kb-form-btn {
-  font-family: 'JetBrains Mono', monospace;
-  font-size: 11px;
-  font-weight: 600;
-  padding: 6px 16px;
-  border-radius: 2px;
-  cursor: pointer;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  transition: all 0.15s;
-  border: 1px solid;
+  font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 600;
+  padding: 6px 16px; border-radius: 2px; cursor: pointer; letter-spacing: 1px;
+  text-transform: uppercase; border: 1px solid;
 }
-.kb-form-btn--cancel {
-  background: transparent;
-  border-color: rgba(108,92,231,0.2);
-  color: #636e72;
-}
-.kb-form-btn--cancel:hover {
-  border-color: rgba(108,92,231,0.4);
-  color: #a29bfe;
-}
-.kb-form-btn--submit {
-  background: rgba(108,92,231,0.2);
-  border-color: rgba(108,92,231,0.5);
-  color: #6c5ce7;
-}
-.kb-form-btn--submit:hover {
-  background: rgba(108,92,231,0.35);
-  box-shadow: 0 0 12px rgba(108,92,231,0.3);
-}
+.kb-form-btn--cancel { background: transparent; border-color: rgba(108,92,231,0.2); color: #636e72; }
+.kb-form-btn--cancel:hover { border-color: rgba(108,92,231,0.4); color: #a29bfe; }
+.kb-form-btn--submit { background: rgba(108,92,231,0.2); border-color: rgba(108,92,231,0.5); color: #6c5ce7; }
+.kb-form-btn--submit:hover { background: rgba(108,92,231,0.35); }
 
-/* ── Context menu ── */
-.kb-ctx-menu {
-  position: fixed;
-  background: rgba(15,15,26,0.98);
-  border: 1px solid rgba(108,92,231,0.3);
-  border-radius: 3px;
-  padding: 4px 0;
-  z-index: 200;
-  min-width: 140px;
-  box-shadow: 0 4px 20px rgba(0,0,0,0.6);
-  animation: slideIn 0.12s ease-out;
-}
-.kb-ctx-item {
-  padding: 6px 14px;
-  font-size: 11px;
-  font-family: 'JetBrains Mono', monospace;
-  color: #dfe6e9;
-  cursor: pointer;
-  transition: background 0.1s;
-}
-.kb-ctx-item:hover {
-  background: rgba(108,92,231,0.15);
-}
-.kb-ctx-item--danger {
-  color: #ff6b6b;
-}
-.kb-ctx-item--danger:hover {
-  background: rgba(255,107,107,0.15);
-}
-
-/* ── Empty state ── */
-.kb-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #636e72;
-  font-size: 12px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-}
-.kb-col-empty {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #444;
-  font-size: 10px;
-  letter-spacing: 1px;
-  text-transform: uppercase;
-  padding: 20px 0;
-}
-
-/* ── Print styles ── */
-@media print {
-  .kb-root {
-    background: #fff !important;
-    color: #111 !important;
-    overflow: visible !important;
-    height: auto !important;
-  }
-  .kb-header {
-    border-bottom: 2px solid #333 !important;
-  }
-  .kb-header h2 {
-    color: #111 !important;
-    text-shadow: none !important;
-  }
-  .kb-add-btn {
-    display: none !important;
-  }
-  .kb-board {
-    overflow: visible !important;
-    flex-wrap: nowrap !important;
-    gap: 6px !important;
-    padding: 10px 8px !important;
-  }
-  .kb-col {
-    background: #fafafa !important;
-    border: 1.5px solid #ccc !important;
-    min-width: 0 !important;
-    max-width: none !important;
-    flex: 1 1 0 !important;
-    break-inside: avoid;
-    page-break-inside: avoid;
-  }
-  .kb-col--blocked {
-    background: #fff5f5 !important;
-    border-color: #e88 !important;
-  }
-  .kb-col-header {
-    border-bottom: 1.5px solid #999 !important;
-    padding: 6px 8px !important;
-    font-size: 10px !important;
-  }
-  .kb-col-count {
-    background: #eee !important;
-    color: #333 !important;
-  }
-  .kb-col-body {
-    overflow: visible !important;
-    padding: 4px !important;
-    gap: 4px !important;
-  }
-  .kb-card {
-    background: #fff !important;
-    border: 1px solid #bbb !important;
-    padding: 6px 8px !important;
-    animation: none !important;
-    box-shadow: none !important;
-    cursor: default !important;
-  }
-  .kb-card.kb-p0 {
-    border: 2px solid #c00 !important;
-    animation: none !important;
-  }
-  .kb-card-title {
-    color: #111 !important;
-    font-size: 11px !important;
-  }
-  .kb-badge {
-    border: 1px solid #999 !important;
-    font-size: 8px !important;
-  }
-  .kb-card-actions {
-    display: none !important;
-  }
-  .kb-profile { color: #555 !important; }
-  .kb-agent { color: #060 !important; }
-  .kb-time { color: #888 !important; }
-  .kb-overlay { display: none !important; }
-  .kb-ctx-menu { display: none !important; }
+@media (prefers-reduced-motion: reduce) {
+  .kb-card, .kb-card.kb-p0, .kb-card.kb-moved, .kb-card.kb-highlight, .kb-detail, .kb-form { animation: none !important; }
+  .kb-card { transition: none; }
 }
 `;
 
@@ -800,40 +417,37 @@ export class KanbanBoard {
   constructor(container) {
     this.container = container;
     this.tasks = [];
-    this.boards = [];
-    this.goals = [];
-    this.goalMap = new Map(); // id -> goal
-    this.selectedBoard = null; // null = all tasks
-    this.selectedGoal = null;  // null = all goals
-    this.showDone = false;
-    this.expandedCard = null;
-    this.dragTaskId = null;
+    this.cycles = [];
+    this.selectedCycle = "active"; // "active" | "all" | cycle_id
+    this.linearMode = false;
+    this.collapsed = { backlog: true };
+    this.expanded = new Set(); // parent task ids with children shown
+    this._detailTaskId = null;
 
     /** @type {((taskId: string, newStatus: string, agentName?: string) => void)|null} */
     this.onTransition = null;
-    /** @type {((data: {profile: string, title: string, description: string, priority: string, parent_task_id?: string}) => void)|null} */
+    /** @type {((data: object) => void)|null} */
     this.onDispatch = null;
     /** @type {((taskId: string, project: string) => void)|null} */
     this.onDelete = null;
-    /** @type {((taskId: string, project: string, data: {title?: string, description?: string, priority?: string}) => void)|null} */
+    /** @type {((taskId: string, project: string, data: object) => void)|null} */
     this.onEdit = null;
+    /** @type {((cycle: string) => void)|null} — fired when the cycle filter changes */
+    this.onCycleChange = null;
+    /** @type {((taskId: string, project: string) => Promise<object[]>)|null} — fetch progress notes */
+    this.fetchProgress = null;
 
-    // Inject styles
-    this._style = document.createElement('style');
+    this._style = document.createElement("style");
     this._style.textContent = KANBAN_STYLES;
     document.head.appendChild(this._style);
 
-    // Root element
-    this.root = document.createElement('div');
-    this.root.className = 'kb-root';
+    this.root = document.createElement("div");
+    this.root.className = "kb-root";
     this.container.appendChild(this.root);
 
-    // Close context menu on any click
-    this._onDocClick = () => this._closeCtxMenu();
-    document.addEventListener('click', this._onDocClick);
-
-    this._ctxMenu = null;
-    this._overlay = null;
+    this._formOverlay = null;
+    this._detailOverlay = null;
+    this._prevColumns = new Map(); // taskId → column (to detect moves for animation)
     this._timeInterval = setInterval(() => this._updateTimes(), 30000);
 
     this._render();
@@ -841,13 +455,23 @@ export class KanbanBoard {
 
   /* ─── Public API ─── */
 
-  /** Fast fingerprint — only fields that affect visual display. */
+  setMode(linearMode) {
+    if (this.linearMode === linearMode) return;
+    this.linearMode = linearMode;
+    this._scheduleRender();
+  }
+
+  setCycles(cycles) {
+    this.cycles = cycles || [];
+    this._scheduleRender();
+  }
+
   _fingerprint(arr) {
     let h = 0;
-    for (const item of arr) {
-      const s = item.id + '|' + (item.status || '') + '|' + (item.title || '') + '|' +
-        (item.priority || '') + '|' + (item.assigned_to || '') + '|' + (item.board_id || '') +
-        '|' + (item.goal_id || '') + '|' + (item.description || '');
+    for (const t of arr) {
+      const s = [t.id, t.status, t.linear_state, t.title, t.priority, t.points,
+        t.claimed_by, t.assigned_to, t.in_review_at, t.blocked_periods, t.cycle_id,
+        t.parent_task_id, t.labels].join("|");
       for (let i = 0; i < s.length; i++) h = ((h << 5) - h + s.charCodeAt(i)) | 0;
     }
     return h;
@@ -859,35 +483,23 @@ export class KanbanBoard {
     if (fp === this._tasksFP && incoming.length === this.tasks.length) return;
     this.tasks = incoming;
     this._tasksFP = fp;
-    if (this._overlay) return;
+    if (this._formOverlay) return;
     this._scheduleRender();
   }
 
-  setBoards(boards) {
-    const incoming = boards || [];
-    const fp = this._fingerprint(incoming);
-    if (fp === this._boardsFP && incoming.length === this.boards.length) return;
-    this.boards = incoming;
-    this._boardsFP = fp;
-    if (this._overlay) return;
+  // Apply a single task upsert from SSE without a full reload.
+  upsertTask(task) {
+    if (!task || !task.id) return;
+    const idx = this.tasks.findIndex((t) => t.id === task.id);
+    if (idx >= 0) this.tasks[idx] = { ...this.tasks[idx], ...task };
+    else this.tasks.push(task);
+    this._tasksFP = this._fingerprint(this.tasks);
+    if (this._formOverlay) return;
     this._scheduleRender();
+    // Keep the open detail panel fresh.
+    if (this._detailTaskId === task.id) this._refreshDetail();
   }
 
-  setGoals(goals) {
-    const incoming = goals || [];
-    const fp = this._fingerprint(incoming);
-    if (fp === this._goalsFP && incoming.length === this.goals.length) return;
-    this.goals = incoming;
-    this._goalsFP = fp;
-    this.goalMap.clear();
-    for (const g of this.goals) {
-      this.goalMap.set(g.id, g);
-    }
-    if (this._overlay) return;
-    this._scheduleRender();
-  }
-
-  /** Debounced render — coalesces rapid updates into a single rAF paint. */
   _scheduleRender() {
     if (this._renderRAF) return;
     this._renderRAF = requestAnimationFrame(() => {
@@ -896,981 +508,639 @@ export class KanbanBoard {
     });
   }
 
-  show() {
-    this.root.style.display = 'flex';
-  }
-
-  hide() {
-    this.root.style.display = 'none';
-  }
+  show() { this.root.style.display = "flex"; }
+  hide() { this.root.style.display = "none"; }
 
   highlightTask(taskId) {
-    const card = this.root.querySelector(`[data-task-id="${taskId}"]`);
+    const card = this.root.querySelector(`.kb-card[data-task-id="${taskId}"]`);
     if (!card) return;
-    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    card.classList.add('kb-highlight');
-    setTimeout(() => card.classList.remove('kb-highlight'), 2500);
+    card.scrollIntoView({ behavior: REDUCE_MOTION ? "auto" : "smooth", block: "center" });
+    card.classList.add("kb-highlight");
+    setTimeout(() => card.classList.remove("kb-highlight"), 2500);
   }
 
   destroy() {
     clearInterval(this._timeInterval);
-    document.removeEventListener('click', this._onDocClick);
-    this._closeCtxMenu();
+    this._closeForm();
+    this._closeDetail();
     if (this._style.parentNode) this._style.parentNode.removeChild(this._style);
     if (this.root.parentNode) this.root.parentNode.removeChild(this.root);
+  }
+
+  /* ─── Data shaping ─── */
+
+  // Index tasks by id and build parent→children. Returns {byId, childrenOf, roots}.
+  _buildHierarchy(tasks) {
+    const byId = new Map();
+    for (const t of tasks) byId.set(t.id, t);
+    const childrenOf = new Map();
+    const roots = [];
+    for (const t of tasks) {
+      if (t.parent_task_id && byId.has(t.parent_task_id)) {
+        if (!childrenOf.has(t.parent_task_id)) childrenOf.set(t.parent_task_id, []);
+        childrenOf.get(t.parent_task_id).push(t);
+      } else {
+        roots.push(t);
+      }
+    }
+    return { byId, childrenOf, roots };
+  }
+
+  // Roll-up over a parent's children: {done, total}. Done = done/cancelled.
+  _rollup(parentId, childrenOf) {
+    const kids = childrenOf.get(parentId) || [];
+    if (kids.length === 0) return null;
+    const done = kids.filter((k) => k.status === "done" || k.status === "cancelled" || columnFor(k) === "done").length;
+    return { done, total: kids.length };
+  }
+
+  _getGroups() {
+    const { childrenOf, roots } = this._buildHierarchy(this.tasks);
+    const groups = {};
+    for (const c of COLUMNS) groups[c] = [];
+    // Only root (top-level) tasks get a column; children render nested.
+    for (const t of roots) {
+      const col = columnFor(t);
+      (groups[col] || groups.todo).push(t);
+    }
+    // Ordering is already priority→points→dispatched_at from the API; keep stable.
+    return { groups, childrenOf };
   }
 
   /* ─── Rendering ─── */
 
   _render() {
-    // First render — build from scratch
-    if (!this.root.querySelector('.kb-header')) {
-      this._fullRender();
-      return;
+    this.root.replaceChildren();
+    this.root.appendChild(this._buildHeader());
+
+    const board = document.createElement("div");
+    board.className = "kb-board";
+    const { groups, childrenOf } = this._getGroups();
+
+    const newColumns = new Map();
+    for (const col of COLUMNS) {
+      const tasks = groups[col] || [];
+      for (const t of tasks) newColumns.set(t.id, col);
+      board.appendChild(this._renderColumn(col, tasks, childrenOf));
     }
-    // Subsequent renders — patch in place (no DOM nuke, no flash)
-    this._patchRender();
-  }
+    this.root.appendChild(board);
 
-  _fullRender() {
-    const frag = document.createDocumentFragment();
-    frag.appendChild(this._buildHeader());
-
-    const board = document.createElement('div');
-    board.className = 'kb-board';
-    const { visibleStatuses, groups } = this._getFilteredGroups();
-    for (const status of visibleStatuses) {
-      board.appendChild(this._renderColumn(status, groups[status] || []));
-    }
-    frag.appendChild(board);
-    this.root.replaceChildren(frag);
-  }
-
-  _patchRender() {
-    // Update header tabs active state
-    this.root.querySelectorAll('.kb-tab').forEach(tab => {
-      const isAll = tab.textContent === 'ALL';
-      const board = this.boards.find(b => b.name.toUpperCase() === tab.textContent);
-      if (isAll) tab.classList.toggle('kb-tab--active', this.selectedBoard === null);
-      else if (board) tab.classList.toggle('kb-tab--active', this.selectedBoard === board.id);
-    });
-
-    const { visibleStatuses, groups } = this._getFilteredGroups();
-    const boardEl = this.root.querySelector('.kb-board');
-    if (!boardEl) { this._fullRender(); return; }
-
-    // Sync columns: add/remove as needed
-    const existingCols = boardEl.querySelectorAll('.kb-col');
-    const existingStatuses = Array.from(existingCols).map(c => c.dataset.status);
-
-    // If column structure changed, do a targeted board rebuild only (not the header)
-    if (existingStatuses.join(',') !== visibleStatuses.join(',')) {
-      const newBoard = document.createElement('div');
-      newBoard.className = 'kb-board';
-      for (const status of visibleStatuses) {
-        newBoard.appendChild(this._renderColumn(status, groups[status] || []));
-      }
-      boardEl.replaceWith(newBoard);
-      return;
-    }
-
-    // Patch each column in-place
-    for (const col of existingCols) {
-      const status = col.dataset.status;
-      const tasks = groups[status] || [];
-      const prioOrder = { P0: 0, P1: 1, P2: 2, P3: 3 };
-      tasks.sort((a, b) => (prioOrder[a.priority] ?? 9) - (prioOrder[b.priority] ?? 9));
-
-      // Update count badge
-      const countEl = col.querySelector('.kb-col-count');
-      if (countEl) countEl.textContent = tasks.length;
-
-      const body = col.querySelector('.kb-col-body');
-      if (!body) continue;
-
-      const savedScroll = body.scrollTop;
-
-      // Build map of existing cards
-      const existingCards = new Map();
-      body.querySelectorAll('.kb-card').forEach(card => {
-        existingCards.set(card.dataset.taskId, card);
-      });
-
-      // Build new card list
-      const newTaskIds = tasks.map(t => String(t.id));
-      const existingIds = Array.from(existingCards.keys());
-
-      // If same tasks in same order, just update content of changed cards
-      if (newTaskIds.join(',') === existingIds.join(',')) {
-        for (const task of tasks) {
-          const existing = existingCards.get(String(task.id));
-          if (existing) {
-            // Check if card content needs update
-            const titleEl = existing.querySelector('.kb-card-title');
-            const assignEl = existing.querySelector('.kb-card-assign');
-            if (titleEl && titleEl.textContent !== task.title) titleEl.textContent = task.title;
-            if (assignEl) {
-              const expected = task.assigned_to || '—';
-              if (assignEl.textContent !== expected) assignEl.textContent = expected;
-            }
+    // Animate cards that changed column since the last render.
+    if (!REDUCE_MOTION && this._prevColumns.size) {
+      for (const [id, col] of newColumns) {
+        const prev = this._prevColumns.get(id);
+        if (prev && prev !== col) {
+          const card = board.querySelector(`.kb-card[data-task-id="${id}"]`);
+          if (card) {
+            card.classList.add("kb-moved");
+            setTimeout(() => card.classList.remove("kb-moved"), 1100);
           }
         }
-      } else {
-        // Cards changed — rebuild body content only
-        const emptyEl = body.querySelector('.kb-col-empty');
-        if (tasks.length === 0) {
-          // Clear cards, show empty
-          body.querySelectorAll('.kb-card').forEach(c => c.remove());
-          if (!emptyEl) {
-            const empty = document.createElement('div');
-            empty.className = 'kb-col-empty';
-            empty.textContent = '—';
-            body.appendChild(empty);
-          }
-        } else {
-          if (emptyEl) emptyEl.remove();
-          // Rebuild cards using fragment
-          const cardFrag = document.createDocumentFragment();
-          for (const task of tasks) {
-            cardFrag.appendChild(this._renderCard(task));
-          }
-          // Remove old cards, add new
-          body.querySelectorAll('.kb-card').forEach(c => c.remove());
-          body.appendChild(cardFrag);
-        }
       }
-
-      body.scrollTop = savedScroll;
     }
+    this._prevColumns = newColumns;
   }
 
   _buildHeader() {
-    const header = document.createElement('div');
-    header.className = 'kb-header';
+    const header = document.createElement("div");
+    header.className = "kb-header";
 
-    const titleArea = document.createElement('div');
-    titleArea.style.cssText = 'display:flex;align-items:center;gap:12px';
-    titleArea.innerHTML = `<h2>Task Board</h2>`;
+    const left = document.createElement("div");
+    left.className = "kb-header-left";
 
-    if (this.boards.length > 0) {
-      const tabs = document.createElement('div');
-      tabs.style.cssText = 'display:flex;gap:4px;align-items:center';
+    const h2 = document.createElement("h2");
+    h2.textContent = "Task Board";
+    left.appendChild(h2);
 
-      const allTab = document.createElement('button');
-      allTab.className = 'kb-tab' + (this.selectedBoard === null ? ' kb-tab--active' : '');
-      allTab.textContent = 'ALL';
-      allTab.addEventListener('click', () => { this.selectedBoard = null; this._render(); });
-      tabs.appendChild(allTab);
+    const modeBadge = document.createElement("span");
+    modeBadge.className = "kb-mode-badge " + (this.linearMode ? "kb-mode-badge--linear" : "kb-mode-badge--native");
+    modeBadge.textContent = this.linearMode ? "Linear · read-only" : "Native";
+    left.appendChild(modeBadge);
 
-      for (const b of this.boards.filter(b => !b.archived_at)) {
-        const tab = document.createElement('button');
-        tab.className = 'kb-tab' + (this.selectedBoard === b.id ? ' kb-tab--active' : '');
-        tab.textContent = b.name.toUpperCase();
-        tab.title = b.description || b.slug;
-        tab.addEventListener('click', () => { this.selectedBoard = b.id; this._render(); });
-        tabs.appendChild(tab);
+    // Cycle name + dates for the selected cycle
+    const active = this._currentCycleObj();
+    if (active) {
+      const info = document.createElement("span");
+      info.className = "kb-cycle-info";
+      const dates = active.start || active.end
+        ? ` · ${this._fmtDate(active.start)} → ${this._fmtDate(active.end)}` : "";
+      info.innerHTML = `<b>${esc(active.name || active.id)}</b>${esc(dates)}${active.active ? " · active" : ""}`;
+      left.appendChild(info);
+    }
+    header.appendChild(left);
+
+    const right = document.createElement("div");
+    right.className = "kb-header-right";
+
+    if (this.cycles.length > 0) {
+      const sel = document.createElement("select");
+      sel.className = "kb-cycle-select";
+      sel.setAttribute("aria-label", "Cycle filter");
+      const opts = [{ value: "active", label: "Active cycle" }, { value: "all", label: "All cycles" }];
+      for (const c of this.cycles) {
+        opts.push({ value: c.id, label: (c.name || c.id) + (c.active ? " (active)" : "") });
       }
-      titleArea.appendChild(tabs);
+      for (const o of opts) {
+        const opt = document.createElement("option");
+        opt.value = o.value;
+        opt.textContent = o.label;
+        if (o.value === this.selectedCycle) opt.selected = true;
+        sel.appendChild(opt);
+      }
+      sel.addEventListener("change", () => {
+        this.selectedCycle = sel.value;
+        if (this.onCycleChange) this.onCycleChange(sel.value);
+      });
+      right.appendChild(sel);
     }
 
-    header.appendChild(titleArea);
+    // Create button only in native (writable) mode.
+    if (!this.linearMode) {
+      const addBtn = document.createElement("button");
+      addBtn.className = "kb-add-btn";
+      addBtn.textContent = "+";
+      addBtn.title = "Create task";
+      addBtn.setAttribute("aria-label", "Create task");
+      addBtn.addEventListener("click", () => this._showCreateForm());
+      right.appendChild(addBtn);
+    }
 
-    const controls = document.createElement('div');
-    controls.style.cssText = 'display:flex;align-items:center;gap:10px';
-
-    const doneLabel = document.createElement('label');
-    doneLabel.style.cssText = 'display:flex;align-items:center;gap:4px;font-size:10px;color:#636e72;cursor:pointer;letter-spacing:1px;text-transform:uppercase';
-    const doneCheck = document.createElement('input');
-    doneCheck.type = 'checkbox';
-    doneCheck.checked = this.showDone;
-    doneCheck.style.cssText = 'accent-color:#6c5ce7;cursor:pointer';
-    doneCheck.addEventListener('change', () => { this.showDone = doneCheck.checked; this._fullRender(); });
-    doneLabel.appendChild(doneCheck);
-    doneLabel.appendChild(document.createTextNode('Done / Cancelled'));
-    controls.appendChild(doneLabel);
-
-    const addBtn = document.createElement('button');
-    addBtn.className = 'kb-add-btn';
-    addBtn.textContent = '+';
-    addBtn.title = 'Dispatch new task';
-    addBtn.addEventListener('click', () => this._showDispatchForm());
-    controls.appendChild(addBtn);
-
-    header.appendChild(controls);
+    header.appendChild(right);
     return header;
   }
 
-  _getFilteredGroups() {
-    let filtered = this.tasks;
-    if (this.selectedBoard !== null) {
-      filtered = filtered.filter(t =>
-        t.board_id === this.selectedBoard ||
-        (t.board_id && this.selectedBoard.startsWith(t.board_id)) ||
-        (t.board_id && t.board_id.startsWith(this.selectedBoard))
-      );
-    }
-    if (this.selectedGoal !== null) {
-      filtered = filtered.filter(t => t.goal_id === this.selectedGoal);
-    }
-    if (!this.showDone) {
-      filtered = filtered.filter(t => t.status !== 'done' && t.status !== 'cancelled');
-    }
-    const visibleStatuses = this.showDone ? STATUS_ORDER : STATUS_ORDER.filter(s => s !== 'done' && s !== 'cancelled');
-    const groups = {};
-    for (const t of filtered) {
-      const s = t.status || 'pending';
-      if (!groups[s]) groups[s] = [];
-      groups[s].push(t);
-    }
-    return { visibleStatuses, groups };
+  _currentCycleObj() {
+    if (this.selectedCycle === "all") return null;
+    if (this.selectedCycle === "active") return this.cycles.find((c) => c.active) || null;
+    return this.cycles.find((c) => c.id === this.selectedCycle) || null;
   }
 
-  _renderColumn(status, tasks) {
-    const col = document.createElement('div');
-    col.className = 'kb-col' + (status === 'blocked' ? ' kb-col--blocked' : '');
-    col.dataset.status = status;
+  _fmtDate(ts) {
+    if (!ts) return "?";
+    return new Date(ts).toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  }
 
-    // Header
-    const hdr = document.createElement('div');
-    hdr.className = 'kb-col-header';
-    hdr.style.color = STATUS_COLORS[status] || '#dfe6e9';
-    hdr.innerHTML = `
-      <span>${STATUS_LABELS[status] || status.toUpperCase()}</span>
-      <span class="kb-col-count">${tasks.length}</span>
-    `;
-    col.appendChild(hdr);
+  _renderColumn(col, tasks, childrenOf) {
+    const isCollapsed = !!this.collapsed[col];
+    const el = document.createElement("div");
+    el.className = "kb-col" + (isCollapsed ? " kb-col--collapsed" : "");
+    el.dataset.column = col;
 
-    // Body
-    const body = document.createElement('div');
-    body.className = 'kb-col-body';
+    const hdr = document.createElement("div");
+    hdr.className = "kb-col-header";
+    hdr.style.color = COLUMN_COLORS[col];
+    hdr.innerHTML = `<span>${COLUMN_LABELS[col]}</span><span class="kb-col-count">${tasks.length}</span>`;
+    hdr.title = "Click to collapse/expand";
+    hdr.addEventListener("click", () => {
+      this.collapsed[col] = !this.collapsed[col];
+      this._render();
+    });
+    el.appendChild(hdr);
 
+    const body = document.createElement("div");
+    body.className = "kb-col-body";
     if (tasks.length === 0) {
-      const empty = document.createElement('div');
-      empty.className = 'kb-col-empty';
-      empty.textContent = '—';
+      const empty = document.createElement("div");
+      empty.className = "kb-col-empty";
+      empty.textContent = "—";
       body.appendChild(empty);
     } else {
-      // Sort: P0 first, then P1, P2, P3
-      const prioOrder = { P0: 0, P1: 1, P2: 2, P3: 3 };
-      tasks.sort((a, b) => (prioOrder[a.priority] ?? 9) - (prioOrder[b.priority] ?? 9));
-
-      for (const task of tasks) {
-        body.appendChild(this._renderCard(task));
-      }
+      for (const t of tasks) body.appendChild(this._renderCard(t, childrenOf));
     }
-
-    // Drag-and-drop zone (user is admin — allow any move)
-    body.addEventListener('dragover', (e) => {
-      if (!this.dragTaskId) return;
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      col.classList.add('kb-drag-over');
-    });
-    body.addEventListener('dragleave', () => {
-      col.classList.remove('kb-drag-over');
-    });
-    body.addEventListener('drop', (e) => {
-      e.preventDefault();
-      col.classList.remove('kb-drag-over');
-      const taskId = e.dataTransfer.getData('text/plain');
-      if (taskId && this.dragTaskId === taskId) {
-        const task = this.tasks.find(t => t.id === taskId);
-        if (task && task.status !== status) {
-          if (this.onTransition) {
-            this.onTransition(taskId, status, task.assigned_to || null);
-          }
-        }
-      }
-    });
-
-    col.appendChild(body);
-    return col;
+    el.appendChild(body);
+    return el;
   }
 
-  _renderCard(task) {
-    const isFounder = task.profile_slug === 'founder' || task.profile_slug === 'user' || task.profile_slug === 'human';
-    const card = document.createElement('div');
-    card.className = 'kb-card' + (task.priority === 'P0' ? ' kb-p0' : '') + (isFounder ? ' kb-founder' : '');
-    card.draggable = true;
+  _renderCard(task, childrenOf) {
+    const card = document.createElement("div");
+    const blocked = isBlocked(task);
+    card.className = "kb-card" + (task.priority === "P0" ? " kb-p0" : "") + (blocked ? " kb-blocked" : "");
     card.dataset.taskId = task.id;
+    card.tabIndex = 0;
+    card.setAttribute("role", "button");
 
-    // Drag events
-    card.addEventListener('dragstart', (e) => {
-      this.dragTaskId = task.id;
-      card.classList.add('kb-dragging');
-      e.dataTransfer.setData('text/plain', task.id);
-      e.dataTransfer.effectAllowed = 'move';
-    });
-    card.addEventListener('dragend', () => {
-      card.classList.remove('kb-dragging');
-      this.dragTaskId = null;
-      // Remove drag-over from all columns
-      this.root.querySelectorAll('.kb-drag-over').forEach(el => el.classList.remove('kb-drag-over'));
-    });
+    const claimedBy = task.claimed_by || task.assigned_to;
+    if (claimedBy) {
+      card.dataset.claimed = "1";
+      card.style.setProperty("--kb-agent-color", agentColor(claimedBy));
+    }
 
-    // Priority badge
-    const prioColor = PRIORITY_COLORS[task.priority] || PRIORITY_COLORS.P2;
-    const badgeBg = prioColor + '25';
-
-    // Top row
-    const top = document.createElement('div');
-    top.className = 'kb-card-top';
-    top.innerHTML = `
-      <span class="kb-badge" style="color:${prioColor};background:${badgeBg};border:1px solid ${prioColor}40">${esc(task.priority || 'P2')}</span>
-      <span class="kb-time" data-dispatched="${esc(task.dispatched_at)}">${timeAgo(task.dispatched_at)}</span>
-    `;
+    // Top row: key chip, priority, points, time
+    const top = document.createElement("div");
+    top.className = "kb-card-top";
+    let topHTML = "";
+    if (task.linear_key) topHTML += `<span class="kb-key">${esc(task.linear_key)}</span>`;
+    const prio = task.priority || "P2";
+    const pc = PRIORITY_COLORS[prio] || PRIORITY_COLORS.P2;
+    topHTML += `<span class="kb-badge" style="color:${pc};background:${pc}25;border:1px solid ${pc}40">${esc(prio)}</span>`;
+    if (task.points != null) topHTML += `<span class="kb-points">${esc(task.points)}pt</span>`;
+    topHTML += `<span class="kb-time" data-ts="${esc(task.dispatched_at)}">${timeAgo(task.dispatched_at)}</span>`;
+    top.innerHTML = topHTML;
     card.appendChild(top);
 
-    // Goal badge
-    if (task.goal_id && this.goalMap.has(task.goal_id)) {
-      const goal = this.goalMap.get(task.goal_id);
-      const goalBadge = document.createElement('div');
-      goalBadge.style.cssText = 'font-size:9px;font-weight:600;color:#ffd93d;margin-bottom:3px;letter-spacing:0.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-      goalBadge.textContent = goal.title;
-      goalBadge.title = `[${goal.type}] ${goal.title}`;
-      card.appendChild(goalBadge);
-    }
-
     // Title
-    const title = document.createElement('div');
-    title.className = 'kb-card-title';
-    title.textContent = task.title || '(untitled)';
+    const title = document.createElement("div");
+    title.className = "kb-card-title";
+    title.textContent = task.title || "(untitled)";
     card.appendChild(title);
 
-    // Meta
-    const meta = document.createElement('div');
-    meta.className = 'kb-card-meta';
-    if (isFounder) {
-      meta.innerHTML += `<span class="kb-founder-tag">FOUNDER</span>`;
-    } else if (task.profile_slug) {
-      meta.innerHTML += `<span class="kb-profile">${esc(task.profile_slug)}</span>`;
-    }
-    if (task.assigned_to) {
-      meta.innerHTML += `<span class="kb-agent">${esc(task.assigned_to)}</span>`;
-    }
-    card.appendChild(meta);
-
-    // Inline checklist (checkable directly on card)
-    const parsed = this._parseChecklist(task.description || '');
-    if (parsed.items.length > 0) {
-      const done = parsed.items.filter(i => i.checked).length;
-      const total = parsed.items.length;
-      const pct = Math.round((done / total) * 100);
-      const clWrap = document.createElement('div');
-      clWrap.className = 'kb-card-checklist kb-card-checklist--inline';
-
-      // Progress bar
-      clWrap.innerHTML = `
-        <div class="kb-card-cl-header">
-          <div class="kb-card-cl-bar"><div class="kb-card-cl-fill" style="width:${pct}%"></div></div>
-          <span class="kb-card-cl-text">${done}/${total}</span>
-        </div>
-      `;
-
-      // Inline checkboxes
-      const listEl = document.createElement('div');
-      listEl.className = 'kb-card-cl-items';
-      parsed.items.forEach((item, idx) => {
-        const row = document.createElement('label');
-        row.className = 'kb-card-cl-row' + (item.checked ? ' kb-cl-done' : '');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = item.checked;
-        cb.addEventListener('click', (e) => {
-          e.stopPropagation(); // prevent card click
-        });
-        cb.addEventListener('change', (e) => {
-          e.stopPropagation();
-          parsed.items[idx].checked = cb.checked;
-          row.classList.toggle('kb-cl-done', cb.checked);
-          // Rebuild description and save
-          const newDesc = this._rebuildDescription(parsed);
-          this._saveChecklist(task.id, newDesc);
-          // Update progress
-          const newDone = parsed.items.filter(i => i.checked).length;
-          const newPct = Math.round((newDone / total) * 100);
-          const fill = clWrap.querySelector('.kb-card-cl-fill');
-          const text = clWrap.querySelector('.kb-card-cl-text');
-          if (fill) fill.style.width = newPct + '%';
-          if (text) text.textContent = newDone + '/' + total;
-        });
-        const span = document.createElement('span');
-        span.textContent = item.text;
-        row.appendChild(cb);
-        row.appendChild(span);
-        listEl.appendChild(row);
-      });
-      clWrap.appendChild(listEl);
-      card.appendChild(clWrap);
+    // Meta: labels + assignee
+    const labels = parseLabels(task.labels);
+    if (labels.length || task.assignee) {
+      const meta = document.createElement("div");
+      meta.className = "kb-card-meta";
+      for (const l of labels.slice(0, 4)) {
+        const name = typeof l === "string" ? l : (l && l.name) || "";
+        if (name) meta.innerHTML += `<span class="kb-label">${esc(name)}</span>`;
+      }
+      if (task.assignee) meta.innerHTML += `<span class="kb-assignee">@${esc(task.assignee)}</span>`;
+      card.appendChild(meta);
     }
 
-    // Action buttons (visible on hover)
-    const actions = document.createElement('div');
-    actions.className = 'kb-card-actions';
+    // Overlay row: claimed-by agent, blocked badge, in-review timer
+    const overlayBits = [];
+    if (claimedBy) {
+      const color = agentColor(claimedBy);
+      overlayBits.push(`<span class="kb-claim" style="color:${color}"><span class="kb-claim-dot" style="background:${color}"></span>${esc(claimedBy)}</span>`);
+    }
+    if (blocked) overlayBits.push(`<span class="kb-blocked-badge">blocked</span>`);
+    if (task.in_review_at && columnFor(task) === "in-review") {
+      overlayBits.push(`<span class="kb-review-timer" data-review="${esc(task.in_review_at)}">in review ${minsSince(task.in_review_at)}min</span>`);
+    }
+    if (overlayBits.length) {
+      const row = document.createElement("div");
+      row.className = "kb-overlay-row";
+      row.innerHTML = overlayBits.join("");
+      card.appendChild(row);
+    }
 
-    if (task.status !== 'done') {
-      const doneBtn = document.createElement('button');
-      doneBtn.className = 'kb-action-btn';
-      doneBtn.textContent = '\u2713';
-      doneBtn.title = 'Mark done';
-      doneBtn.addEventListener('click', (e) => {
+    // Child roll-up
+    const rollup = this._rollup(task.id, childrenOf);
+    if (rollup) {
+      const pct = Math.round((rollup.done / rollup.total) * 100);
+      const expanded = this.expanded.has(task.id);
+      const ru = document.createElement("div");
+      ru.className = "kb-rollup";
+      ru.innerHTML = `
+        <button class="kb-expand" aria-label="Toggle subtasks">${expanded ? "▾" : "▸"}</button>
+        <div class="kb-rollup-bar"><div class="kb-rollup-fill" style="width:${pct}%"></div></div>
+        <span class="kb-rollup-text">${rollup.done}/${rollup.total}</span>`;
+      ru.querySelector(".kb-expand").addEventListener("click", (e) => {
         e.stopPropagation();
-        if (this.onTransition) this.onTransition(task.id, 'done', task.assigned_to || null);
+        if (this.expanded.has(task.id)) this.expanded.delete(task.id);
+        else this.expanded.add(task.id);
+        this._render();
       });
-      actions.appendChild(doneBtn);
+      card.appendChild(ru);
+
+      if (expanded) {
+        const kidsWrap = document.createElement("div");
+        kidsWrap.className = "kb-children";
+        for (const kid of childrenOf.get(task.id) || []) {
+          kidsWrap.appendChild(this._renderChild(kid));
+        }
+        card.appendChild(kidsWrap);
+      }
     }
 
-    if (task.status !== 'blocked' && task.status !== 'done') {
-      const blockBtn = document.createElement('button');
-      blockBtn.className = 'kb-action-btn kb-action-block';
-      blockBtn.textContent = '\u2715';
-      blockBtn.title = 'Block';
-      blockBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (this.onTransition) this.onTransition(task.id, 'blocked', task.assigned_to || null);
-      });
-      actions.appendChild(blockBtn);
-    }
-    card.appendChild(actions);
-
-    // Context menu
-    card.addEventListener('contextmenu', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      this._showCtxMenu(e.clientX, e.clientY, task);
+    // Card click: detail panel (always read), or external link in linear mode.
+    card.addEventListener("click", (e) => {
+      if (e.target.closest(".kb-expand")) return;
+      this._openDetail(task.id);
     });
-
-    // Click to open detail popup (Trello-style)
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('.kb-action-btn')) return;
-      this._showEditForm(task);
+    card.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this._openDetail(task.id); }
     });
 
     return card;
   }
 
-  /* ─── Card Detail ─── */
-
-  _toggleDetail(card, task) {
-    if (this.expandedCard === task.id) {
-      this.expandedCard = null;
-      const detail = card.querySelector('.kb-detail');
-      if (detail) detail.remove();
-    } else {
-      // Collapse any existing expanded card
-      const prev = this.root.querySelector('.kb-detail');
-      if (prev) prev.remove();
-      this.expandedCard = task.id;
-      card.appendChild(this._buildDetail(task));
-    }
-  }
-
-  _buildDetail(task) {
-    const detail = document.createElement('div');
-    detail.className = 'kb-detail';
-
-    let html = '';
-
-    // Goal ancestry
-    if (task.goal_id && this.goalMap.has(task.goal_id)) {
-      const chain = this._buildGoalChain(task.goal_id);
-      if (chain.length > 0) {
-        html += `<div class="kb-detail-row"><span class="kb-detail-label">Goal Cascade</span><div style="margin:3px 0;color:#ffd93d;font-size:10px">${chain.map(g => esc(g.title)).join(' &rsaquo; ')}</div></div>`;
-      }
-    }
-
-    if (task.description) {
-      html += `<div class="kb-detail-row"><span class="kb-detail-label">Description</span><div class="kb-detail-desc">${esc(task.description)}</div></div>`;
-    }
-
-    if (task.result) {
-      html += `<div class="kb-detail-row"><span class="kb-detail-label">Result</span><div class="kb-detail-desc">${esc(task.result)}</div></div>`;
-    }
-
-    if (task.blocked_reason) {
-      html += `<div class="kb-detail-row"><span class="kb-detail-label">Blocked Reason</span><div class="kb-detail-desc" style="border-left:2px solid #ff6b6b;padding-left:8px">${esc(task.blocked_reason)}</div></div>`;
-    }
-
-    if (task.dispatched_by) {
-      html += `<div class="kb-detail-row"><span class="kb-detail-label">Dispatched by</span> <span style="color:#a29bfe">${esc(task.dispatched_by)}</span></div>`;
-    }
-
-    if (task.parent_task_id) {
-      html += `<div class="kb-detail-row"><span class="kb-detail-label">Parent task</span> <span style="color:#636e72">${esc(task.parent_task_id)}</span></div>`;
-    }
-
-    // Timestamps
-    const timestamps = [];
-    if (task.dispatched_at) timestamps.push(['Dispatched', task.dispatched_at]);
-    if (task.accepted_at) timestamps.push(['Accepted', task.accepted_at]);
-    if (task.started_at) timestamps.push(['Started', task.started_at]);
-    if (task.completed_at) timestamps.push(['Completed', task.completed_at]);
-    if (timestamps.length) {
-      html += `<div class="kb-detail-row" style="margin-top:6px"><span class="kb-detail-label">Timeline</span>`;
-      for (const [label, ts] of timestamps) {
-        const d = new Date(ts);
-        const formatted = d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-        html += `<div style="margin-left:4px;color:#636e72">${label}: <span style="color:#b2bec3">${formatted}</span></div>`;
-      }
-      html += `</div>`;
-    }
-
-    // Subtasks
-    if (task.subtasks && task.subtasks.length > 0) {
-      html += `<div class="kb-detail-row" style="margin-top:6px"><span class="kb-detail-label">Subtasks (${task.subtasks.length})</span><div class="kb-subtask-list">`;
-      for (const sub of task.subtasks) {
-        const stColor = STATUS_COLORS[sub.status] || '#636e72';
-        html += `<div class="kb-subtask-item">${esc(sub.title || sub.id)} <span class="kb-subtask-status" style="color:${stColor};background:${stColor}20">${esc(sub.status)}</span></div>`;
-      }
-      html += `</div></div>`;
-    }
-
-    detail.innerHTML = html;
-    return detail;
-  }
-
-  /* ─── Context Menu ─── */
-
-  _showCtxMenu(x, y, task) {
-    this._closeCtxMenu();
-
-    const menu = document.createElement('div');
-    menu.className = 'kb-ctx-menu';
-    menu.style.left = x + 'px';
-    menu.style.top = y + 'px';
-
-    const statuses = STATUS_ORDER.filter(s => s !== task.status);
-
-    for (const s of statuses) {
-      const item = document.createElement('div');
-      item.className = 'kb-ctx-item' + (s === 'blocked' ? ' kb-ctx-item--danger' : '');
-      item.innerHTML = `<span style="color:${STATUS_COLORS[s]}">&#9654;</span> ${STATUS_LABELS[s]}`;
-      item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        this._closeCtxMenu();
-        if (this.onTransition) this.onTransition(task.id, s, task.assigned_to || null);
-      });
-      menu.appendChild(item);
-    }
-
-    // Separator
-    const sep = document.createElement('div');
-    sep.style.cssText = 'height:1px;background:rgba(108,92,231,0.2);margin:4px 0';
-    menu.appendChild(sep);
-
-    // Edit
-    const editItem = document.createElement('div');
-    editItem.className = 'kb-ctx-item';
-    editItem.innerHTML = `<span style="color:#a29bfe">&#9998;</span> EDIT`;
-    editItem.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._closeCtxMenu();
-      this._showEditForm(task);
-    });
-    menu.appendChild(editItem);
-
-    // Delete
-    const delItem = document.createElement('div');
-    delItem.className = 'kb-ctx-item kb-ctx-item--danger';
-    delItem.innerHTML = `<span style="color:#ff6b6b">&#10006;</span> DELETE`;
-    delItem.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this._closeCtxMenu();
-      if (this.onDelete) this.onDelete(task.id, task.project || 'default');
-    });
-    menu.appendChild(delItem);
-
-    document.body.appendChild(menu);
-    this._ctxMenu = menu;
-
-    // Clamp to viewport
-    requestAnimationFrame(() => {
-      const rect = menu.getBoundingClientRect();
-      if (rect.right > window.innerWidth) menu.style.left = (window.innerWidth - rect.width - 8) + 'px';
-      if (rect.bottom > window.innerHeight) menu.style.top = (window.innerHeight - rect.height - 8) + 'px';
-    });
-  }
-
-  _closeCtxMenu() {
-    if (this._ctxMenu) {
-      this._ctxMenu.remove();
-      this._ctxMenu = null;
-    }
-  }
-
-  /* ─── Checklist helpers ─── */
-
-  _parseChecklist(description) {
-    if (!description) return { text: '', items: [] };
-    const lines = description.split('\n');
-    const textLines = [];
-    const items = [];
-    for (const line of lines) {
-      const match = line.match(/^- \[([ xX])\] (.*)$/);
-      if (match) {
-        items.push({ checked: match[1] !== ' ', text: match[2] });
-      } else {
-        textLines.push(line);
-      }
-    }
-    while (textLines.length && textLines[textLines.length - 1].trim() === '') textLines.pop();
-    return { text: textLines.join('\n'), items };
-  }
-
-  _buildChecklistHTML(items) {
-    const total = items.length;
-    const done = items.filter(i => i.checked).length;
-    let html = '<div class="kb-checklist">';
-    if (total > 0) {
-      const pct = Math.round((done / total) * 100);
-      html += `<div class="kb-checklist-progress"><span>${done}/${total}</span><div class="kb-checklist-bar"><div class="kb-checklist-bar-fill" style="width:${pct}%"></div></div></div>`;
-    }
-    items.forEach((item, i) => {
-      html += `<div class="kb-checklist-item${item.checked ? ' kb-checked' : ''}" data-idx="${i}">
-        <input type="checkbox" ${item.checked ? 'checked' : ''} />
-        <input type="text" value="${esc(item.text)}" />
-        <button class="kb-checklist-remove" title="Remove">&times;</button>
+  _renderChild(kid) {
+    const el = document.createElement("div");
+    el.className = "kb-child";
+    el.dataset.taskId = kid.id;
+    const col = columnFor(kid);
+    const c = COLUMN_COLORS[col];
+    el.innerHTML = `
+      <div class="kb-child-row">
+        <span class="kb-child-state" style="color:${c};background:${c}22">${COLUMN_LABELS[col]}</span>
+        ${kid.linear_key ? `<span class="kb-key">${esc(kid.linear_key)}</span>` : ""}
+        <span class="kb-child-title">${esc(kid.title || kid.id)}</span>
       </div>`;
-    });
-    html += `<button class="kb-checklist-add" type="button">+ Add item</button>`;
-    html += '</div>';
-    return html;
+    el.addEventListener("click", (e) => { e.stopPropagation(); this._openDetail(kid.id); });
+    return el;
   }
 
-  _attachChecklistEvents(container, items, onUpdate) {
-    container.querySelectorAll('.kb-checklist-item input[type="checkbox"]').forEach(cb => {
-      cb.addEventListener('change', () => {
-        const idx = parseInt(cb.closest('.kb-checklist-item').dataset.idx);
-        items[idx].checked = cb.checked;
-        cb.closest('.kb-checklist-item').classList.toggle('kb-checked', cb.checked);
-        onUpdate();
-      });
-    });
-    container.querySelectorAll('.kb-checklist-item input[type="text"]').forEach(input => {
-      input.addEventListener('input', () => {
-        const idx = parseInt(input.closest('.kb-checklist-item').dataset.idx);
-        items[idx].text = input.value;
-      });
-    });
-    container.querySelectorAll('.kb-checklist-remove').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.closest('.kb-checklist-item').dataset.idx);
-        items.splice(idx, 1);
-        this._refreshChecklist(container, items, onUpdate);
-      });
-    });
-    const addBtn = container.querySelector('.kb-checklist-add');
-    if (addBtn) {
-      addBtn.addEventListener('click', () => {
-        items.push({ checked: false, text: '' });
-        this._refreshChecklist(container, items, onUpdate);
-        requestAnimationFrame(() => {
-          const newItems = container.querySelectorAll('.kb-checklist-item input[type="text"]');
-          if (newItems.length) newItems[newItems.length - 1].focus();
-        });
-      });
+  /* ─── Detail panel ─── */
+
+  _openDetail(taskId) {
+    const task = this.tasks.find((t) => t.id === taskId);
+    if (!task) return;
+
+    // Linear mode: card click goes to Linear for editing; still show local read panel.
+    this._detailTaskId = taskId;
+    this._closeDetail();
+
+    const overlay = document.createElement("div");
+    overlay.className = "kb-detail-overlay";
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) this._closeDetail(); });
+
+    const panel = document.createElement("div");
+    panel.className = "kb-detail";
+    panel.appendChild(this._buildDetailBody(task));
+    overlay.appendChild(panel);
+
+    this._detailEsc = (e) => { if (e.key === "Escape") this._closeDetail(); };
+    document.addEventListener("keydown", this._detailEsc);
+
+    this.root.appendChild(overlay);
+    this._detailOverlay = overlay;
+
+    // Load comments / progress notes lazily.
+    if (this.fetchProgress) {
+      this.fetchProgress(task.id, task.project || "default").then((notes) => {
+        if (this._detailTaskId !== task.id) return;
+        const slot = panel.querySelector(".kb-comments-slot");
+        if (slot) slot.replaceWith(this._buildComments(notes || []));
+      }).catch(() => {});
     }
   }
 
-  _refreshChecklist(container, items, onUpdate) {
-    container.innerHTML = this._buildChecklistHTML(items);
-    this._attachChecklistEvents(container, items, onUpdate);
-    onUpdate();
-  }
-
-  _rebuildDescription(parsed) {
-    let desc = parsed.text;
-    if (parsed.items.length > 0) {
-      if (desc && !desc.endsWith('\n')) desc += '\n';
-      desc += parsed.items.map(i => `- [${i.checked ? 'x' : ' '}] ${i.text}`).join('\n');
+  _refreshDetail() {
+    if (!this._detailOverlay || !this._detailTaskId) return;
+    const task = this.tasks.find((t) => t.id === this._detailTaskId);
+    if (!task) { this._closeDetail(); return; }
+    const panel = this._detailOverlay.querySelector(".kb-detail");
+    const comments = panel.querySelector(".kb-comments");
+    panel.replaceChildren(this._buildDetailBody(task));
+    if (comments) {
+      const slot = panel.querySelector(".kb-comments-slot");
+      if (slot) slot.replaceWith(comments);
     }
-    return desc;
   }
 
-  _saveChecklist(taskId, newDescription) {
-    if (!this.apiClient) return;
-    this.apiClient.updateTask(taskId, { description: newDescription });
-    // Also update local task data to keep fingerprint in sync
-    const task = this.tasks.find(t => t.id === taskId);
-    if (task) task.description = newDescription;
-  }
+  _buildDetailBody(task) {
+    const frag = document.createDocumentFragment();
 
-  _serializeDescription(text, items) {
-    let desc = text.trim();
-    if (items.length > 0) {
-      if (desc) desc += '\n\n';
-      desc += items.map(i => `- [${i.checked ? 'x' : ' '}] ${i.text}`).join('\n');
+    const head = document.createElement("div");
+    head.className = "kb-detail-head";
+    head.innerHTML = `<div class="kb-detail-title">${task.linear_key ? `<span class="kb-key">${esc(task.linear_key)}</span> ` : ""}${esc(task.title || "(untitled)")}</div>`;
+    const close = document.createElement("button");
+    close.className = "kb-detail-close";
+    close.textContent = "✕";
+    close.setAttribute("aria-label", "Close detail");
+    close.addEventListener("click", () => this._closeDetail());
+    head.appendChild(close);
+    frag.appendChild(head);
+
+    // Meta pills
+    const meta = document.createElement("div");
+    meta.className = "kb-detail-section kb-detail-meta";
+    const col = columnFor(task);
+    meta.innerHTML += `<span class="kb-detail-pill" style="color:${COLUMN_COLORS[col]}">${COLUMN_LABELS[col]}</span>`;
+    meta.innerHTML += `<span class="kb-detail-pill">${esc(task.priority || "P2")}</span>`;
+    if (task.points != null) meta.innerHTML += `<span class="kb-detail-pill">${esc(task.points)} pts</span>`;
+    if (task.cycle_name) meta.innerHTML += `<span class="kb-detail-pill">${esc(task.cycle_name)}</span>`;
+    const claimedBy = task.claimed_by || task.assigned_to;
+    if (claimedBy) meta.innerHTML += `<span class="kb-detail-pill" style="color:${agentColor(claimedBy)}">claimed: ${esc(claimedBy)}</span>`;
+    if (task.assignee) meta.innerHTML += `<span class="kb-detail-pill">assignee: ${esc(task.assignee)}</span>`;
+    for (const l of parseLabels(task.labels)) {
+      const name = typeof l === "string" ? l : (l && l.name) || "";
+      if (name) meta.innerHTML += `<span class="kb-detail-pill">${esc(name)}</span>`;
     }
-    return desc;
+    frag.appendChild(meta);
+
+    // Edit affordance / external link
+    const editSection = document.createElement("div");
+    editSection.className = "kb-detail-section";
+    if (this.linearMode && task.external_url) {
+      const a = document.createElement("a");
+      a.className = "kb-detail-extlink";
+      a.href = task.external_url;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.innerHTML = `↗ Edit in Linear`;
+      editSection.appendChild(a);
+    } else if (!this.linearMode) {
+      const btnRow = document.createElement("div");
+      btnRow.style.cssText = "display:flex;gap:8px";
+      const editBtn = document.createElement("button");
+      editBtn.className = "kb-form-btn kb-form-btn--submit";
+      editBtn.textContent = "Edit";
+      editBtn.addEventListener("click", () => { this._closeDetail(); this._showEditForm(task); });
+      btnRow.appendChild(editBtn);
+      const delBtn = document.createElement("button");
+      delBtn.className = "kb-form-btn kb-form-btn--cancel";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", () => {
+        if (this.onDelete) this.onDelete(task.id, task.project || "default");
+        this._closeDetail();
+      });
+      btnRow.appendChild(delBtn);
+      editSection.appendChild(btnRow);
+    }
+    if (editSection.childNodes.length) frag.appendChild(editSection);
+
+    // Description
+    if (task.description) {
+      const sec = document.createElement("div");
+      sec.className = "kb-detail-section";
+      sec.innerHTML = `<div class="kb-detail-label">Description</div><div class="kb-detail-desc">${esc(task.description)}</div>`;
+      frag.appendChild(sec);
+    }
+    if (task.result) {
+      const sec = document.createElement("div");
+      sec.className = "kb-detail-section";
+      sec.innerHTML = `<div class="kb-detail-label">Result</div><div class="kb-detail-desc">${esc(task.result)}</div>`;
+      frag.appendChild(sec);
+    }
+    if (task.blocked_reason && isBlocked(task)) {
+      const sec = document.createElement("div");
+      sec.className = "kb-detail-section";
+      sec.innerHTML = `<div class="kb-detail-label">Blocked reason</div><div class="kb-detail-desc" style="border-left:2px solid #ff6b6b">${esc(task.blocked_reason)}</div>`;
+      frag.appendChild(sec);
+    }
+
+    // Temporal trail
+    frag.appendChild(this._buildTrail(task));
+
+    // PR / branch link derived from linear_key
+    const branch = branchHint(task);
+    if (branch) {
+      const sec = document.createElement("div");
+      sec.className = "kb-detail-section";
+      let html = `<div class="kb-detail-label">PR / branch</div><div class="kb-detail-meta">`;
+      html += `<span class="kb-detail-pill">branch: ${esc(branch)}</span>`;
+      if (task.external_url) html += `<a class="kb-extlink" href="${esc(task.external_url)}" target="_blank" rel="noopener">↗ ${esc(task.linear_key)}</a>`;
+      html += `</div>`;
+      sec.innerHTML = html;
+      frag.appendChild(sec);
+    }
+
+    // Comments slot (filled async)
+    const slot = document.createElement("div");
+    slot.className = "kb-detail-section kb-comments-slot";
+    slot.innerHTML = `<div class="kb-detail-label">Comments</div><div class="kb-detail-desc" style="color:#636e72">Loading…</div>`;
+    frag.appendChild(slot);
+
+    return frag;
   }
 
-  /* ─── Dispatch Form ─── */
+  _buildTrail(task) {
+    const sec = document.createElement("div");
+    sec.className = "kb-detail-section";
+    const steps = [];
+    if (task.dispatched_at) steps.push(["Dispatched", task.dispatched_at, COLUMN_COLORS.todo]);
+    if (task.claimed_at) steps.push([`Claimed${task.claimed_by ? " · " + task.claimed_by : ""}`, task.claimed_at, agentColor(task.claimed_by || task.assigned_to)]);
+    else if (task.accepted_at) steps.push(["Accepted", task.accepted_at, "#74b9ff"]);
+    if (task.started_at) steps.push(["Started", task.started_at, COLUMN_COLORS["in-progress"]]);
+    for (const p of parseBlockedPeriods(task.blocked_periods)) {
+      if (!p || !p.start) continue;
+      const label = p.end ? `Blocked ${fmtTS(p.start)} → ${fmtTS(p.end)}` : `Blocked (open)`;
+      steps.push([label, p.start, "#ff6b6b", true]);
+    }
+    if (task.in_review_at) steps.push(["In review", task.in_review_at, COLUMN_COLORS["in-review"]]);
+    if (task.done_at || task.completed_at) steps.push(["Done", task.done_at || task.completed_at, COLUMN_COLORS.done]);
 
-  _showDispatchForm() {
-    if (this._overlay) return;
+    steps.sort((a, b) => new Date(a[1]).getTime() - new Date(b[1]).getTime());
 
-    const overlay = document.createElement('div');
-    overlay.className = 'kb-overlay';
+    let html = `<div class="kb-detail-label">Temporal trail</div><div class="kb-trail">`;
+    for (const [label, ts, color, isBlk] of steps) {
+      html += `<div class="kb-trail-step${isBlk ? " kb-trail-step--blocked" : ""}">
+        <span class="kb-trail-dot" style="color:${color};background:${color}"></span>
+        <div class="kb-trail-body">
+          <span class="kb-trail-step-label">${esc(label)}</span>
+          <span class="kb-trail-step-time">${fmtTS(ts)}</span>
+        </div></div>`;
+    }
+    html += `</div>`;
+    sec.innerHTML = html;
+    return sec;
+  }
 
-    const form = document.createElement('div');
-    form.className = 'kb-form';
+  _buildComments(notes) {
+    const sec = document.createElement("div");
+    sec.className = "kb-detail-section kb-comments";
+    let html = `<div class="kb-detail-label">Comments (${notes.length})</div>`;
+    if (notes.length === 0) {
+      html += `<div class="kb-detail-desc" style="color:#636e72">No comments yet.</div>`;
+    } else {
+      for (const n of notes) {
+        html += `<div class="kb-comment">
+          <div class="kb-comment-head"><span class="kb-comment-agent">${esc(n.agent || "agent")}</span><span>${fmtTS(n.created_at)}</span></div>
+          <div class="kb-comment-body">${esc(n.note)}</div>
+        </div>`;
+      }
+    }
+    sec.innerHTML = html;
+    return sec;
+  }
+
+  _closeDetail() {
+    if (this._detailOverlay) { this._detailOverlay.remove(); this._detailOverlay = null; }
+    if (this._detailEsc) { document.removeEventListener("keydown", this._detailEsc); this._detailEsc = null; }
+    this._detailTaskId = null;
+  }
+
+  /* ─── Native create / edit forms ─── */
+
+  _showCreateForm() {
+    if (this.linearMode || this._formOverlay) return;
+    this._buildForm({
+      heading: "Create Task",
+      submitLabel: "Create",
+      task: null,
+      onSubmit: (data) => {
+        if (this.onDispatch) this.onDispatch(data);
+      },
+    });
+  }
+
+  _showEditForm(task) {
+    if (this.linearMode || this._formOverlay) return;
+    this._buildForm({
+      heading: "Edit Task",
+      submitLabel: "Save",
+      task,
+      onSubmit: (data) => {
+        if (this.onEdit) this.onEdit(task.id, task.project || "default", data);
+      },
+    });
+  }
+
+  _buildForm({ heading, submitLabel, task, onSubmit }) {
+    const overlay = document.createElement("div");
+    overlay.className = "kb-form-overlay";
+
+    const form = document.createElement("div");
+    form.className = "kb-form";
+    const t = task || {};
+    const statusOptions = ["pending", "accepted", "in-progress", "in-review", "done", "blocked"];
     form.innerHTML = `
-      <h3>Dispatch Task</h3>
-      <div class="kb-field">
-        <label>Profile</label>
-        <input type="text" name="profile" placeholder="profile-slug" autocomplete="off" />
-      </div>
-      <div class="kb-field">
-        <label>Title</label>
-        <input type="text" name="title" placeholder="Task title" autocomplete="off" />
-      </div>
-      <div class="kb-field">
-        <label>Description</label>
-        <textarea name="description" placeholder="Task description..." rows="6"></textarea>
-      </div>
-      <div class="kb-field">
-        <label>Checklist</label>
-        <div class="kb-checklist-container"></div>
-      </div>
-      <div class="kb-field">
-        <label>Priority</label>
+      <h3>${esc(heading)}</h3>
+      ${task ? "" : `<div class="kb-field"><label>Profile</label><input type="text" name="profile" placeholder="profile-slug" autocomplete="off" /></div>`}
+      <div class="kb-field"><label>Title</label><input type="text" name="title" value="${esc(t.title || "")}" autocomplete="off" /></div>
+      <div class="kb-field"><label>Description</label><textarea name="description">${esc(t.description || "")}</textarea></div>
+      <div class="kb-field"><label>Priority</label>
         <select name="priority">
-          <option value="P0">P0 - Critical</option>
-          <option value="P1">P1 - High</option>
-          <option value="P2" selected>P2 - Normal</option>
-          <option value="P3">P3 - Low</option>
+          ${["P0", "P1", "P2", "P3"].map((p) => `<option value="${p}"${(t.priority || "P2") === p ? " selected" : ""}>${p}</option>`).join("")}
         </select>
       </div>
-      <div class="kb-field">
-        <label>Parent Task ID (optional)</label>
-        <input type="text" name="parent_task_id" placeholder="parent-task-uuid" autocomplete="off" />
-      </div>
-      <div class="kb-field">
-        <label>Goal (optional)</label>
-        <select name="goal_id">
-          <option value="">— None —</option>
-          ${this.goals.map(g => `<option value="${esc(g.id)}">[${esc(g.type)}] ${esc(g.title)}</option>`).join('')}
-        </select>
-      </div>
+      ${task ? `<div class="kb-field"><label>Status</label><select name="status">${statusOptions.map((s) => `<option value="${s}"${t.status === s ? " selected" : ""}>${s}</option>`).join("")}</select></div>` : ""}
+      <div class="kb-field"><label>Parent task ID (optional)</label><input type="text" name="parent_task_id" value="${esc(t.parent_task_id || "")}" placeholder="parent-task-uuid" autocomplete="off" /></div>
       <div class="kb-form-btns">
         <button class="kb-form-btn kb-form-btn--cancel" type="button">Cancel</button>
-        <button class="kb-form-btn kb-form-btn--submit" type="button">Dispatch</button>
-      </div>
-    `;
+        <button class="kb-form-btn kb-form-btn--submit" type="button">${esc(submitLabel)}</button>
+      </div>`;
 
-    // Init checklist
-    const dispatchChecklistItems = [];
-    const dispatchChecklistContainer = form.querySelector('.kb-checklist-container');
-    const updateDispatchChecklist = () => {
-      const total = dispatchChecklistItems.length;
-      const done = dispatchChecklistItems.filter(i => i.checked).length;
-      const progress = dispatchChecklistContainer.querySelector('.kb-checklist-progress');
-      if (progress) {
-        progress.querySelector('span').textContent = `${done}/${total}`;
-        progress.querySelector('.kb-checklist-bar-fill').style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
+    form.querySelector(".kb-form-btn--cancel").addEventListener("click", () => this._closeForm());
+    form.querySelector(".kb-form-btn--submit").addEventListener("click", () => {
+      const get = (n) => { const el = form.querySelector(`[name="${n}"]`); return el ? el.value.trim() : ""; };
+      const title = get("title");
+      if (!title) return;
+      const data = {
+        title,
+        description: get("description"),
+        priority: get("priority") || "P2",
+      };
+      if (!task) {
+        const profile = get("profile");
+        if (!profile) return;
+        data.profile = profile;
+      } else {
+        const status = get("status");
+        if (status) data.status = status;
       }
-    };
-    dispatchChecklistContainer.innerHTML = this._buildChecklistHTML(dispatchChecklistItems);
-    this._attachChecklistEvents(dispatchChecklistContainer, dispatchChecklistItems, updateDispatchChecklist);
-
-    // Cancel
-    form.querySelector('.kb-form-btn--cancel').addEventListener('click', () => this._closeDispatchForm());
-
-    // Submit
-    form.querySelector('.kb-form-btn--submit').addEventListener('click', () => {
-      const profile = form.querySelector('[name="profile"]').value.trim();
-      const title = form.querySelector('[name="title"]').value.trim();
-      const rawDesc = form.querySelector('[name="description"]').value.trim();
-      const description = this._serializeDescription(rawDesc, dispatchChecklistItems);
-      const priority = form.querySelector('[name="priority"]').value;
-      const parentId = form.querySelector('[name="parent_task_id"]').value.trim();
-      const goalId = form.querySelector('[name="goal_id"]').value;
-
-      if (!profile || !title) return;
-
-      const data = { profile, title, description, priority };
-      if (parentId) data.parent_task_id = parentId;
-      if (goalId) data.goal_id = goalId;
-
-      if (this.onDispatch) this.onDispatch(data);
-      this._closeDispatchForm();
+      const parent = get("parent_task_id");
+      if (parent) data.parent_task_id = parent;
+      onSubmit(data);
+      this._closeForm();
     });
 
-    // Close on overlay click
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) this._closeDispatchForm();
-    });
-
-    // Close on Escape
-    this._formEscHandler = (e) => {
-      if (e.key === 'Escape') this._closeDispatchForm();
-    };
-    document.addEventListener('keydown', this._formEscHandler);
+    overlay.addEventListener("click", (e) => { if (e.target === overlay) this._closeForm(); });
+    this._formEsc = (e) => { if (e.key === "Escape") this._closeForm(); };
+    document.addEventListener("keydown", this._formEsc);
 
     overlay.appendChild(form);
     this.root.appendChild(overlay);
-    this._overlay = overlay;
-
-    // Focus first input
-    requestAnimationFrame(() => form.querySelector('input').focus());
+    this._formOverlay = overlay;
+    requestAnimationFrame(() => { const i = form.querySelector("input"); if (i) i.focus(); });
   }
 
-  _closeDispatchForm() {
-    if (this._overlay) {
-      this._overlay.remove();
-      this._overlay = null;
-    }
-    if (this._formEscHandler) {
-      document.removeEventListener('keydown', this._formEscHandler);
-      this._formEscHandler = null;
-    }
-    // Re-render with latest data that may have arrived while form was open
+  _closeForm() {
+    if (this._formOverlay) { this._formOverlay.remove(); this._formOverlay = null; }
+    if (this._formEsc) { document.removeEventListener("keydown", this._formEsc); this._formEsc = null; }
     this._render();
   }
 
-  /* ─── Edit Form ─── */
-
-  _showEditForm(task) {
-    if (this._overlay) return;
-
-    const overlay = document.createElement('div');
-    overlay.className = 'kb-overlay';
-
-    const form = document.createElement('div');
-    form.className = 'kb-form';
-
-    // Parse existing checklist items from description
-    const parsed = this._parseChecklist(task.description || '');
-    const editChecklistItems = [...parsed.items];
-
-    const statusOptions = ['pending', 'accepted', 'in-progress', 'done', 'blocked', 'cancelled'];
-
-    form.innerHTML = `
-      <h3>Edit Task</h3>
-      <div class="kb-field">
-        <label>Title</label>
-        <input type="text" name="title" value="${esc(task.title)}" autocomplete="off" />
-      </div>
-      <div class="kb-field">
-        <label>Assigned To</label>
-        <input type="text" name="assigned_to" value="${esc(task.assigned_to || '')}" placeholder="profile-slug" autocomplete="off" />
-      </div>
-      <div class="kb-field">
-        <label>Description</label>
-        <textarea name="description" rows="6">${esc(parsed.text)}</textarea>
-      </div>
-      <div class="kb-field">
-        <label>Checklist</label>
-        <div class="kb-checklist-container"></div>
-      </div>
-      <div class="kb-field-row">
-        <div class="kb-field">
-          <label>Priority</label>
-          <select name="priority">
-            <option value="P0"${task.priority === 'P0' ? ' selected' : ''}>P0 - Critical</option>
-            <option value="P1"${task.priority === 'P1' ? ' selected' : ''}>P1 - High</option>
-            <option value="P2"${task.priority === 'P2' ? ' selected' : ''}>P2 - Normal</option>
-            <option value="P3"${task.priority === 'P3' ? ' selected' : ''}>P3 - Low</option>
-          </select>
-        </div>
-        <div class="kb-field">
-          <label>Status</label>
-          <select name="status">
-            ${statusOptions.map(s => `<option value="${s}"${task.status === s ? ' selected' : ''}>${s}</option>`).join('')}
-          </select>
-        </div>
-      </div>
-      <div class="kb-field">
-        <label>Goal (optional)</label>
-        <select name="goal_id">
-          <option value="">— None —</option>
-          ${this.goals.map(g => `<option value="${esc(g.id)}"${task.goal_id === g.id ? ' selected' : ''}>[${esc(g.type)}] ${esc(g.title)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="kb-field">
-        <label>Board (optional)</label>
-        <select name="board_id">
-          <option value="">— Default —</option>
-          ${this.boards.map(b => `<option value="${esc(b.id)}"${task.board_id === b.id ? ' selected' : ''}>${esc(b.name)}</option>`).join('')}
-        </select>
-      </div>
-      <div class="kb-field kb-field--meta">
-        <span>ID: ${esc(task.id.slice(0, 8))}...</span>
-        <span>Created: ${task.dispatched_at ? new Date(task.dispatched_at).toLocaleDateString() : '—'}</span>
-      </div>
-      <div class="kb-form-btns">
-        <button class="kb-form-btn kb-form-btn--cancel" type="button">Cancel</button>
-        <button class="kb-form-btn kb-form-btn--submit" type="button">Save</button>
-      </div>
-    `;
-
-    // Init checklist
-    const editChecklistContainer = form.querySelector('.kb-checklist-container');
-    const updateEditChecklist = () => {
-      const total = editChecklistItems.length;
-      const done = editChecklistItems.filter(i => i.checked).length;
-      const progress = editChecklistContainer.querySelector('.kb-checklist-progress');
-      if (progress) {
-        progress.querySelector('span').textContent = `${done}/${total}`;
-        progress.querySelector('.kb-checklist-bar-fill').style.width = total ? `${Math.round((done / total) * 100)}%` : '0%';
-      }
-    };
-    editChecklistContainer.innerHTML = this._buildChecklistHTML(editChecklistItems);
-    this._attachChecklistEvents(editChecklistContainer, editChecklistItems, updateEditChecklist);
-
-    form.querySelector('.kb-form-btn--cancel').addEventListener('click', () => this._closeDispatchForm());
-    form.querySelector('.kb-form-btn--submit').addEventListener('click', () => {
-      const title = form.querySelector('[name="title"]').value.trim();
-      const rawDesc = form.querySelector('[name="description"]').value.trim();
-      const description = this._serializeDescription(rawDesc, editChecklistItems);
-      const priority = form.querySelector('[name="priority"]').value;
-      const status = form.querySelector('[name="status"]').value;
-      const goalId = form.querySelector('[name="goal_id"]').value;
-      const boardId = form.querySelector('[name="board_id"]').value;
-      const assignedTo = form.querySelector('[name="assigned_to"]').value.trim();
-      if (!title) return;
-      const data = { title, description, priority };
-      if (status) data.status = status;
-      if (goalId) data.goal_id = goalId;
-      if (boardId) data.board_id = boardId;
-      if (assignedTo) data.assigned_to = assignedTo;
-      if (this.onEdit) this.onEdit(task.id, task.project || 'default', data);
-      this._closeDispatchForm();
-    });
-
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) this._closeDispatchForm();
-    });
-    this._formEscHandler = (e) => {
-      if (e.key === 'Escape') this._closeDispatchForm();
-    };
-    document.addEventListener('keydown', this._formEscHandler);
-
-    overlay.appendChild(form);
-    this.root.appendChild(overlay);
-    this._overlay = overlay;
-    requestAnimationFrame(() => form.querySelector('input').focus());
-  }
-
-  /* ─── Time updater ─── */
+  /* ─── Live time updates ─── */
 
   _updateTimes() {
-    this.root.querySelectorAll('.kb-time[data-dispatched]').forEach(el => {
-      el.textContent = timeAgo(el.dataset.dispatched);
+    this.root.querySelectorAll(".kb-time[data-ts]").forEach((el) => {
+      el.textContent = timeAgo(el.dataset.ts);
     });
-  }
-
-  _buildGoalChain(goalId) {
-    const chain = [];
-    let current = goalId;
-    const visited = new Set();
-    while (current && !visited.has(current) && chain.length < 5) {
-      visited.add(current);
-      const g = this.goalMap.get(current);
-      if (!g) break;
-      chain.unshift(g);
-      current = g.parent_goal_id;
-    }
-    return chain;
+    this.root.querySelectorAll(".kb-review-timer[data-review]").forEach((el) => {
+      el.textContent = `in review ${minsSince(el.dataset.review)}min`;
+    });
   }
 }

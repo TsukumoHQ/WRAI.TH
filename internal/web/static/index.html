@@ -40,12 +40,18 @@
         </div>
       </div>
       <span class="header-sep"></span>
-      <div class="mode-toggle">
-        <button class="mode-btn active" data-mode="canvas" title="Agents [1]">
-          <span class="mode-icon">&#9678;</span>
+      <div class="mode-toggle" role="group" aria-label="View mode">
+        <button class="mode-btn active" data-mode="canvas" title="Agents [1]" aria-label="Agents view" aria-pressed="true">
+          <span class="mode-icon" aria-hidden="true">&#9678;</span>
         </button>
-        <button class="mode-btn" data-mode="kanban" title="Kanban [2]">
-          <span class="mode-icon">&#9638;</span>
+        <button class="mode-btn" data-mode="kanban" title="Kanban [2]" aria-label="Kanban view" aria-pressed="false">
+          <span class="mode-icon" aria-hidden="true">&#9638;</span>
+        </button>
+        <button class="mode-btn" data-mode="stats" title="Stats [3]">
+          <span class="mode-icon">&#9202;</span>
+        </button>
+        <button class="mode-btn" data-mode="notifications" title="Notifications [4]">
+          <span class="mode-icon">&#9873;</span>
         </button>
       </div>
     </div>
@@ -56,11 +62,12 @@
         <button id="tab-tasks" class="header-tab">Tasks <span id="task-count" class="memory-badge">0</span></button>
       </div>
       <div class="zoom-controls">
-        <button id="zoom-out" class="zoom-btn" title="Zoom out [-]">−</button>
-        <span id="zoom-level" class="zoom-level">100%</span>
-        <button id="zoom-in" class="zoom-btn" title="Zoom in [+]">+</button>
+        <button id="zoom-out" class="zoom-btn" title="Zoom out [-]" aria-label="Zoom out">−</button>
+        <span id="zoom-level" class="zoom-level" aria-live="polite">100%</span>
+        <button id="zoom-in" class="zoom-btn" title="Zoom in [+]" aria-label="Zoom in">+</button>
       </div>
-      <button id="help-btn" class="help-btn" title="Help [?]">?</button>
+      <button id="settings-btn" class="help-btn" title="Settings" aria-label="Settings">&#9881;</button>
+      <button id="help-btn" class="help-btn" title="Help [?]" aria-label="Help">?</button>
     </div>
   </header>
 
@@ -72,15 +79,6 @@
           <div id="asset-picker-title">SELECT</div>
           <div id="asset-picker-grid"></div>
         </div>
-        <!-- Quest Tracker HUD -->
-        <div id="quest-tracker" class="quest-tracker collapsed">
-          <div id="quest-tracker-header">
-            <span class="qt-icon">&#9670;</span>
-            <span class="qt-title">OBJECTIVES</span>
-            <span id="qt-toggle" class="qt-toggle">&#9660;</span>
-          </div>
-          <div id="quest-tracker-body"></div>
-        </div>
       </div>
       <div id="cmd-resize-handle" class="colony-only"></div>
       <div id="command-panel" class="colony-only"></div>
@@ -88,6 +86,12 @@
 
     <!-- Kanban panel (hidden by default, shown in kanban mode) -->
     <div id="kanban-panel" class="hidden"></div>
+
+    <!-- Stats panel (hidden by default, shown in stats mode) -->
+    <div id="stats-panel" class="hidden"></div>
+
+    <!-- Notifications panel (hidden by default, shown in notifications mode) -->
+    <div id="notifications-panel" class="hidden"></div>
 
     <div id="messages-panel">
       <div id="messages-header">
@@ -241,10 +245,40 @@
   <div id="user-questions" class="user-questions-panel"></div>
 
   <!-- Help Modal -->
-  <div id="help-modal" class="help-modal hidden">
+  <div id="settings-modal" class="help-modal hidden" role="dialog" aria-modal="true" aria-label="Settings">
+    <div class="help-overlay"></div>
+    <div class="help-content settings-content">
+      <button id="settings-close" class="help-close">&times;</button>
+      <h2>Settings</h2>
+
+      <div class="help-section">
+        <h3>Linear (SSOT mirror)</h3>
+        <p class="settings-hint">Mode poll : le relay tire le cycle actif de Linear toutes les minutes. Aucun port expos&eacute;. Le board devient read-only (Linear est la source de v&eacute;rit&eacute;).</p>
+        <label class="settings-row">
+          <input type="checkbox" id="set-linear-enabled">
+          <span>Activer le mode Linear</span>
+        </label>
+        <label class="settings-row settings-col">
+          <span>API key</span>
+          <input type="password" id="set-linear-key" placeholder="lin_api_..." autocomplete="off">
+        </label>
+        <div class="settings-row">
+          <button id="set-linear-load-teams" class="settings-btn">Charger les teams</button>
+          <span id="set-linear-team-status" class="settings-hint"></span>
+        </div>
+        <div id="set-linear-teams" class="settings-teams"></div>
+        <div class="settings-row">
+          <button id="set-linear-save" class="settings-btn primary">Enregistrer</button>
+          <span id="set-linear-status" class="settings-hint"></span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="help-modal" class="help-modal hidden" role="dialog" aria-modal="true" aria-label="Help">
     <div class="help-overlay"></div>
     <div class="help-content">
-      <button id="help-close" class="help-close">&times;</button>
+      <button id="help-close" class="help-close" aria-label="Close help">&times;</button>
       <h2>wrai.th</h2>
       <p class="help-subtitle">Multi-agent orchestration &amp; communication relay</p>
 
@@ -266,7 +300,7 @@
         <h3>Views</h3>
         <ul>
           <li><b>Canvas</b> <kbd>1</kbd> — agents on planet surface, message orb animations</li>
-          <li><b>Kanban</b> <kbd>2</kbd> — task boards with drag &amp; drop, sprint columns</li>
+          <li><b>Kanban</b> <kbd>2</kbd> — live task board (Backlog / Todo / In Progress / In Review / Done), cycle filter, execution overlay</li>
         </ul>
       </div>
 
@@ -306,17 +340,7 @@
           <li><b>archive_tasks</b> — soft-delete done/cancelled tasks</li>
           <li><b>archive_board</b> / <b>delete_board</b> — clean up old sprints</li>
           <li>Priority: <code>P0</code> (critical) to <code>P3</code> (low)</li>
-          <li>Kanban: drag &amp; drop between columns, <kbd>N</kbd> to create new task</li>
-        </ul>
-      </div>
-
-      <div class="help-section">
-        <h3>Goals</h3>
-        <ul>
-          <li><b>create_goal</b> — types: <code>mission</code>, <code>objective</code>, <code>key_result</code></li>
-          <li><b>update_goal</b> — update status &amp; progress (0-100)</li>
-          <li>Goals cascade: mission &rarr; objectives &rarr; key results</li>
-          <li>Link tasks to goals for progress tracking</li>
+          <li>Kanban: click a card for detail, <kbd>N</kbd> to create a task (native mode); Linear mode is read-only and links out to Linear</li>
         </ul>
       </div>
 

@@ -4,6 +4,26 @@
   box-sizing: border-box;
 }
 
+/* --- Accessibility: keyboard focus + reduced motion --- */
+:focus-visible {
+  outline: 2px solid #8b7cff;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+/* Mouse/touch interactions keep their styled states (no ring). */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 body {
   font-family: 'JetBrains Mono', monospace;
   background: #0a0a12;
@@ -18,6 +38,24 @@ body {
   --font-md: calc(12px * var(--scale));
   --font-lg: calc(14px * var(--scale));
   --font-xl: calc(18px * var(--scale));
+
+  /* ═══ Spatial hierarchy tokens ═══
+     The canvas is the stage; everything informational floats above it
+     as a layered HUD. Panels never reflow the stage — they overlay it. */
+  --z-stage: 0;      /* canvas + in-scene fx (own stacking context) */
+  --z-hud: 20;       /* floating HUD surfaces: sidebar, command dock, drawers */
+  --z-toast: 40;     /* user notification cards */
+  --z-modal: 1000;   /* help modal & friends */
+
+  /* Shared HUD surface treatment — one glass identity for every panel */
+  --hud-bg: rgba(11, 11, 24, 0.82);
+  --hud-border: rgba(124, 110, 224, 0.22);
+  --hud-border-strong: rgba(162, 155, 254, 0.4);
+  --hud-radius: 10px;
+  --hud-blur: blur(14px) saturate(1.2);
+  --hud-shadow: 0 12px 36px rgba(0, 0, 0, 0.55), inset 0 1px 0 rgba(162, 155, 254, 0.08);
+  --hud-gap: 12px;
+  --hud-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* Scalable UI — sidebar, header, panels (not the canvas) */
@@ -104,7 +142,7 @@ header {
 
 .agent-count {
   font-size: 10px;
-  color: #6a6a80;
+  color: #7e7e98;
   flex-shrink: 0;
 }
 
@@ -121,7 +159,7 @@ header {
 .mode-btn {
   background: none;
   border: none;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
   padding: 2px 8px;
@@ -163,7 +201,7 @@ header {
 .zoom-btn:hover { color: #e0e0e8; background: rgba(108, 92, 231, 0.25); }
 .zoom-level {
   font-size: 9px;
-  color: #6a6a80;
+  color: #7e7e98;
   min-width: 30px;
   text-align: center;
 }
@@ -177,10 +215,12 @@ header {
   margin-left: auto;
 }
 
-/* Main layout */
+/* Main layout — the stage. Canvas is absolutely positioned to fill it,
+   so flex reflows of HUD panels can never squeeze or deform the scene. */
 main {
   display: flex;
   flex: 1;
+  position: relative;
   overflow: hidden;
 }
 
@@ -188,6 +228,7 @@ main {
 #left-column {
   display: flex;
   flex-direction: column;
+  justify-content: flex-end; /* canvas is out-of-flow; dock sits at the bottom */
   flex: 2;
   min-width: 200px;
   overflow: visible;
@@ -207,6 +248,21 @@ main.mode-kanban #memories-panel { display: none !important; }
 main.mode-kanban #tasks-panel { display: none !important; }
 main.mode-kanban #vault-panel { display: none !important; }
 main.mode-kanban #ops-panel { display: none !important; }
+main.mode-kanban #stats-panel { display: none !important; }
+
+/* Stats mode — full-width analytics panel */
+main.mode-stats #left-column { display: none !important; }
+main.mode-stats #stats-panel { flex: 1; display: flex !important; }
+main.mode-stats #kanban-panel { display: none !important; }
+main.mode-stats #messages-panel { display: none !important; }
+main.mode-stats #memories-panel { display: none !important; }
+main.mode-stats #tasks-panel { display: none !important; }
+main.mode-stats #vault-panel { display: none !important; }
+main.mode-stats #ops-panel { display: none !important; }
+
+main.mode-canvas #stats-panel { display: none; }
+main.mode-detail #stats-panel { display: none; }
+body.view-galaxy #stats-panel { display: none !important; }
 
 main.mode-vault #left-column { display: none !important; }
 main.mode-vault #vault-panel { flex: 1; display: flex !important; }
@@ -224,40 +280,86 @@ main.mode-ops #messages-panel { display: none !important; }
 main.mode-ops #memories-panel { display: none !important; }
 main.mode-ops #tasks-panel { display: none !important; }
 
+main.mode-ops #notifications-panel { display: none !important; }
+
+main.mode-notifications #left-column { display: none !important; }
+main.mode-notifications #notifications-panel { flex: 1; display: flex !important; }
+main.mode-notifications #kanban-panel { display: none !important; }
+main.mode-notifications #vault-panel { display: none !important; }
+main.mode-notifications #ops-panel { display: none !important; }
+main.mode-notifications #messages-panel { display: none !important; }
+main.mode-notifications #memories-panel { display: none !important; }
+main.mode-notifications #tasks-panel { display: none !important; }
+main.mode-kanban #notifications-panel { display: none !important; }
+main.mode-vault #notifications-panel { display: none !important; }
+
 main.mode-canvas #vault-panel { display: none; }
 main.mode-canvas #ops-panel { display: none; }
+main.mode-canvas #notifications-panel { display: none; }
 main.mode-detail #vault-panel { display: none; }
 main.mode-detail #ops-panel { display: none; }
+main.mode-detail #notifications-panel { display: none; }
 
-/* Agent focused: hide sidebar, full-width canvas+command panel */
-main.agent-focused #messages-panel,
-main.agent-focused #memories-panel,
-main.agent-focused #tasks-panel { display: none !important; }
-main.agent-focused #left-column { flex: 1; }
-/* Also hide header sidebar tabs when agent focused */
-main.agent-focused ~ #_dummy_ { /* selector anchor — real rule below */ }
-body:has(main.agent-focused) .header-tabs { opacity: 0.3; pointer-events: none; }
+#notifications-panel {
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Agent focused: panels are floating HUD over the stage — the sidebar stays.
+   (It used to be hidden, which made the layout jump on every agent click.) */
 
 #ops-panel {
   flex-direction: column;
   overflow: hidden;
 }
 
+/* The stage: fills <main> (its nearest positioned ancestor) regardless of
+   which HUD panels are open. Hidden along with #left-column in other modes.
+   z-index creates a stacking context, so in-scene fx (flash, asset picker,
+   quest tracker) stay layered inside the stage, below the HUD. */
 #canvas-container {
-  flex: 1;
-  position: relative;
+  position: absolute;
+  inset: 0;
   overflow: hidden;
-  min-height: 0;
+  z-index: var(--z-stage);
 }
 
-/* Command Panel */
+/* ═══ HUD entry motion (shared) ═══ */
+@keyframes hud-rise {
+  from { opacity: 0; transform: translateY(14px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes hud-slide-in {
+  from { opacity: 0; transform: translateX(14px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  #command-panel,
+  #cmd-resize-handle,
+  #messages-panel,
+  #memories-panel,
+  #tasks-panel,
+  .detail-panel {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* Command dock — floating glass HUD over the lower stage */
 #command-panel {
-  height: 280px;
+  height: 200px;
   min-height: 120px;
   max-height: 60vh;
-  background: rgba(15, 15, 35, 0.98);
-  border-top: 2px solid rgba(108, 92, 231, 0.7);
-  box-shadow: 0 -4px 20px rgba(108, 92, 231, 0.15), inset 0 1px 0 rgba(108, 92, 231, 0.2);
+  position: relative;
+  z-index: var(--z-hud);
+  margin: 0 var(--hud-gap) var(--hud-gap);
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border: 1px solid var(--hud-border);
+  border-top: none;
+  border-radius: 0 0 var(--hud-radius) var(--hud-radius);
+  box-shadow: var(--hud-shadow);
   overflow-y: auto;
   display: none;
   flex-direction: column;
@@ -265,23 +367,63 @@ body:has(main.agent-focused) .header-tabs { opacity: 0.3; pointer-events: none; 
 }
 body.view-colony #command-panel {
   display: flex !important;
+  animation: hud-rise 0.32s var(--hud-ease);
 }
 
+/* Grab bar — the dock's rounded top edge */
 #cmd-resize-handle {
-  height: 6px;
+  height: 12px;
+  position: relative;
+  z-index: var(--z-hud);
+  margin: 0 var(--hud-gap);
   cursor: ns-resize;
-  background: linear-gradient(180deg, rgba(108, 92, 231, 0.15), rgba(108, 92, 231, 0.05));
-  border-top: 1px solid rgba(108, 92, 231, 0.4);
-  border-bottom: 1px solid rgba(108, 92, 231, 0.3);
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border: 1px solid var(--hud-border);
+  border-bottom: none;
+  border-radius: var(--hud-radius) var(--hud-radius) 0 0;
   flex-shrink: 0;
   display: none;
+  transition: border-color 0.15s;
+}
+#cmd-resize-handle::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: 36px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(162, 155, 254, 0.35);
+  transition: background 0.15s, box-shadow 0.15s;
 }
 body.view-colony #cmd-resize-handle {
   display: block !important;
+  animation: hud-rise 0.32s var(--hud-ease);
+}
+
+/* Collapsed dock: only the grab bar remains, fully rounded */
+#command-panel.dock-collapsed {
+  height: 0 !important;
+  min-height: 0;
+  border-width: 0;
+  margin-bottom: var(--hud-gap);
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+#cmd-resize-handle.dock-collapsed {
+  border-bottom: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
 }
 
 #cmd-resize-handle:hover {
-  background: rgba(108, 92, 231, 0.3);
+  border-color: var(--hud-border-strong);
+}
+#cmd-resize-handle:hover::after {
+  background: rgba(162, 155, 254, 0.7);
   box-shadow: 0 0 8px rgba(108, 92, 231, 0.4);
 }
 
@@ -319,14 +461,23 @@ body.view-colony #cmd-resize-handle {
   flex-direction: column;
 }
 
-/* Messages Panel */
+/* Messages Panel — floating HUD card on the right edge of the stage */
 #messages-panel {
   width: 320px;
-  background: rgba(15, 15, 26, 0.95);
-  border-left: 1px solid rgba(108, 92, 231, 0.15);
+  position: relative;
+  z-index: var(--z-hud);
+  margin: var(--hud-gap) var(--hud-gap) var(--hud-gap) 0;
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
+  box-shadow: var(--hud-shadow);
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  animation: hud-slide-in 0.28s var(--hud-ease);
 }
 
 #messages-header {
@@ -441,13 +592,13 @@ body.view-colony #cmd-resize-handle {
 
 .msg-time {
   font-size: 9px;
-  color: #6a6a80;
+  color: #7e7e98;
   margin-top: 4px;
 }
 
 .msg-empty {
   text-align: center;
-  color: #6a6a80;
+  color: #7e7e98;
   padding: 40px 16px;
   font-size: 11px;
 }
@@ -531,11 +682,13 @@ body.view-colony #cmd-resize-handle {
   top: 48px;
   bottom: 0;
   width: 340px;
-  background: rgba(10, 10, 26, 0.97);
-  border-left: 2px solid rgba(108, 92, 231, 0.35);
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border-left: 1px solid var(--hud-border);
   padding: 14px 16px;
-  transition: right 0.25s cubic-bezier(0.22, 1, 0.36, 1);
-  z-index: 20;
+  transition: right 0.25s var(--hud-ease);
+  z-index: var(--z-hud);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -853,7 +1006,7 @@ body.view-colony #cmd-resize-handle {
   position: fixed;
   bottom: 16px;
   left: 16px;
-  z-index: 30;
+  z-index: var(--z-toast);
   display: flex;
   flex-direction: column-reverse;
   gap: 6px;
@@ -1206,7 +1359,7 @@ body.view-colony #cmd-resize-handle {
 .header-tab {
   background: none;
   border: 1px solid transparent;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   padding: 4px 10px;
@@ -1537,11 +1690,20 @@ body.view-galaxy .quest-tracker { display: none !important; }
 /* Memories Panel */
 #memories-panel {
   width: 320px;
-  background: rgba(15, 15, 26, 0.95);
-  border-left: 1px solid rgba(108, 92, 231, 0.15);
+  position: relative;
+  z-index: var(--z-hud);
+  margin: var(--hud-gap) var(--hud-gap) var(--hud-gap) 0;
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
+  box-shadow: var(--hud-shadow);
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  animation: hud-slide-in 0.28s var(--hud-ease);
 }
 
 #memories-header {
@@ -1683,12 +1845,12 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 .memory-confidence {
-  color: #6a6a80;
+  color: #7e7e98;
   font-size: 9px;
 }
 
 .memory-version {
-  color: #6a6a80;
+  color: #7e7e98;
   font-size: 9px;
 }
 
@@ -1702,7 +1864,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 .memory-time {
-  color: #6a6a80;
+  color: #7e7e98;
   font-size: 9px;
   margin-left: auto;
 }
@@ -1757,7 +1919,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 .scale-btn {
   background: none;
   border: 1px solid transparent;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   padding: 2px 6px;
@@ -1778,11 +1940,20 @@ body.view-galaxy .quest-tracker { display: none !important; }
 /* Tasks Panel */
 #tasks-panel {
   width: 320px;
-  background: rgba(15, 15, 26, 0.95);
-  border-left: 1px solid rgba(108, 92, 231, 0.15);
+  position: relative;
+  z-index: var(--z-hud);
+  margin: var(--hud-gap) var(--hud-gap) var(--hud-gap) 0;
+  background: var(--hud-bg);
+  backdrop-filter: var(--hud-blur);
+  -webkit-backdrop-filter: var(--hud-blur);
+  border: 1px solid var(--hud-border);
+  border-radius: var(--hud-radius);
+  box-shadow: var(--hud-shadow);
+  overflow: hidden;
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
+  animation: hud-slide-in 0.28s var(--hud-ease);
 }
 
 #tasks-header {
@@ -2029,7 +2200,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 /* Help modal */
-.help-modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; }
+.help-modal { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; align-items: center; justify-content: center; }
 .help-modal.hidden { display: none; }
 .help-overlay { position: absolute; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(4px); }
 .help-content {
@@ -2039,10 +2210,10 @@ body.view-galaxy .quest-tracker { display: none !important; }
   overflow-y: auto; box-shadow: 0 0 40px rgba(108,92,231,0.15); z-index: 1;
 }
 .help-content h2 { font-size: 20px; color: #a29bfe; margin-bottom: 4px; }
-.help-subtitle { color: #6a6a80; font-size: 12px; margin-bottom: 20px; }
+.help-subtitle { color: #7e7e98; font-size: 12px; margin-bottom: 20px; }
 .help-close {
   position: absolute; top: 16px; right: 16px; background: none;
-  border: none; color: #6a6a80; font-size: 22px; cursor: pointer;
+  border: none; color: #7e7e98; font-size: 22px; cursor: pointer;
 }
 .help-close:hover { color: #e0e0e8; }
 .help-section { margin-bottom: 18px; }
@@ -2163,7 +2334,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
   border: 1px solid rgba(0, 255, 255, 0.12);
   border-radius: 4px;
   padding: 6px 12px;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   font-weight: 600;
@@ -2276,7 +2447,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
   border: 1px solid rgba(0, 255, 255, 0.08);
   border-radius: 3px;
   padding: 3px 8px;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   font-weight: 500;
@@ -2491,7 +2662,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 
 .vt-search-excerpt {
   font-size: 9px;
-  color: #6a6a80;
+  color: #7e7e98;
   margin-top: 2px;
   max-height: 2em;
   overflow: hidden;
@@ -2585,7 +2756,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 .vault-detail-breadcrumb-dir {
-  color: #6a6a80;
+  color: #7e7e98;
 }
 
 .vault-detail-breadcrumb-sep {
@@ -2698,7 +2869,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 4px;
   padding: 6px 16px;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   font-weight: 600;
@@ -3097,3 +3268,23 @@ body.view-galaxy .quest-tracker { display: none !important; }
 .token-tool-bar { flex: 1; height: 3px; background: rgba(255,255,255,0.06); border-radius: 2px; overflow: hidden; }
 .token-tool-bar-fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg, rgba(255,217,61,0.3), rgba(255,217,61,0.6)); transition: width 0.3s ease-out; }
 .token-tool-count { font: 9px 'JetBrains Mono', monospace; color: rgba(255,217,61,0.5); width: 40px; text-align: right; }
+
+/* Settings modal (reuses help-modal chrome) */
+.settings-content { max-width: 480px; }
+.settings-hint { color: var(--text-muted, #6b7385); font-size: 12px; }
+.settings-row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+.settings-row.settings-col { flex-direction: column; align-items: stretch; gap: 6px; }
+.settings-row input[type="password"], .settings-row input[type="text"] {
+  background: rgba(10, 10, 26, 0.6); border: 1px solid rgba(108, 92, 231, 0.3);
+  border-radius: 6px; padding: 8px 10px; color: #e6e9ef; font: inherit;
+}
+.settings-btn {
+  background: rgba(108, 92, 231, 0.15); border: 1px solid rgba(108, 92, 231, 0.4);
+  border-radius: 6px; padding: 6px 14px; color: #a29bfe; cursor: pointer; font: inherit;
+}
+.settings-btn:hover { background: rgba(108, 92, 231, 0.3); }
+.settings-btn.primary { background: rgba(108, 92, 231, 0.4); color: #fff; }
+.settings-teams { display: flex; flex-direction: column; gap: 4px; margin: 8px 0; }
+.settings-teams label { display: flex; gap: 8px; align-items: center; cursor: pointer; padding: 6px 8px; border-radius: 6px; }
+.settings-teams label:hover { background: rgba(108, 92, 231, 0.1); }
+.settings-teams .team-cycle { color: #4ade80; font-size: 11px; margin-left: auto; }
