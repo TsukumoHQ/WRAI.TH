@@ -4,6 +4,26 @@
   box-sizing: border-box;
 }
 
+/* --- Accessibility: keyboard focus + reduced motion --- */
+:focus-visible {
+  outline: 2px solid #8b7cff;
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+/* Mouse/touch interactions keep their styled states (no ring). */
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 body {
   font-family: 'JetBrains Mono', monospace;
   background: #0a0a12;
@@ -122,7 +142,7 @@ header {
 
 .agent-count {
   font-size: 10px;
-  color: #6a6a80;
+  color: #7e7e98;
   flex-shrink: 0;
 }
 
@@ -139,7 +159,7 @@ header {
 .mode-btn {
   background: none;
   border: none;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 14px;
   padding: 2px 8px;
@@ -181,7 +201,7 @@ header {
 .zoom-btn:hover { color: #e0e0e8; background: rgba(108, 92, 231, 0.25); }
 .zoom-level {
   font-size: 9px;
-  color: #6a6a80;
+  color: #7e7e98;
   min-width: 30px;
   text-align: center;
 }
@@ -572,13 +592,13 @@ body.view-colony #cmd-resize-handle {
 
 .msg-time {
   font-size: 9px;
-  color: #6a6a80;
+  color: #7e7e98;
   margin-top: 4px;
 }
 
 .msg-empty {
   text-align: center;
-  color: #6a6a80;
+  color: #7e7e98;
   padding: 40px 16px;
   font-size: 11px;
 }
@@ -1339,7 +1359,7 @@ body.view-colony #cmd-resize-handle {
 .header-tab {
   background: none;
   border: 1px solid transparent;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   padding: 4px 10px;
@@ -1825,12 +1845,12 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 .memory-confidence {
-  color: #6a6a80;
+  color: #7e7e98;
   font-size: 9px;
 }
 
 .memory-version {
-  color: #6a6a80;
+  color: #7e7e98;
   font-size: 9px;
 }
 
@@ -1844,7 +1864,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 .memory-time {
-  color: #6a6a80;
+  color: #7e7e98;
   font-size: 9px;
   margin-left: auto;
 }
@@ -1899,7 +1919,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 .scale-btn {
   background: none;
   border: 1px solid transparent;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   padding: 2px 6px;
@@ -2190,10 +2210,10 @@ body.view-galaxy .quest-tracker { display: none !important; }
   overflow-y: auto; box-shadow: 0 0 40px rgba(108,92,231,0.15); z-index: 1;
 }
 .help-content h2 { font-size: 20px; color: #a29bfe; margin-bottom: 4px; }
-.help-subtitle { color: #6a6a80; font-size: 12px; margin-bottom: 20px; }
+.help-subtitle { color: #7e7e98; font-size: 12px; margin-bottom: 20px; }
 .help-close {
   position: absolute; top: 16px; right: 16px; background: none;
-  border: none; color: #6a6a80; font-size: 22px; cursor: pointer;
+  border: none; color: #7e7e98; font-size: 22px; cursor: pointer;
 }
 .help-close:hover { color: #e0e0e8; }
 .help-section { margin-bottom: 18px; }
@@ -2314,7 +2334,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
   border: 1px solid rgba(0, 255, 255, 0.12);
   border-radius: 4px;
   padding: 6px 12px;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   font-weight: 600;
@@ -2427,7 +2447,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
   border: 1px solid rgba(0, 255, 255, 0.08);
   border-radius: 3px;
   padding: 3px 8px;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 9px;
   font-weight: 500;
@@ -2642,7 +2662,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 
 .vt-search-excerpt {
   font-size: 9px;
-  color: #6a6a80;
+  color: #7e7e98;
   margin-top: 2px;
   max-height: 2em;
   overflow: hidden;
@@ -2736,7 +2756,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
 }
 
 .vault-detail-breadcrumb-dir {
-  color: #6a6a80;
+  color: #7e7e98;
 }
 
 .vault-detail-breadcrumb-sep {
@@ -2849,7 +2869,7 @@ body.view-galaxy .quest-tracker { display: none !important; }
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 4px;
   padding: 6px 16px;
-  color: #6a6a80;
+  color: #7e7e98;
   font-family: 'JetBrains Mono', monospace;
   font-size: 10px;
   font-weight: 600;

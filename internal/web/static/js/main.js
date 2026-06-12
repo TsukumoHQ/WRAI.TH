@@ -2353,7 +2353,9 @@ function setMode(mode) {
 
   // Update header mode buttons
   document.querySelectorAll(".mode-btn").forEach(btn => {
-    btn.classList.toggle("active", btn.dataset.mode === mode);
+    const isActive = btn.dataset.mode === mode;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-pressed", isActive ? "true" : "false");
   });
 
   // Show/hide kanban — fetch board (mirror read-replica) + cycles BEFORE showing.
@@ -2953,7 +2955,10 @@ shortcuts.register("t", "tab-tasks", "Tasks tab", () => {
 });
 
 shortcuts.register("Escape", "close", "Close / return to galaxy", () => {
-  if (detailPanel.classList.contains("open")) {
+  const helpEl = document.getElementById("help-modal");
+  if (helpEl && !helpEl.classList.contains("hidden")) {
+    helpEl.classList.add("hidden");
+  } else if (detailPanel.classList.contains("open")) {
     detailPanel.classList.remove("open");
     focusedAgent = null;
     loadMessages();

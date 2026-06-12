@@ -40,12 +40,12 @@
         </div>
       </div>
       <span class="header-sep"></span>
-      <div class="mode-toggle">
-        <button class="mode-btn active" data-mode="canvas" title="Agents [1]">
-          <span class="mode-icon">&#9678;</span>
+      <div class="mode-toggle" role="group" aria-label="View mode">
+        <button class="mode-btn active" data-mode="canvas" title="Agents [1]" aria-label="Agents view" aria-pressed="true">
+          <span class="mode-icon" aria-hidden="true">&#9678;</span>
         </button>
-        <button class="mode-btn" data-mode="kanban" title="Kanban [2]">
-          <span class="mode-icon">&#9638;</span>
+        <button class="mode-btn" data-mode="kanban" title="Kanban [2]" aria-label="Kanban view" aria-pressed="false">
+          <span class="mode-icon" aria-hidden="true">&#9638;</span>
         </button>
         <button class="mode-btn" data-mode="stats" title="Stats [3]">
           <span class="mode-icon">&#9202;</span>
@@ -62,12 +62,12 @@
         <button id="tab-tasks" class="header-tab">Tasks <span id="task-count" class="memory-badge">0</span></button>
       </div>
       <div class="zoom-controls">
-        <button id="zoom-out" class="zoom-btn" title="Zoom out [-]">−</button>
-        <span id="zoom-level" class="zoom-level">100%</span>
-        <button id="zoom-in" class="zoom-btn" title="Zoom in [+]">+</button>
+        <button id="zoom-out" class="zoom-btn" title="Zoom out [-]" aria-label="Zoom out">−</button>
+        <span id="zoom-level" class="zoom-level" aria-live="polite">100%</span>
+        <button id="zoom-in" class="zoom-btn" title="Zoom in [+]" aria-label="Zoom in">+</button>
       </div>
-      <button id="settings-btn" class="help-btn" title="Settings">&#9881;</button>
-      <button id="help-btn" class="help-btn" title="Help [?]">?</button>
+      <button id="settings-btn" class="help-btn" title="Settings" aria-label="Settings">&#9881;</button>
+      <button id="help-btn" class="help-btn" title="Help [?]" aria-label="Help">?</button>
     </div>
   </header>
 
@@ -245,7 +245,7 @@
   <div id="user-questions" class="user-questions-panel"></div>
 
   <!-- Help Modal -->
-  <div id="settings-modal" class="help-modal hidden">
+  <div id="settings-modal" class="help-modal hidden" role="dialog" aria-modal="true" aria-label="Settings">
     <div class="help-overlay"></div>
     <div class="help-content settings-content">
       <button id="settings-close" class="help-close">&times;</button>
@@ -275,10 +275,10 @@
     </div>
   </div>
 
-  <div id="help-modal" class="help-modal hidden">
+  <div id="help-modal" class="help-modal hidden" role="dialog" aria-modal="true" aria-label="Help">
     <div class="help-overlay"></div>
     <div class="help-content">
-      <button id="help-close" class="help-close">&times;</button>
+      <button id="help-close" class="help-close" aria-label="Close help">&times;</button>
       <h2>wrai.th</h2>
       <p class="help-subtitle">Multi-agent orchestration &amp; communication relay</p>
 
