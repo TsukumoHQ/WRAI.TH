@@ -165,6 +165,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiLinearWebhook(w, req)
 	case path == "/linear/teams" && req.Method == http.MethodGet:
 		r.apiLinearTeams(w, req)
+	case path == "/agents/avatar" && req.Method == http.MethodPut:
+		r.apiSetAgentAvatar(w, req)
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -354,6 +356,7 @@ type apiAgent struct {
 	Status       string       `json:"status"`
 	IsExecutive  bool         `json:"is_executive"`
 	SessionID    *string      `json:"session_id,omitempty"`
+	AvatarURL    *string      `json:"avatar_url,omitempty"`
 	Activity     string       `json:"activity,omitempty"`
 	ActivityTool string       `json:"activity_tool,omitempty"`
 	Teams        []apiTeamRef `json:"teams,omitempty"`
@@ -398,6 +401,7 @@ func (r *Relay) apiGetAgents(w http.ResponseWriter, req *http.Request) {
 			Status:       a.Status,
 			IsExecutive:  a.IsExecutive,
 			SessionID:    a.SessionID,
+			AvatarURL:    a.AvatarURL,
 			Teams:        teamsByAgent[key],
 		}
 		online := false
@@ -468,6 +472,7 @@ func (r *Relay) apiGetAllAgents(w http.ResponseWriter) {
 			Status:       a.Status,
 			IsExecutive:  a.IsExecutive,
 			SessionID:    a.SessionID,
+			AvatarURL:    a.AvatarURL,
 			Teams:        teamsByAgent[a.Project+":"+a.Name],
 		}
 		if a.SessionID != nil {
@@ -1579,4 +1584,30 @@ func (r *Relay) apiGetTokenTimeSeries(w http.ResponseWriter, req *http.Request) 
 		data = []db.TokenTimeBucket{}
 	}
 	writeJSON(w, data)
+}
+
+// apiSetAgentAvatar sets or clears an agent's avatar image URL (photo/gif).
+func (r *Relay) apiSetAgentAvatar(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Project string `json:"project"`
+		Name    string `json:"name"`
+		URL     string `json:"url"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Name == "" {
+		http.Error(w, `{"error":"name required"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	u := strings.TrimSpace(body.URL)
+	if u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "data:image/") {
+		http.Error(w, `{"error":"url must be http(s) or data:image"}`, http.StatusBadRequest)
+		return
+	}
+	if err := r.DB.SetAgentAvatar(body.Project, body.Name, u); err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to set avatar", err)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true, "agent": body.Name, "avatar_url": u})
 }

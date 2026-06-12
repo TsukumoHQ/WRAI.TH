@@ -43,6 +43,8 @@ export const api = {
   // mutations (native projects only)
   transition: (id, body) =>
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/transition`, body),
+  setAgentAvatar: (project, name, url) =>
+    sendJSON('PUT', '/api/agents/avatar', { project, name, url }),
   dispatchTask: (body) => sendJSON('POST', '/api/tasks', body),
   // notifications
   notificationRules: (project) =>
