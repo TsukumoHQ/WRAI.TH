@@ -235,6 +235,7 @@ func migrate(conn *sql.DB) error {
 		"org_id":            "TEXT",
 		"interest_tags":     "TEXT NOT NULL DEFAULT '[]'",
 		"max_context_bytes": "INTEGER NOT NULL DEFAULT 16384",
+		"avatar_url":        "TEXT",
 	})
 
 	// Projects table (planet_type assigned per project)

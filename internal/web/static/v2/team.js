@@ -143,7 +143,58 @@ export function initTeam(root, ctx) {
     nodeEl.clear();
     if (!agents.length) { nodesEl.innerHTML = ''; return; }
     nodesEl.innerHTML = agents.map(nodeHTML).join('');
-    nodesEl.querySelectorAll('.agent-node').forEach((el) => nodeEl.set(el.dataset.name, el));
+    nodesEl.querySelectorAll('.agent-node').forEach((el) => {
+      nodeEl.set(el.dataset.name, el);
+      const open = () => openAgentSheet(el.dataset.name);
+      el.addEventListener('click', open);
+      el.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+    });
+  }
+
+  /* ---------------- agent sheet: identity + custom avatar ---------------- */
+  function openAgentSheet(name) {
+    const a = agents.find((x) => x.name === name);
+    if (!a) return;
+    const el = document.createElement('div');
+    el.className = 'agent-sheet';
+    el.innerHTML = `
+      <header class="as-head">
+        <span class="an-avatar as-avatar" style="--c:${colorFor(a.name)}">${a.avatar_url ? `<img class="an-img" src="${esc(a.avatar_url)}" alt="">` : esc(initialFor(a.name))}</span>
+        <div><h2>${esc(a.name)}</h2><p class="as-role">${esc(a.role || a.profile_slug || '')}</p></div>
+      </header>
+      ${a.description ? `<p class="as-desc">${esc(a.description)}</p>` : ''}
+      <label class="as-field">
+        <span>avatar — url image / gif / meme</span>
+        <input type="url" class="as-url" placeholder="https://…/avatar.gif" value="${esc(a.avatar_url || '')}">
+      </label>
+      <div class="as-preview" aria-hidden="true"></div>
+      <div class="as-actions">
+        <button class="as-save">enregistrer</button>
+        <button class="as-clear" ${a.avatar_url ? '' : 'hidden'}>retirer</button>
+        <span class="as-status" role="status"></span>
+      </div>`;
+    const input = el.querySelector('.as-url');
+    const preview = el.querySelector('.as-preview');
+    const status = el.querySelector('.as-status');
+    const renderPreview = () => {
+      const u = input.value.trim();
+      preview.innerHTML = u ? `<img src="${esc(u)}" alt="" onerror="this.parentNode.textContent='image introuvable'">` : '';
+    };
+    input.addEventListener('input', renderPreview);
+    renderPreview();
+    const save = async (url) => {
+      status.textContent = '…';
+      try {
+        await api.setAgentAvatar(ctx.selection, a.name, url);
+        a.avatar_url = url || null;
+        renderNodes(); placeNodes();
+        status.textContent = url ? 'ok' : 'retiré';
+        setTimeout(() => ctx.closeSheet(), 350);
+      } catch (e) { status.textContent = 'erreur : ' + e.message; }
+    };
+    el.querySelector('.as-save').addEventListener('click', () => save(input.value.trim()));
+    el.querySelector('.as-clear').addEventListener('click', () => save(''));
+    ctx.openSheet(el);
   }
   function nodeHTML(a) {
     const state = a.online ? (a.activity && a.activity !== 'idle' ? 'active' : 'online') : 'idle';
@@ -151,7 +202,7 @@ export function initTeam(root, ctx) {
     return `<div class="agent-node" data-name="${esc(a.name)}" data-state="${state}" style="--c:${colorFor(a.name)}" tabindex="0" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}">
       <span class="an-orbit" aria-hidden="true"></span>
       <span class="an-heat" aria-hidden="true"></span>
-      <span class="an-avatar">${esc(initialFor(a.name))}<span class="an-status" aria-hidden="true"></span></span>
+      <span class="an-avatar">${a.avatar_url ? `<img class="an-img" src="${esc(a.avatar_url)}" alt="" loading="lazy" onerror="this.remove()">` : esc(initialFor(a.name))}<span class="an-status" aria-hidden="true"></span></span>
       <span class="an-label"><span class="an-name">${esc(a.name)}</span>${role ? `<span class="an-role">${esc(role)}</span>` : ''}</span>
     </div>`;
   }

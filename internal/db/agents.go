@@ -9,11 +9,11 @@ import (
 	"github.com/google/uuid"
 )
 
-const agentColumns = "id, name, role, description, registered_at, last_seen, project, reports_to, profile_slug, status, deactivated_at, is_executive, session_id, interest_tags, max_context_bytes"
+const agentColumns = "id, name, role, description, registered_at, last_seen, project, reports_to, profile_slug, status, deactivated_at, is_executive, session_id, interest_tags, max_context_bytes, avatar_url"
 
 func scanAgent(row interface{ Scan(...any) error }) (models.Agent, error) {
 	var a models.Agent
-	err := row.Scan(&a.ID, &a.Name, &a.Role, &a.Description, &a.RegisteredAt, &a.LastSeen, &a.Project, &a.ReportsTo, &a.ProfileSlug, &a.Status, &a.DeactivatedAt, &a.IsExecutive, &a.SessionID, &a.InterestTags, &a.MaxContextBytes)
+	err := row.Scan(&a.ID, &a.Name, &a.Role, &a.Description, &a.RegisteredAt, &a.LastSeen, &a.Project, &a.ReportsTo, &a.ProfileSlug, &a.Status, &a.DeactivatedAt, &a.IsExecutive, &a.SessionID, &a.InterestTags, &a.MaxContextBytes, &a.AvatarURL)
 	return a, err
 }
 
@@ -48,10 +48,10 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 			MaxContextBytes: maxContextBytes,
 		}
 		_, err := d.conn.Exec(
-			"INSERT INTO agents ("+agentColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO agents ("+agentColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			agent.ID, agent.Name, agent.Role, agent.Description, agent.RegisteredAt, agent.LastSeen,
 			agent.Project, agent.ReportsTo, agent.ProfileSlug, agent.Status, agent.DeactivatedAt, agent.IsExecutive, agent.SessionID,
-			agent.InterestTags, agent.MaxContextBytes,
+			agent.InterestTags, agent.MaxContextBytes, agent.AvatarURL,
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf("insert agent: %w", err)
@@ -262,4 +262,14 @@ func (d *DB) GetKnownSessionIDs() map[string]bool {
 		}
 	}
 	return ids
+}
+
+// SetAgentAvatar sets (or clears, with "") the agent's avatar image URL.
+func (d *DB) SetAgentAvatar(project, name, url string) error {
+	var v *string
+	if url != "" {
+		v = &url
+	}
+	_, err := d.conn.Exec("UPDATE agents SET avatar_url = ? WHERE project = ? AND name = ?", v, project, name)
+	return err
 }

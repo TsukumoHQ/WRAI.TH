@@ -689,3 +689,23 @@ button { font-family: inherit; }
   .stage-caption { animation: none; }
   .pc-dot.on, .ls-pip { animation: none; }
 }
+
+/* Custom agent avatars (photo/gif/meme) + the agent sheet editor */
+.an-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+.an-avatar { position: relative; overflow: visible; }
+.an-avatar .an-img { overflow: hidden; }
+.agent-sheet { padding: 22px; display: flex; flex-direction: column; gap: 14px; font-family: var(--mono, ui-monospace, monospace); }
+.as-head { display: flex; gap: 14px; align-items: center; }
+.as-head h2 { margin: 0; font-size: 16px; }
+.as-avatar { width: 52px; height: 52px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; background: var(--c, #333); font-size: 20px; flex: none; position: relative; }
+.as-role, .as-desc { color: var(--muted, #6b7385); font-size: 12px; margin: 2px 0 0; }
+.as-field { display: flex; flex-direction: column; gap: 6px; font-size: 11px; color: var(--muted, #6b7385); text-transform: uppercase; letter-spacing: .06em; }
+.as-field input { background: #0a0c10; border: 1px solid var(--border, #1d2230); border-radius: 7px; padding: 9px 11px; color: var(--text, #e6e9ef); font: inherit; text-transform: none; letter-spacing: 0; }
+.as-field input:focus-visible { outline: none; border-color: var(--accent, #4ade80); }
+.as-preview img { max-width: 120px; max-height: 120px; border-radius: 10px; border: 1px solid var(--border, #1d2230); object-fit: cover; }
+.as-preview { color: var(--muted, #6b7385); font-size: 12px; }
+.as-actions { display: flex; gap: 10px; align-items: center; }
+.as-actions button { background: #161a23; border: 1px solid var(--border, #1d2230); border-radius: 7px; padding: 7px 14px; color: var(--text, #e6e9ef); font: inherit; font-size: 12px; cursor: pointer; }
+.as-actions .as-save { border-color: var(--accent, #4ade80); color: var(--accent, #4ade80); }
+.as-actions button:hover { background: #1b2029; }
+.as-status { font-size: 12px; color: var(--muted, #6b7385); }

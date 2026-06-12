@@ -16,4 +16,5 @@ type Agent struct {
 	SessionID       *string `json:"session_id,omitempty"`
 	InterestTags    string  `json:"interest_tags"`
 	MaxContextBytes int     `json:"max_context_bytes"`
+	AvatarURL       *string `json:"avatar_url,omitempty"`
 }
