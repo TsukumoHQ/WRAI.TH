@@ -244,10 +244,30 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	interestTags := req.GetString("interest_tags", "[]")
 	maxContextBytes := req.GetInt("max_context_bytes", 16384)
 
-	agent, isRespawn, err := h.db.RegisterAgent(project, name, role, description, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes)
+	// Detect which identity fields were actually provided. GetString/GetBool conflate an
+	// omitted param with an explicitly-empty one, so presence is read from the raw args.
+	// On a respawn, omitted fields are preserved (not clobbered) by the DB layer.
+	args := req.GetArguments()
+	_, reportsToSet := args["reports_to"]
+	_, profileSlugSet := args["profile_slug"]
+	_, isExecutiveSet := args["is_executive"]
+	_, sessionIDSet := args["session_id"]
+	opts := db.RegisterOptions{
+		ReportsToSet:   reportsToSet,
+		ProfileSlugSet: profileSlugSet,
+		IsExecutiveSet: isExecutiveSet,
+		SessionIDSet:   sessionIDSet,
+	}
+
+	agent, isRespawn, err := h.db.RegisterAgent(project, name, role, description, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, opts)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to register agent: %v", err)), nil
 	}
+
+	// Use the effective (post-merge) executive flag and profile slug so a respawn that
+	// omits these still drives the leadership-team side effect and session_context.
+	isExecutive = agent.IsExecutive
+	profileSlug = agent.ProfileSlug
 
 	// Auto-create admin team + add executive agent (fixes broadcast permission UX)
 	var autoAdminTeam *string

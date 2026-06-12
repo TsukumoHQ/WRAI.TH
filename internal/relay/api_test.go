@@ -77,7 +77,7 @@ func TestAPIGetProjects(t *testing.T) {
 	r := testRelay(t)
 
 	// Create a project by registering an agent
-	_, _, _ = r.DB.RegisterAgent("test-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("test-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "GET", "/projects", "")
 	if w.Code != http.StatusOK {
@@ -91,7 +91,7 @@ func TestAPIGetProjects(t *testing.T) {
 
 func TestAPIGetProject(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("my-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("my-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "GET", "/projects/my-proj", "")
 	if w.Code != http.StatusOK {
@@ -113,7 +113,7 @@ func TestAPIGetProjectNotFound(t *testing.T) {
 
 func TestAPIPatchProject(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("my-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("my-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "PATCH", "/projects/my-proj", `{"planet_type":"lava/1"}`)
 	if w.Code != http.StatusOK {
@@ -123,7 +123,7 @@ func TestAPIPatchProject(t *testing.T) {
 
 func TestAPIPatchProjectMissingPlanetType(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("my-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("my-proj", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "PATCH", "/projects/my-proj", `{}`)
 	if w.Code != http.StatusBadRequest {
@@ -164,8 +164,8 @@ func TestAPISettings(t *testing.T) {
 
 func TestAPIGetAgents(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "GET", "/agents?project=p1", "")
 	if w.Code != http.StatusOK {
@@ -179,8 +179,8 @@ func TestAPIGetAgents(t *testing.T) {
 
 func TestAPIGetAllAgents(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p2", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p2", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "GET", "/agents/all", "")
 	if w.Code != http.StatusOK {
@@ -195,8 +195,8 @@ func TestAPIGetAllAgents(t *testing.T) {
 func TestAPIGetOrgTree(t *testing.T) {
 	r := testRelay(t)
 	mgr := "manager"
-	_, _, _ = r.DB.RegisterAgent("p1", "manager", "lead", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p1", "dev-1", "dev", "", &mgr, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "manager", "lead", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p1", "dev-1", "dev", "", &mgr, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "GET", "/org?project=p1", "")
 	if w.Code != http.StatusOK {
@@ -217,7 +217,7 @@ func TestAPIGetOrgTree(t *testing.T) {
 
 func TestAPIGetAllMessages(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.InsertMessage("p1", "bot-a", "bot-b", "notification", "test", "hello", "{}", "P2", 3600, nil, nil)
 
 	w := doAPI(r, "GET", "/messages/all?project=p1", "")
@@ -232,8 +232,8 @@ func TestAPIGetAllMessages(t *testing.T) {
 
 func TestAPIGetAllMessagesAllProjects(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p2", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p2", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.InsertMessage("p1", "bot-a", "bot-b", "notification", "test", "hello", "{}", "P2", 3600, nil, nil)
 	_, _ = r.DB.InsertMessage("p2", "bot-b", "bot-a", "notification", "test", "hey", "{}", "P2", 3600, nil, nil)
 
@@ -249,7 +249,7 @@ func TestAPIGetAllMessagesAllProjects(t *testing.T) {
 
 func TestAPIPostUserResponse(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	w := doAPI(r, "POST", "/user-response", `{"project":"p1","to":"bot-a","content":"yes"}`)
 	if w.Code != http.StatusOK {
@@ -276,8 +276,8 @@ func TestAPIPostUserResponseMissingFields(t *testing.T) {
 
 func TestAPIGetConversations(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.CreateConversation("p1", "test conv", "bot-a", []string{"bot-a", "bot-b"})
 
 	w := doAPI(r, "GET", "/conversations?project=p1", "")
@@ -292,8 +292,8 @@ func TestAPIGetConversations(t *testing.T) {
 
 func TestAPIGetConversationMessages(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	conv, _ := r.DB.CreateConversation("p1", "test", "bot-a", []string{"bot-a", "bot-b"})
 	_, _ = r.DB.InsertMessage("p1", "bot-a", "", "notification", "test", "hello", "{}", "P2", 3600, nil, &conv.ID)
 
@@ -385,7 +385,7 @@ func TestAPISearchMemoriesMissingQuery(t *testing.T) {
 
 func TestAPITaskCRUD(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	// Dispatch
 	w := doAPI(r, "POST", "/tasks", `{"project":"p1","dispatched_by":"bot-a","profile":"dev","title":"Fix bug","description":"fix it"}`)
@@ -421,7 +421,7 @@ func TestAPITaskCRUD(t *testing.T) {
 
 func TestAPITaskTransition(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
 	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "task1", "", "P2", nil, nil)
 
@@ -458,7 +458,7 @@ func TestAPITaskTransition(t *testing.T) {
 
 func TestAPIGetAllTasks(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "task1", "", "P2", nil, nil)
 	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "task2", "", "P1", nil, nil)
 
@@ -717,7 +717,7 @@ func TestAPIGetAllTeams(t *testing.T) {
 func TestAPIGetTeamMembers(t *testing.T) {
 	r := testRelay(t)
 	team, _ := r.DB.CreateTeam("Backend", "backend", "p1", "", "regular", nil, nil)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_ = r.DB.AddTeamMember(team.ID, "bot-a", "p1", "lead")
 
 	w := doAPI(r, "GET", "/teams/backend/members?project=p1", "")
@@ -730,8 +730,8 @@ func TestAPIGetTeamMembers(t *testing.T) {
 
 func TestAPIGetAllConversations(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
-	_, _, _ = r.DB.RegisterAgent("p2", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
+	_, _, _ = r.DB.RegisterAgent("p2", "bot-b", "qa", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.CreateConversation("p1", "conv1", "bot-a", []string{"bot-a"})
 	_, _ = r.DB.CreateConversation("p2", "conv2", "bot-b", []string{"bot-b"})
 
@@ -749,7 +749,7 @@ func TestAPIGetAllConversations(t *testing.T) {
 
 func TestAPIGetLatestMessages(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.InsertMessage("p1", "bot-a", "bot-b", "notification", "test", "recent msg", "{}", "P2", 3600, nil, nil)
 
 	w := doAPI(r, "GET", "/messages/latest?project=p1", "")
@@ -764,7 +764,7 @@ func TestAPIGetLatestMessages(t *testing.T) {
 
 func TestAPIGetLatestMessagesAllProjects(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.InsertMessage("p1", "bot-a", "bot-b", "notification", "test", "msg1", "{}", "P2", 3600, nil, nil)
 
 	w := doAPI(r, "GET", "/messages/latest-all", "")
@@ -777,7 +777,7 @@ func TestAPIGetLatestMessagesAllProjects(t *testing.T) {
 
 func TestAPIGetLatestTasks(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "recent task", "", "P2", nil, nil)
 
 	w := doAPI(r, "GET", "/tasks/latest?project=p1", "")
@@ -788,7 +788,7 @@ func TestAPIGetLatestTasks(t *testing.T) {
 
 func TestAPIUpdateTask(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "old title", "", "P2", nil, nil)
 
 	w := doAPI(r, "PUT", "/tasks/"+task.ID, `{"project":"p1","title":"new title"}`)
@@ -803,7 +803,7 @@ func TestAPIUpdateTask(t *testing.T) {
 
 func TestAPIDeleteTask(t *testing.T) {
 	r := testRelay(t)
-	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0)
+	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "to delete", "", "P2", nil, nil)
 
 	w := doAPI(r, "DELETE", "/tasks/"+task.ID+"?project=p1", "")
