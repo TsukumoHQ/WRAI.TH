@@ -176,7 +176,7 @@ func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confiden
 	return mem, nil
 }
 
-// findActiveMemoryTx is like findActiveMemory but reads through an open
+// findActiveMemoryTx finds the newest active memory version through an open
 // write transaction. Required so SetMemory holds the lock from read to
 // write and prevents the version race observed under concurrent writers
 // on the same key.
@@ -663,43 +663,6 @@ func (d *DB) MemoryStats(project string) (total int, conflicts int, err error) {
 }
 
 // --- internal helpers ---
-
-func (d *DB) findActiveMemory(project, scope, agentName, key string) (*models.Memory, error) {
-	var query string
-	var args []any
-
-	switch scope {
-	case "agent":
-		query = `SELECT id, key, value, tags, scope, project, agent_name, confidence, version,
-				 supersedes, conflict_with, created_at, updated_at, archived_at, archived_by, layer
-				 FROM memories WHERE key = ? AND scope = 'agent' AND project = ? AND agent_name = ? AND archived_at IS NULL
-				 ORDER BY version DESC LIMIT 1`
-		args = []any{key, project, agentName}
-	case "project":
-		query = `SELECT id, key, value, tags, scope, project, agent_name, confidence, version,
-				 supersedes, conflict_with, created_at, updated_at, archived_at, archived_by, layer
-				 FROM memories WHERE key = ? AND scope = 'project' AND project = ? AND archived_at IS NULL
-				 ORDER BY version DESC LIMIT 1`
-		args = []any{key, project}
-	case "global":
-		query = `SELECT id, key, value, tags, scope, project, agent_name, confidence, version,
-				 supersedes, conflict_with, created_at, updated_at, archived_at, archived_by, layer
-				 FROM memories WHERE key = ? AND scope = 'global' AND archived_at IS NULL
-				 ORDER BY version DESC LIMIT 1`
-		args = []any{key}
-	default:
-		return nil, fmt.Errorf("invalid scope: %s", scope)
-	}
-
-	mems, err := d.queryMemories(query, args...)
-	if err != nil {
-		return nil, err
-	}
-	if len(mems) == 0 {
-		return nil, nil
-	}
-	return &mems[0], nil
-}
 
 func (d *DB) queryMemories(query string, args ...any) ([]models.Memory, error) {
 	rows, err := d.ro().Query(query, args...)

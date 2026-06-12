@@ -135,6 +135,7 @@ func TestRegisterProfile_MergesOnUpdate(t *testing.T) {
 		t.Errorf("role wiped: %q", p.Role)
 	}
 }
+
 // Fix 3.5 — progress notes round-trip.
 func TestProgressNotes_RoundTrip(t *testing.T) {
 	d := testDB(t)
