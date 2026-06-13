@@ -28,6 +28,8 @@ register_agent(name: "backend", project: "my-app", role: "Go developer", reports
 send_message(as: "backend", project: "my-app", to: "frontend", subject: "...", content: "...")
 ```
 
+Re-registering the same name+project is a respawn: it updates `role`/`description`, but identity fields you **omit** (`profile_slug`, `reports_to`, `is_executive`, `session_id`) are **preserved**, not cleared. So a bare re-register won't drop a `profile_slug` set by your orchestrator. To clear them, use `deactivate_agent` / `delete_agent` / `remove_team_member`.
+
 ## Commands
 
 ### Messaging

@@ -11,19 +11,19 @@ func TestRegisterAgent_PreservesReportsToOnRespawn(t *testing.T) {
 	d := testDB(t)
 
 	manager := "lead"
-	_, _, err := d.RegisterAgent("p1", "lead", "team-lead", "", nil, nil, true, nil, "[]", 0)
+	_, _, err := d.RegisterAgent("p1", "lead", "team-lead", "", nil, nil, true, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("register lead: %v", err)
 	}
 
 	// Initial registration with reports_to set.
-	_, _, err = d.RegisterAgent("p1", "worker", "dev", "", &manager, nil, false, nil, "[]", 0)
+	_, _, err = d.RegisterAgent("p1", "worker", "dev", "", &manager, nil, false, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 
 	// Re-register WITHOUT reports_to — must preserve existing.
-	w, _, err := d.RegisterAgent("p1", "worker", "dev", "", nil, nil, false, nil, "[]", 0)
+	w, _, err := d.RegisterAgent("p1", "worker", "dev", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("re-register worker: %v", err)
 	}
@@ -41,12 +41,12 @@ func TestRegisterAgent_PreservesProfileSlugOnRespawn(t *testing.T) {
 	d := testDB(t)
 
 	slug := "backend-dev"
-	_, _, err := d.RegisterAgent("p1", "worker", "dev", "", nil, &slug, false, nil, "[]", 0)
+	_, _, err := d.RegisterAgent("p1", "worker", "dev", "", nil, &slug, false, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("register worker: %v", err)
 	}
 
-	w, _, err := d.RegisterAgent("p1", "worker", "dev", "", nil, nil, false, nil, "[]", 0)
+	w, _, err := d.RegisterAgent("p1", "worker", "dev", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	if err != nil {
 		t.Fatalf("re-register: %v", err)
 	}
@@ -60,7 +60,7 @@ func TestRegisterAgent_PreservesProfileSlugOnRespawn(t *testing.T) {
 func TestGetAgentTasks_DispatchedExcludesInactiveStatuses(t *testing.T) {
 	d := testDB(t)
 
-	_, _, _ = d.RegisterAgent("p1", "cto", "lead", "", nil, nil, true, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("p1", "cto", "lead", "", nil, nil, true, nil, "[]", 0, RegisterOptions{})
 
 	// 5 cancelled + 1 active task, all dispatched_by cto.
 	for i := 0; i < 5; i++ {
@@ -93,7 +93,7 @@ func TestGetAgentTasks_DispatchedExcludesInactiveStatuses(t *testing.T) {
 func TestGetAgentTasks_DispatchedLimited(t *testing.T) {
 	d := testDB(t)
 
-	_, _, _ = d.RegisterAgent("p1", "cto", "lead", "", nil, nil, true, nil, "[]", 0)
+	_, _, _ = d.RegisterAgent("p1", "cto", "lead", "", nil, nil, true, nil, "[]", 0, RegisterOptions{})
 	for i := 0; i < 30; i++ {
 		_, err := d.DispatchTask("p1", "dev", "cto", "task", "", "P2", nil, nil)
 		if err != nil {
@@ -135,6 +135,7 @@ func TestRegisterProfile_MergesOnUpdate(t *testing.T) {
 		t.Errorf("role wiped: %q", p.Role)
 	}
 }
+
 // Fix 3.5 — progress notes round-trip.
 func TestProgressNotes_RoundTrip(t *testing.T) {
 	d := testDB(t)

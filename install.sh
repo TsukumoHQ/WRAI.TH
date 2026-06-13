@@ -767,7 +767,11 @@ scan_and_configure_projects() {
   local -a projects=()
   local -a project_names=()
 
-  # Scan home directory (depth 2) for Claude Code projects
+  # Scan home directory for Claude Code projects up to 5 levels deep, so common
+  # layouts like ~/dev/projects/<repo>/ and ~/work/<org>/<team>/<repo>/ are
+  # picked up. Heavy directories (node_modules, vendor, .git, .cache, .venv,
+  # Library — the huge macOS system tree under $HOME) are pruned so the walk
+  # stays fast even at the deeper limit.
   while IFS= read -r -d '' dir; do
     local project_dir
     project_dir=$(dirname "$dir")
@@ -782,7 +786,10 @@ scan_and_configure_projects() {
     if [[ "$already" == false ]]; then
       projects+=("$project_dir")
     fi
-  done < <(find "$HOME" -maxdepth 3 \( -name "CLAUDE.md" -o -name ".mcp.json" \) -print0 2>/dev/null | tr '\0' '\n' | head -100 | tr '\n' '\0')
+  done < <(find "$HOME" -maxdepth 5 \
+    \( -type d \( -name node_modules -o -name vendor -o -name .git -o -name .cache -o -name .venv -o -name Library \) -prune \) -o \
+    \( -type f \( -name "CLAUDE.md" -o -name ".mcp.json" \) -print0 \) \
+    2>/dev/null | tr '\0' '\n' | head -100 | tr '\n' '\0')
 
   # Filter out non-project directories
   local -a valid_projects=()
@@ -1005,7 +1012,7 @@ verify_installation() {
 
     local health_ok=false
     for attempt in 1 2 3; do
-      if curl -sf "http://localhost:${PORT}/health" &>/dev/null || \
+      if curl -sf "http://localhost:${PORT}/api/health" &>/dev/null || \
          curl -sf "http://localhost:${PORT}/mcp" &>/dev/null; then
         health_ok=true
         break
