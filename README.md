@@ -15,7 +15,7 @@ Stop babysitting one chat. Run a *fleet* -- agents that remember across sessions
 [![License](https://img.shields.io/badge/AGPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/QPq7qfbEk8)
 
-[Why](#-why) · [Install](#-install) · [First Project](#-first-project-setup) · [The Dashboard](#-the-dashboard) · [How It Works](#-how-it-works) · [Agents](#-agents--hierarchy) · [Messaging](#-messaging--conversations) · [Memory](#-memory--knowledge) · [Tasks](#-task-execution) · [MCP Tools](#-mcp-tools)
+[Why](#-why) · [One-prompt setup](#-the-one-prompt-setup) · [Install](#-install) · [First Project](#-first-project-setup) · [The Dashboard](#-the-dashboard) · [How It Works](#-how-it-works) · [Agents](#-agents--hierarchy) · [Messaging](#-messaging--conversations) · [Memory](#-memory--knowledge) · [Tasks](#-task-execution) · [MCP Tools](#-mcp-tools)
 
 <br>
 
@@ -48,6 +48,31 @@ AI agents have no persistent memory, no way to talk to each other, and no shared
 All through MCP -- any AI client can plug in (Claude Code, Cursor, Windsurf, or anything that speaks the protocol). Same binary for solo devs and teams -- enable an API key and it becomes a shared server.
 
 And you're never flying blind: the **mission-control dashboard** ([below](#-the-dashboard)) shows every project, every agent, and every task in real time -- who's shipping, who's blocked, and what just landed.
+
+<br>
+
+## &#x26A1; The one-prompt setup
+
+Don't read the rest of this page. Open **Claude Code** inside the repo you want to manage, paste this, and let it wire everything up:
+
+```text
+Set up wrai.th (https://github.com/Synergix-lab/WRAI.TH) in this repo, end to end:
+
+1. Install it — run:
+   curl -fsSL https://raw.githubusercontent.com/Synergix-lab/WRAI.TH/main/install.sh | bash
+   (builds the binary, starts the relay on localhost:8090, installs the /relay skill)
+2. Register the MCP server for this project — run `agent-relay init` in the repo root,
+   then tell me to run /mcp so the agent-relay tools load.
+3. Once the agent-relay MCP tools are available, call:
+   create_project({ name: "<this repo's name>", cwd: "<absolute path to this repo>" })
+   and execute the onboarding plan it returns — analyze the codebase, store memories,
+   set up teams/profiles, and plan the first tasks.
+4. Open http://localhost:8090/v2/ and walk me through the dashboard.
+
+Confirm with me before anything destructive. Go.
+```
+
+A couple of minutes later: relay running, your codebase analyzed, and a crew of agents ready to take tasks. Prefer to do it by hand? Keep reading.
 
 <br>
 
