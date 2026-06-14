@@ -312,7 +312,7 @@ func registerProfileTool() mcp.Tool {
 func getProfileTool() mcp.Tool {
 	return mcp.NewTool(
 		"get_profile",
-		mcp.WithDescription("Get a profile with its full context pack and skills."),
+		mcp.WithDescription("Get a profile archetype by slug — name, role, and skills."),
 		projectParam,
 		mcp.WithString("slug", mcp.Description("Profile slug"), mcp.Required()),
 	)
