@@ -73,8 +73,11 @@ func (d *DB) DeleteProject(name string) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Disable FK checks during cascade delete to avoid ordering issues
-	_, _ = tx.Exec("PRAGMA foreign_keys = OFF")
+	// NOTE: PRAGMA foreign_keys is a no-op inside an active transaction (SQLite
+	// ignores it once BEGIN has run), so we don't try to disable FK enforcement.
+	// Instead the deletes below are ordered children-first (junction tables →
+	// project-scoped tables → orgs → the project row) so every FK constraint is
+	// already satisfied at each step. Keep this ordering when adding tables.
 
 	// Delete junction tables that lack a project column (linked via IDs)
 	_, _ = tx.Exec("DELETE FROM conversation_members WHERE conversation_id IN (SELECT id FROM conversations WHERE project = ?)", name)
@@ -113,7 +116,6 @@ func (d *DB) DeleteProject(name string) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	_, _ = d.conn.Exec("PRAGMA foreign_keys = ON")
 	return nil
 }
 

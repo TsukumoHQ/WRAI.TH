@@ -19,12 +19,17 @@ const (
 	ACKNotifyAge = 15 * time.Minute
 	// ACKEscalateAge is when to escalate the no-ACK notification.
 	ACKEscalateAge = 45 * time.Minute
+	// BackupInterval is how often a rotated DB snapshot is written.
+	BackupInterval = time.Hour
+	// BackupKeep is how many rotated snapshots to retain.
+	BackupKeep = 3
 )
 
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
 // It stops when the done channel is closed.
 func StartCleanup(database *db.DB, done <-chan struct{}) {
 	ticker := time.NewTicker(PurgeInterval)
+	lastBackup := time.Now() // first snapshot fires BackupInterval after boot
 	go func() {
 		defer ticker.Stop()
 		for {
@@ -64,6 +69,15 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 					log.Printf("purged %d old token usage record(s)", purged)
 				}
 				database.Optimize()
+
+				if time.Since(lastBackup) >= BackupInterval {
+					if path, err := database.Backup(BackupKeep); err != nil {
+						log.Printf("db backup error: %v", err)
+					} else {
+						lastBackup = time.Now()
+						log.Printf("db snapshot written: %s", path)
+					}
+				}
 			}
 		}
 	}()

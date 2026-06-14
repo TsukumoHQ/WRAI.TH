@@ -97,6 +97,32 @@ func (d *DB) Optimize() {
 	_, _ = d.conn.Exec("PRAGMA wal_checkpoint(PASSIVE)")
 }
 
+// Backup writes a consistent snapshot of the database next to it via SQLite's
+// VACUUM INTO (safe on a live WAL database), rotating through `keep` numbered
+// files: relay.db.bak.0 (newest) .. relay.db.bak.(keep-1). Returns the path of
+// the new snapshot. Gives a recovery point against corruption or an accidental
+// destructive operation — the single DB file was previously the only copy.
+func (d *DB) Backup(keep int) (string, error) {
+	if keep < 1 {
+		keep = 1
+	}
+	// Rotate older snapshots up by one slot; the oldest drops off.
+	for i := keep - 1; i > 0; i-- {
+		older := fmt.Sprintf("%s.bak.%d", d.path, i)
+		newer := fmt.Sprintf("%s.bak.%d", d.path, i-1)
+		_ = os.Remove(older)
+		if _, err := os.Stat(newer); err == nil {
+			_ = os.Rename(newer, older)
+		}
+	}
+	dst := fmt.Sprintf("%s.bak.0", d.path)
+	_ = os.Remove(dst) // VACUUM INTO fails if the target already exists
+	if _, err := d.conn.Exec("VACUUM INTO ?", dst); err != nil {
+		return "", fmt.Errorf("vacuum into %s: %w", dst, err)
+	}
+	return dst, nil
+}
+
 // GetHealthStats returns aggregate database statistics for the /health endpoint.
 func (d *DB) GetHealthStats() map[string]int64 {
 	stats := map[string]int64{}
