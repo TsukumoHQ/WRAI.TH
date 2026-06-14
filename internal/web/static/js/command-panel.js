@@ -3,10 +3,15 @@
 // HUD / Retro-futurism aesthetic: scanlines, neon glow, monospace
 
 function esc(str) {
-  if (!str) return '';
-  const d = document.createElement('div');
-  d.textContent = str;
-  return d.innerHTML;
+  // Quote-safe: also escapes " and ' so values are safe inside HTML attributes
+  // (textContent→innerHTML does NOT escape quotes → attribute-injection XSS).
+  if (str == null) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
 function timeAgo(dateStr) {

@@ -1805,18 +1805,23 @@ function formatTime(isoStr) {
 }
 
 function escapeHtml(str) {
-  return str
+  return String(str ?? "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 /** Render markdown to HTML using marked (loaded via CDN). Falls back to escaped text. */
 function renderMarkdown(text) {
-  if (typeof marked !== "undefined") {
+  // Sanitize marked's HTML with DOMPurify before it ever reaches innerHTML —
+  // task descriptions/messages are agent-controlled, so unsanitized markdown is
+  // a stored-XSS sink. Require BOTH libs; if either is missing, fall back to
+  // escaped text rather than inject raw HTML.
+  if (typeof marked !== "undefined" && typeof DOMPurify !== "undefined") {
     try {
-      return marked.parse(text, { gfm: true, breaks: true });
+      return DOMPurify.sanitize(marked.parse(text, { gfm: true, breaks: true }));
     } catch (_) { /* fall through */ }
   }
   return escapeHtml(text).replace(/\n/g, "<br>");
@@ -2075,8 +2080,13 @@ function getViewFilteredTasks() {
 }
 
 function esc(s) {
-  if (!s) return "";
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  if (s == null) return "";
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function renderTasks() {

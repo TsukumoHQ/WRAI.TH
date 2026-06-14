@@ -14,10 +14,14 @@ const STATE_STYLE = {
 };
 
 function esc(str) {
+  // Quote-safe (escapes " and ') for safe use inside HTML attributes.
   if (str == null) return "";
-  const d = document.createElement("div");
-  d.textContent = String(str);
-  return d.innerHTML;
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // Format seconds → compact human duration.
