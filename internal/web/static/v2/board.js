@@ -24,6 +24,12 @@ export function initBoard(root, ctx) {
   let backlogOpen = false;
   let loadToken = 0;             // guards against out-of-order async loads
   let timerInt = null;
+  let groupBy = 'status';        // status | agent | priority | project
+  const filters = { q: '', agent: '', priority: '', label: '' };
+  let childrenOf = new Map();    // parent_task_id → child tasks (precomputed)
+  let activeByAgent = new Map(); // agent → active task count (overload signal)
+  const STALE_MS = 24 * 3600e3;  // in-progress older than this = stale
+  const OVERLOAD = 5;            // agent with more active tasks than this = overloaded
 
   const selection = () => ctx.selection;
   const reduce = () => prefersReducedMotion();
@@ -58,11 +64,28 @@ export function initBoard(root, ctx) {
 
     tasks = Array.isArray(list) ? list.filter((t) => columnFor(t) !== null) : [];
     byId = new Map(tasks.map((t) => [t.id, t]));
+    indexTasks();
     loadedFor = `${sel}|${cycle}`;
     renderCycleFilter();
     renderMode();
+    renderFilters();
     render();
   }
+
+  // Precompute per-render indexes once (avoids O(n²) scans in card()).
+  function indexTasks() {
+    childrenOf = new Map();
+    activeByAgent = new Map();
+    for (const t of tasks) {
+      if (t.parent_task_id) {
+        if (!childrenOf.has(t.parent_task_id)) childrenOf.set(t.parent_task_id, []);
+        childrenOf.get(t.parent_task_id).push(t);
+      }
+      const a = t.assigned_to || t.claimed_by;
+      if (a && isActiveStatus(t.status)) activeByAgent.set(a, (activeByAgent.get(a) || 0) + 1);
+    }
+  }
+  const isActiveStatus = (s) => s === 'accepted' || s === 'in-progress' || s === 'in-review';
 
   async function aggregate() {
     const lists = await Promise.all(ctx.projNames().map((p) => ctx.api.board(p, 'active').catch(() => [])));
@@ -71,22 +94,65 @@ export function initBoard(root, ctx) {
     return out;
   }
 
-  /* ---------------- column model ---------------- */
+  /* ---------------- filtering ---------------- */
+  function applyFilters(list) {
+    const q = filters.q.toLowerCase();
+    return list.filter((t) => {
+      if (q && !(`${t.title || ''} ${t.linear_key || ''}`.toLowerCase().includes(q))) return false;
+      if (filters.agent && taskAgent(t) !== filters.agent) return false;
+      if (filters.priority && (t.priority || 'P2').toUpperCase() !== filters.priority) return false;
+      if (filters.label && !parseLabels(t).includes(filters.label)) return false;
+      return true;
+    });
+  }
+  const filtersActive = () => filters.q || filters.agent || filters.priority || filters.label;
+
+  /* ---------------- grouping (status | agent | priority | project) ---------------- */
+  // Returns ordered [{ key, label, color, rail?, cards[] }].
   function grouped() {
-    const cols = new Map(COLUMNS.map((c) => [c.key, []]));
-    for (const t of tasks) { const k = columnFor(t); if (cols.has(k)) cols.get(k).push(t); }
-    for (const arr of cols.values()) arr.sort(sortCards);
-    return cols;
+    const list = applyFilters(tasks);
+    if (groupBy === 'status') {
+      const cols = COLUMNS.map((c) => ({ ...c, cards: [] }));
+      const idx = new Map(cols.map((c) => [c.key, c]));
+      for (const t of list) { const c = idx.get(columnFor(t)); if (c) c.cards.push(t); }
+      cols.forEach((c) => c.cards.sort(sortCards));
+      return cols;
+    }
+    // dynamic groups
+    const keyOf = groupBy === 'agent' ? (t) => taskAgent(t) || '· unassigned'
+      : groupBy === 'project' ? (t) => t.project || '·'
+        : (t) => (t.priority || 'P2').toUpperCase();
+    const map = new Map();
+    for (const t of list) { const k = keyOf(t); if (!map.has(k)) map.set(k, []); map.get(k).push(t); }
+    let groups = [...map.entries()].map(([key, cards]) => ({
+      key, label: key, color: groupColor(key), cards: cards.sort(sortCards),
+    }));
+    if (groupBy === 'priority') groups.sort((a, b) => priorityRank(a.key) - priorityRank(b.key));
+    else groups.sort((a, b) => b.cards.length - a.cards.length || a.key.localeCompare(b.key));
+    return groups;
+  }
+  function groupColor(key) {
+    if (groupBy === 'priority') return ['var(--red)', 'var(--amber)', 'var(--blue)', 'var(--slate)'][priorityRank(key)] || 'var(--slate)';
+    if (groupBy === 'agent' && key !== '· unassigned') return colorFor(key);
+    return 'var(--text-dim)';
   }
   function sortCards(a, b) {
     return priorityRank(a.priority) - priorityRank(b.priority) ||
       (Date.parse(b.dispatched_at || 0) - Date.parse(a.dispatched_at || 0));
   }
   const childRollup = (t) => {
-    const kids = tasks.filter((k) => k.parent_task_id === t.id);
-    if (!kids.length) return null;
+    const kids = childrenOf.get(t.id);
+    if (!kids || !kids.length) return null;
     return { done: kids.filter((k) => k.status === 'done').length, total: kids.length };
   };
+  // Staleness: a card sitting in an active state past STALE_MS since it last moved.
+  function staleness(t) {
+    if (!isActiveStatus(t.status)) return null;
+    const since = Date.parse(t.in_review_at || t.started_at || t.claimed_at || t.accepted_at || 0);
+    if (!since) return null;
+    const age = Date.now() - since;
+    return age > STALE_MS ? age : null;
+  }
   const parseDeps = (t) => { try { const a = JSON.parse(t.depends_on || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } };
   // Unresolved dependencies, resolved against the loaded board set. Tasks outside
   // the current cycle aren't loaded → treated as resolved here (the server-side
@@ -98,25 +164,29 @@ export function initBoard(root, ctx) {
   /* ---------------- render ---------------- */
   function render() {
     if (root.hidden) return;
-    const cols = grouped();
-    renderDist(cols);
+    const groups = grouped();
+    renderDist();
+    const statusMode = groupBy === 'status';
+    const total = groups.reduce((a, g) => a + g.cards.length, 0);
     let html = '';
-    for (const c of COLUMNS) {
-      const arr = cols.get(c.key);
-      if (c.rail && !arr.length) continue;             // hide empty backlog rail
-      const railClosed = c.rail && !backlogOpen;
-      const pts = arr.reduce((a, t) => a + (Number(t.points) || 0), 0);
-      html += `<section class="col${c.rail ? ' col-rail' : ''}${railClosed ? ' closed' : ''}" data-col="${c.key}" style="--col:${c.color}">
+    for (const c of groups) {
+      if (statusMode && c.rail && !c.cards.length) continue;     // hide empty backlog rail
+      const railClosed = statusMode && c.rail && !backlogOpen;
+      const pts = c.cards.reduce((a, t) => a + (Number(t.points) || 0), 0);
+      const over = groupBy === 'agent' && (activeByAgent.get(c.key) || 0) > OVERLOAD;
+      html += `<section class="col${c.rail ? ' col-rail' : ''}${railClosed ? ' closed' : ''}${over ? ' col-over' : ''}" data-col="${esc(c.key)}" style="--col:${c.color}">
         <header class="col-head"${c.rail ? ' role="button" tabindex="0"' : ''}>
           <span class="col-dot" style="background:${c.color}"></span>
-          <span class="col-name">${c.label}</span>
-          <span class="col-count">${arr.length}${pts ? ` · ${pts}pt` : ''}</span>
+          <span class="col-name">${esc(c.label)}</span>
+          <span class="col-count">${c.cards.length}${pts ? ` · ${pts}pt` : ''}${over ? ` · <span class="over-flag" title="${activeByAgent.get(c.key)} active — overloaded">⚠ overloaded</span>` : ''}</span>
         </header>
-        ${c.key === 'todo' && canEdit ? quickAdd() : ''}
-        <div class="col-cards">${arr.map(card).join('') || (c.rail ? '' : '<div class="col-empty">—</div>')}</div>
+        ${statusMode && c.key === 'todo' && canEdit ? quickAdd() : ''}
+        <div class="col-cards">${c.cards.map(card).join('') || (c.rail ? '' : '<div class="col-empty">—</div>')}</div>
       </section>`;
     }
-    boardEl.innerHTML = html || '<div class="empty board-empty">No tasks in this view</div>';
+    boardEl.innerHTML = html || `<div class="empty board-empty">${filtersActive() ? 'No tasks match the filters' : 'No tasks in this view'}</div>`;
+    const cnt = root.querySelector('#bfCount');
+    if (cnt) cnt.textContent = filtersActive() ? `${total} / ${tasks.length}` : `${total}`;
     bindCards();
     startTimers();
   }
@@ -131,9 +201,16 @@ export function initBoard(root, ctx) {
     const inReview = col === 'in_review' && t.in_review_at;
     const ext = t.source === 'linear' && t.external_url;
     const pr = priorityRank(t.priority);
-    return `<article class="kcard p${pr}${blocked ? ' is-blocked' : ''}${ext ? ' is-ext' : ''}" data-id="${esc(t.id)}" data-status="${esc(t.status)}"${canEdit && t.source !== 'linear' ? ' data-drag="1"' : ''} tabindex="0">
+    const stale = staleness(t);
+    // Drag only makes sense in status mode (drop maps a column → a status).
+    const draggable = canEdit && t.source !== 'linear' && groupBy === 'status';
+    // Outside status mode, show a status pill so the card stays legible.
+    const statusTag = groupBy !== 'status' ? `<span class="kcard-status s-${esc(col)}">${esc((COLUMNS.find((c) => c.key === col) || {}).label || t.status)}</span>` : '';
+    const projTag = (selection() === 'all' && t.project) ? `<span class="kcard-proj">${esc(t.project)}</span>` : '';
+    return `<article class="kcard p${pr}${blocked ? ' is-blocked' : ''}${ext ? ' is-ext' : ''}${stale ? ' is-stale' : ''}" data-id="${esc(t.id)}" data-status="${esc(t.status)}"${draggable ? ' data-drag="1"' : ''} tabindex="0">
       <div class="kcard-top">
         ${key ? `<span class="chip-key">${esc(key)}</span>` : `<span class="chip-native">${esc(t.priority || 'P2')}</span>`}
+        ${statusTag}${projTag}
         ${ext ? '<span class="ext-mark" aria-hidden="true">↗</span>' : ''}
         <span class="kcard-spacer"></span>
         ${agent ? `<span class="kc-avatar" title="${esc(agent)}" style="background:${colorFor(agent)}">${esc(initialFor(agent))}</span>` : ''}
@@ -143,6 +220,7 @@ export function initBoard(root, ctx) {
         ${labels.map((l) => `<span class="lchip">${esc(l)}</span>`).join('')}
         ${roll ? `<span class="rollup" title="${roll.done}/${roll.total} children done">▣ ${roll.done}/${roll.total}</span>` : ''}
         ${(() => { const b = depBlockers(t); return b.length ? `<span class="dep-chip" title="waiting on ${b.length} unfinished task${b.length === 1 ? '' : 's'}">⛓ ${b.length}</span>` : ''; })()}
+        ${stale ? `<span class="stale-badge" title="no movement in ${fmtDur(stale / 1000)}">stale ${fmtDur(stale / 1000)}</span>` : ''}
         ${inReview ? `<span class="review-timer" data-since="${esc(t.in_review_at)}">in review ${fmtAgo(t.in_review_at)}</span>` : ''}
         ${blocked ? `<span class="blocked-badge" title="${esc(t.blocked_reason || 'blocked')}"><span class="blk-dot"></span>blocked</span>` : ''}
       </div>
@@ -160,13 +238,16 @@ export function initBoard(root, ctx) {
     </form>`;
   }
 
-  function renderDist(cols) {
+  function renderDist() {
+    const list = applyFilters(tasks);
     const segs = [
       ['todo', 'var(--slate)'], ['in_progress', 'var(--blue)'],
       ['in_review', 'var(--amber)'], ['done', 'var(--accent)'],
     ];
-    const blocked = tasks.filter((t) => t.status === 'blocked').length;
-    const counts = segs.map(([k, c]) => [cols.get(k).length, c]).concat([[blocked, 'var(--red)']]);
+    const byCol = { todo: 0, in_progress: 0, in_review: 0, done: 0 };
+    let blocked = 0;
+    for (const t of list) { if (t.status === 'blocked') blocked++; const k = columnFor(t); if (k in byCol) byCol[k]++; }
+    const counts = segs.map(([k, c]) => [byCol[k], c]).concat([[blocked, 'var(--red)']]);
     const total = counts.reduce((a, [n]) => a + n, 0);
     distEl.innerHTML = total
       ? counts.filter(([n]) => n).map(([n, c]) => `<i style="width:${(n / total * 100).toFixed(2)}%;background:${c}" title="${n}"></i>`).join('')
@@ -185,9 +266,43 @@ export function initBoard(root, ctx) {
     }));
   }
   function renderMode() {
+    const drag = groupBy === 'status' ? 'drag to move · ' : '';
     if (selection() === 'all') modeEl.textContent = 'all projects · read-only';
     else if (ctx.isMirror(selection())) modeEl.innerHTML = `<span class="ro-dot"></span>read-only · ${esc(selection())} mirror`;
-    else modeEl.innerHTML = '<span class="edit-dot"></span>drag to move · click to open';
+    else modeEl.innerHTML = `<span class="edit-dot"></span>${drag}click to open`;
+  }
+
+  // Repopulate the facet option lists + group-by state (called each load).
+  function renderFilters() {
+    const projBtn = root.querySelector('.group-btn[data-group="project"]');
+    if (projBtn) projBtn.hidden = selection() !== 'all';
+    if (groupBy === 'project' && selection() !== 'all') groupBy = 'status';
+    const agentSel = root.querySelector('#bfAgent');
+    const labelSel = root.querySelector('#bfLabel');
+    const agents = agentNames();
+    agentSel.innerHTML = '<option value="">all agents</option>' +
+      agents.map((a) => `<option value="${esc(a)}"${filters.agent === a ? ' selected' : ''}>${esc(a)}</option>`).join('');
+    const labels = [...new Set(tasks.flatMap(parseLabels))].filter(Boolean).sort();
+    labelSel.innerHTML = '<option value="">all labels</option>' +
+      labels.map((l) => `<option value="${esc(l)}"${filters.label === l ? ' selected' : ''}>${esc(l)}</option>`).join('');
+    root.querySelector('#bfPriority').value = filters.priority;
+    root.querySelectorAll('.group-btn').forEach((b) => b.classList.toggle('on', b.dataset.group === groupBy));
+  }
+
+  // Bind the (static) filter controls once.
+  function wireFilters() {
+    const s = root.querySelector('#bfSearch');
+    let deb = null;
+    s.addEventListener('input', () => { clearTimeout(deb); deb = setTimeout(() => { filters.q = s.value.trim(); render(); }, 180); });
+    root.querySelector('#bfAgent').addEventListener('change', (e) => { filters.agent = e.target.value; render(); });
+    root.querySelector('#bfPriority').addEventListener('change', (e) => { filters.priority = e.target.value; render(); });
+    root.querySelector('#bfLabel').addEventListener('change', (e) => { filters.label = e.target.value; render(); });
+    root.querySelector('#bfGroup').addEventListener('click', (e) => {
+      const b = e.target.closest('.group-btn');
+      if (!b || b.hidden) return;
+      groupBy = b.dataset.group;
+      renderFilters(); render();
+    });
   }
 
   /* ---------------- live in-review timers ---------------- */
@@ -229,6 +344,13 @@ export function initBoard(root, ctx) {
     if (!String(evt.type || '').startsWith('task')) return;
     const sem = evt.semantic || {};
     const id = sem.task_id;
+    const type = String(evt.type || '');
+    // Cancelled / deleted cards must leave the board — they have no column.
+    const removed = type === 'task.cancelled' || evt.action === 'cancel' || evt.action === 'delete';
+    if (removed && id && byId.has(id)) {
+      reconcile(() => { tasks = tasks.filter((t) => t.id !== id); byId.delete(id); indexTasks(); });
+      return;
+    }
     const status = eventStatus(evt);
     if (id && byId.has(id) && status) {
       const t = byId.get(id);
@@ -238,6 +360,7 @@ export function initBoard(root, ctx) {
         if (status === 'in-review') t.in_review_at = t.in_review_at || new Date().toISOString();
         if (status === 'done') t.done_at = t.done_at || new Date().toISOString();
         if (status === 'blocked') t.blocked_reason = sem.reason || t.blocked_reason;
+        indexTasks();
       });
     } else if (status === 'pending' || evt.action === 'dispatch') {
       // a new card appeared — refetch lightly, then fade it in via FLIP
@@ -255,7 +378,9 @@ export function initBoard(root, ctx) {
       reconcile(() => {
         tasks = list.filter((t) => columnFor(t) !== null);
         byId = new Map(tasks.map((t) => [t.id, t]));
+        indexTasks();
       });
+      renderFilters();
     }, 600);
   }
 
@@ -294,7 +419,7 @@ export function initBoard(root, ctx) {
     try {
       const created = await ctx.api.dispatchTask({ project: selection(), profile, title, priority: 'P2' });
       input.value = '';
-      if (created && created.id) reconcile(() => { tasks.push(created); byId.set(created.id, created); });
+      if (created && created.id) reconcile(() => { tasks.push(created); byId.set(created.id, created); indexTasks(); });
     } catch (err) {
       input.classList.add('qa-error'); setTimeout(() => input.classList.remove('qa-error'), 1200);
     } finally { btn.disabled = false; btn.textContent = 'add'; }
@@ -522,6 +647,7 @@ export function initBoard(root, ctx) {
   }
 
   /* ---------------- wiring ---------------- */
+  wireFilters();
   ctx.onEvent(onEvent);
   ctx.onSelection(() => { if (!root.hidden) load(true); else loadedFor = null; });
 

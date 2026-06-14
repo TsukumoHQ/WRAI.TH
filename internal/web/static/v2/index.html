@@ -101,6 +101,23 @@
             <span class="board-mode" id="boardMode"></span>
           </div>
         </div>
+        <div class="board-filters" id="boardFilters">
+          <input class="bf-search" id="bfSearch" type="search" placeholder="filter tasks…" aria-label="Filter tasks" />
+          <select class="bf-sel" id="bfAgent" aria-label="Filter by agent"><option value="">all agents</option></select>
+          <select class="bf-sel" id="bfPriority" aria-label="Filter by priority">
+            <option value="">all priorities</option><option value="P0">P0</option><option value="P1">P1</option><option value="P2">P2</option><option value="P3">P3</option>
+          </select>
+          <select class="bf-sel" id="bfLabel" aria-label="Filter by label"><option value="">all labels</option></select>
+          <span class="bf-sep" aria-hidden="true"></span>
+          <span class="bf-grouplabel">group</span>
+          <div class="group-toggle" id="bfGroup" role="group" aria-label="Group by">
+            <button class="group-btn on" data-group="status" type="button">status</button>
+            <button class="group-btn" data-group="agent" type="button">agent</button>
+            <button class="group-btn" data-group="priority" type="button">priority</button>
+            <button class="group-btn" data-group="project" type="button" hidden>project</button>
+          </div>
+          <span class="bf-count" id="bfCount" aria-live="polite"></span>
+        </div>
         <div class="board" id="board" aria-label="Kanban board"></div>
       </section>
 

@@ -905,3 +905,35 @@ button { font-family: inherit; }
 .sheet-close:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px;
 }
+
+/* ============================================================= *
+ *  Board — filters, group-by, staleness + overload signals
+ * ============================================================= */
+.board-filters { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 14px; }
+.bf-search { flex: 1; min-width: 160px; max-width: 300px; background: var(--bg-card); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 7px 11px; font-family: inherit; font-size: 12.5px; }
+.bf-search:focus-visible { outline: none; border-color: var(--accent-dim); }
+.bf-sel { background: var(--bg-card); border: 1px solid var(--border); color: var(--text); border-radius: 7px; padding: 6px 8px; font-family: inherit; font-size: 11.5px; cursor: pointer; max-width: 150px; }
+.bf-sel:focus-visible { outline: none; border-color: var(--accent-dim); }
+.bf-sep { width: 1px; align-self: stretch; background: var(--border); margin: 2px 2px; }
+.bf-grouplabel { font-size: 10px; letter-spacing: .8px; text-transform: uppercase; color: var(--text-dim); }
+.group-toggle { display: inline-flex; gap: 2px; background: var(--bg-elev); border-radius: 7px; padding: 2px; }
+.group-btn { background: none; border: 0; color: var(--text-muted); font-family: inherit; font-size: 11px; padding: 4px 9px; border-radius: 5px; cursor: pointer; }
+.group-btn.on { background: var(--bg-card); color: var(--text); box-shadow: inset 0 0 0 1px var(--border); }
+.group-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bf-count { margin-left: auto; font-size: 11px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+
+/* card status pill (shown when grouped by non-status) + project tag */
+.kcard-status { font-size: 9px; letter-spacing: .3px; border-radius: 4px; padding: 1px 5px; border: 1px solid var(--border); color: var(--text-muted); }
+.kcard-status.s-todo { color: var(--slate); }
+.kcard-status.s-in_progress { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 35%, transparent); }
+.kcard-status.s-in_review { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+.kcard-status.s-done { color: var(--accent); border-color: var(--accent-dim); }
+.kcard-proj { font-size: 9px; color: var(--violet); border: 1px solid color-mix(in srgb, var(--violet) 35%, transparent); border-radius: 4px; padding: 1px 5px; }
+
+/* staleness — a card stuck in an active state too long */
+.kcard.is-stale { border-color: color-mix(in srgb, var(--red) 30%, var(--border)); }
+.stale-badge { font-size: 10px; color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); border-radius: 5px; padding: 0 5px; }
+
+/* overload — an agent group holding too many active tasks */
+.col-over .col-head { background: color-mix(in srgb, var(--red) 8%, transparent); }
+.over-flag { color: var(--red); }
