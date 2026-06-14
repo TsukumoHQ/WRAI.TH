@@ -1421,7 +1421,7 @@ func (r *Relay) apiGetAudit(w http.ResponseWriter, req *http.Request) {
 	resource := req.URL.Query().Get("resource")
 	limit := 0
 	if l := req.URL.Query().Get("limit"); l != "" {
-		fmt.Sscanf(l, "%d", &limit)
+		limit, _ = strconv.Atoi(l)
 	}
 	entries, err := r.DB.ListAudit(project, resource, limit)
 	if err != nil {
