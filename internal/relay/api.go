@@ -1258,10 +1258,15 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		body.Agent = "user"
 	}
 
-	// Capture the prior status for the audit trail before the move.
+	// Capture the prior status for the audit trail before the move. A forced
+	// override on a Linear-mirrored task is refused — Linear is the SSOT there.
 	var fromStatus string
 	if prev, perr := r.DB.GetTask(taskID, body.Project); perr == nil && prev != nil {
 		fromStatus = prev.Status
+		if body.Force && prev.Source == "linear" {
+			http.Error(w, `{"error":"task is mirrored from Linear (read-only here — Linear is the source of truth)"}`, http.StatusBadRequest)
+			return
+		}
 	}
 
 	var task *models.Task

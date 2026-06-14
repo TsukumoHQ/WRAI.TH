@@ -95,6 +95,30 @@ func TestReassignTask(t *testing.T) {
 	}
 }
 
+// Linear-mirrored tasks reject orchestrator mutations — Linear is the SSOT.
+func TestCommandLayer_RejectsLinearMirroredTasks(t *testing.T) {
+	d := testDB(t)
+
+	native, _ := d.DispatchTask("p1", "dev", "cto", "native", "", "P2", nil, nil)
+	if err := d.UpsertLinearTask(LinearTaskSeed{
+		ID: "lin-1", Project: "p1", Title: "from linear", Status: "in-progress",
+		Priority: "P2", DispatchedAt: "2026-01-01T00:00:00.000000Z", Labels: "[]",
+	}); err != nil {
+		t.Fatalf("seed linear task: %v", err)
+	}
+
+	if _, err := d.SetTaskDependencies("lin-1", "p1", []string{native.ID}); err == nil {
+		t.Fatal("expected set-dependencies on a Linear task to be rejected")
+	}
+	if _, err := d.ReassignTask("lin-1", "p1", "bot-a"); err == nil {
+		t.Fatal("expected reassign on a Linear task to be rejected")
+	}
+	// A native task depending ON a Linear task is fine (Linear stays read-only).
+	if _, err := d.SetTaskDependencies(native.ID, "p1", []string{"lin-1"}); err != nil {
+		t.Fatalf("native task may depend on a linear task: %v", err)
+	}
+}
+
 // Audit round-trips entries newest-first, scoped to a resource.
 func TestAuditRoundTrip(t *testing.T) {
 	d := testDB(t)

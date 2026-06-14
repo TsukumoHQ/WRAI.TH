@@ -885,6 +885,10 @@ func normalizePtr(s *string) *string {
  *  Command layer — dependencies & reassignment
  * ============================================================= */
 
+// errLinearReadOnly guards orchestrator mutations against Linear-mirrored tasks:
+// Linear is the source of truth for those, so deps/assignment/force are refused.
+var errLinearReadOnly = fmt.Errorf("task is mirrored from Linear (read-only here — Linear is the source of truth)")
+
 // parseDeps reads a task's depends_on JSON array into a slice of task IDs.
 func parseDeps(raw string) []string {
 	if raw == "" {
@@ -955,6 +959,9 @@ func (d *DB) SetTaskDependencies(taskID, project string, deps []string) (*models
 	if task == nil {
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
+	if task.Source == "linear" {
+		return nil, errLinearReadOnly
+	}
 
 	// Dedup + validate.
 	seen := map[string]bool{}
@@ -1006,6 +1013,9 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 	}
 	if task == nil {
 		return nil, fmt.Errorf("task not found: %s", taskID)
+	}
+	if task.Source == "linear" {
+		return nil, errLinearReadOnly
 	}
 	if _, err = d.conn.Exec(
 		"UPDATE tasks SET assigned_to = ?, claimed_by = ? WHERE id = ? AND project = ?",
