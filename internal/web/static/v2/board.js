@@ -153,11 +153,6 @@ export function initBoard(root, ctx) {
     const age = Date.now() - since;
     return age > STALE_MS ? age : null;
   }
-  const parseDeps = (t) => { try { const a = JSON.parse(t.depends_on || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } };
-  // Unresolved dependencies, resolved against the loaded board set. Tasks outside
-  // the current cycle aren't loaded → treated as resolved here (the server-side
-  // gate stays authoritative).
-  const depBlockers = (t) => parseDeps(t).map((id) => byId.get(id)).filter((d) => d && d.status !== 'done' && d.status !== 'cancelled');
   // Known agent names across the loaded board (incl. Linear assignees) — feeds
   // the agent filter, the by-agent grouping, and the reassign datalist.
   const agentNames = () => [...new Set(tasks.map(taskAgent).filter(Boolean))].sort();
@@ -219,8 +214,7 @@ export function initBoard(root, ctx) {
       <div class="kcard-title">${esc(t.title || '(untitled)')}</div>
       <div class="kcard-meta">
         ${labels.map((l) => `<span class="lchip">${esc(l)}</span>`).join('')}
-        ${roll ? `<span class="rollup" title="${roll.done}/${roll.total} children done">▣ ${roll.done}/${roll.total}</span>` : ''}
-        ${(() => { const b = depBlockers(t); return b.length ? `<span class="dep-chip" title="waiting on ${b.length} unfinished task${b.length === 1 ? '' : 's'}">⛓ ${b.length}</span>` : ''; })()}
+        ${roll ? `<span class="rollup" title="${roll.done}/${roll.total} sub-issues done">▣ ${roll.done}/${roll.total}</span>` : ''}
         ${stale ? `<span class="stale-badge" title="no movement in ${fmtDur(stale / 1000)}">stale ${fmtDur(stale / 1000)}</span>` : ''}
         ${inReview ? `<span class="review-timer" data-since="${esc(t.in_review_at)}">in review ${fmtAgo(t.in_review_at)}</span>` : ''}
         ${blocked ? `<span class="blocked-badge" title="${esc(t.blocked_reason || 'blocked')}"><span class="blk-dot"></span>blocked</span>` : ''}
@@ -513,26 +507,12 @@ export function initBoard(root, ctx) {
     }
   }
 
-  // The orchestrator command panel: dependencies, reassign, force status.
+  // The orchestrator command panel: reassign, force status.
   function commandSection(t) {
-    const deps = parseDeps(t);
-    const depRows = deps.length ? deps.map((id) => {
-      const d = byId.get(id);
-      const done = d && (d.status === 'done' || d.status === 'cancelled');
-      const title = d ? (d.title || id.slice(0, 8)) : id.slice(0, 8);
-      return `<li class="dep-row"><span class="dep-stat ${done ? 'ok' : 'open'}" aria-hidden="true"></span><span class="dep-name">${esc(title)}</span><button class="dep-del" data-dep="${esc(id)}" aria-label="Remove dependency ${esc(title)}">✕</button></li>`;
-    }).join('') : '<li class="dep-empty">no dependencies</li>';
-    const cand = tasks.filter((o) => o.id !== t.id && !deps.includes(o.id))
-      .map((o) => `<option value="${esc(o.id)}">${esc(o.title || o.id.slice(0, 8))}</option>`).join('');
     const agents = agentNames().map((a) => `<option value="${esc(a)}"></option>`).join('');
     const statusOpts = STATUSES.map((s) => `<option value="${s.v}"${s.v === t.status ? ' selected' : ''}>${s.l}</option>`).join('');
     return `<div class="sheet-section command">
         <div class="sheet-label">command</div>
-        <div class="cmd-block">
-          <div class="cmd-h">dependencies</div>
-          <ul class="dep-list">${depRows}</ul>
-          <select class="cmd-input dep-pick" aria-label="Add a dependency"><option value="">+ add dependency…</option>${cand}</select>
-        </div>
         <div class="cmd-block">
           <div class="cmd-h">reassign</div>
           <div class="cmd-row">
@@ -562,14 +542,6 @@ export function initBoard(root, ctx) {
       try { await apply(); ok('saved'); await load(false); const nt = byId.get(t.id); if (nt) openDetail(nt); }
       catch (e) { fail(e); }
     };
-    const deps = parseDeps(t);
-    node.querySelector('.dep-pick')?.addEventListener('change', (e) => {
-      const id = e.target.value;
-      if (id) refresh(() => ctx.api.setDependencies(t.id, project, [...deps, id]));
-    });
-    node.querySelectorAll('.dep-del').forEach((b) => b.addEventListener('click', () => {
-      refresh(() => ctx.api.setDependencies(t.id, project, deps.filter((d) => d !== b.dataset.dep)));
-    }));
     node.querySelector('.reassign-btn')?.addEventListener('click', () => {
       const agent = node.querySelector('.reassign-input').value.trim();
       if (agent) refresh(() => ctx.api.reassign(t.id, project, agent));

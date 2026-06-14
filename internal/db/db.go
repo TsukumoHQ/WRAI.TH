@@ -443,9 +443,6 @@ func migrate(conn *sql.DB) error {
 		"blocked_periods": "TEXT NOT NULL DEFAULT '[]'", // json array of {start,end} (blocked_at[])
 		"in_review_at":    "TEXT",
 		"done_at":         "TEXT",
-
-		// --- Command layer (orchestrator-owned) ---
-		"depends_on": "TEXT NOT NULL DEFAULT '[]'", // json array of task IDs this task waits on
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)

@@ -54,8 +54,6 @@ export const api = {
   // mutations (native projects only)
   transition: (id, body) =>
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/transition`, body),
-  setDependencies: (id, project, dependsOn) =>
-    sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/dependencies`, { project, depends_on: dependsOn }),
   reassign: (id, project, agent) =>
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/reassign`, { project, agent }),
   audit: (project, resource, limit = 50) =>

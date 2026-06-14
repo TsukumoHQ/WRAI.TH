@@ -110,8 +110,6 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiDispatchTask(w, req)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/transition") && req.Method == http.MethodPost:
 		r.apiTransitionTask(w, req, path)
-	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/dependencies") && req.Method == http.MethodPost:
-		r.apiSetTaskDependencies(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/reassign") && req.Method == http.MethodPost:
 		r.apiReassignTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/progress") && req.Method == http.MethodGet:
@@ -1360,42 +1358,6 @@ func orDash(s string) string {
 	return s
 }
 
-// apiSetTaskDependencies replaces a task's dependency list. Path: /tasks/{id}/dependencies
-func (r *Relay) apiSetTaskDependencies(w http.ResponseWriter, req *http.Request, path string) {
-	trimmed := strings.TrimPrefix(path, "/tasks/")
-	taskID, _, _ := strings.Cut(trimmed, "/")
-	if taskID == "" {
-		http.Error(w, `{"error":"missing task id"}`, http.StatusBadRequest)
-		return
-	}
-	var body struct {
-		Project   string   `json:"project"`
-		DependsOn []string `json:"depends_on"`
-	}
-	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
-		return
-	}
-	if body.Project == "" {
-		body.Project = "default"
-	}
-	task, err := r.DB.SetTaskDependencies(taskID, body.Project, body.DependsOn)
-	if err != nil {
-		apiError(w, http.StatusBadRequest, "failed to set dependencies", err)
-		return
-	}
-	_ = r.DB.RecordAudit(models.AuditEntry{
-		Project:      body.Project,
-		Actor:        "user",
-		Action:       "set_dependencies",
-		ResourceType: "task",
-		ResourceID:   taskID,
-		Summary:      fmt.Sprintf("set %d dependenc%s", len(body.DependsOn), pluralize(len(body.DependsOn), "y", "ies")),
-		Details:      task.DependsOn,
-	})
-	writeJSON(w, task)
-}
-
 // apiReassignTask hands a task to a different agent. Path: /tasks/{id}/reassign
 func (r *Relay) apiReassignTask(w http.ResponseWriter, req *http.Request, path string) {
 	trimmed := strings.TrimPrefix(path, "/tasks/")
@@ -1449,13 +1411,6 @@ func (r *Relay) apiGetAudit(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, entries)
-}
-
-func pluralize(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
 }
 
 // semanticForStatus maps a kanban status to its semantic event type + line.

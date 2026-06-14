@@ -43,9 +43,6 @@ type Task struct {
 	InReviewAt     *string `json:"in_review_at,omitempty"`
 	DoneAt         *string `json:"done_at,omitempty"`
 
-	// --- Command layer (orchestrator-owned) ---
-	DependsOn string `json:"depends_on"` // json array of task IDs this task waits on
-
 	Subtasks []Task `json:"subtasks,omitempty"`
 }
 

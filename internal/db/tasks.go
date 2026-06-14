@@ -12,13 +12,6 @@ import (
 	"github.com/google/uuid"
 )
 
-func plural(n int, one, many string) string {
-	if n == 1 {
-		return one
-	}
-	return many
-}
-
 // blockedPeriod is one {start,end} window in the auto-stamped blocked_periods trail.
 type blockedPeriod struct {
 	Start string `json:"start"`
@@ -70,7 +63,7 @@ var validTransitions = map[string][]string{
 
 const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, description, priority, status, result, blocked_reason, project, dispatched_at, accepted_at, started_at, completed_at, parent_task_id, ack_notified_at, ack_escalated_at, board_id, archived_at, " +
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
-	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, depends_on"
+	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -80,7 +73,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.AckNotifiedAt, &t.AckEscalatedAt, &t.BoardID, &t.ArchivedAt,
 		&t.Source, &t.LinearIssueID, &t.LinearKey, &t.ExternalURL, &t.Points, &t.Labels,
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
-		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.DependsOn)
+		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt)
 	return t, err
 }
 
@@ -171,16 +164,6 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		}
 		if !valid {
 			return nil, fmt.Errorf("invalid transition: %s → %s", task.Status, newStatus)
-		}
-	}
-
-	// Dependency readiness gate: an agent may not claim or start a task whose
-	// declared dependencies are still open. The orchestrator ("user") overrides.
-	if agentName != "user" && (newStatus == "accepted" || newStatus == "in-progress") {
-		open, derr := d.unfinishedDeps(task)
-		if derr == nil && len(open) > 0 {
-			return nil, fmt.Errorf("blocked by %d unfinished dependenc%s: %s",
-				len(open), plural(len(open), "y", "ies"), strings.Join(open, ", "))
 		}
 	}
 
@@ -886,119 +869,8 @@ func normalizePtr(s *string) *string {
  * ============================================================= */
 
 // errLinearReadOnly guards orchestrator mutations against Linear-mirrored tasks:
-// Linear is the source of truth for those, so deps/assignment/force are refused.
+// Linear is the source of truth for those, so reassignment/force are refused.
 var errLinearReadOnly = fmt.Errorf("task is mirrored from Linear (read-only here — Linear is the source of truth)")
-
-// parseDeps reads a task's depends_on JSON array into a slice of task IDs.
-func parseDeps(raw string) []string {
-	if raw == "" {
-		return nil
-	}
-	var ids []string
-	if err := json.Unmarshal([]byte(raw), &ids); err != nil {
-		return nil
-	}
-	return ids
-}
-
-// unfinishedDeps returns the IDs of a task's dependencies that are not yet
-// resolved. A dependency counts as resolved when it is done or cancelled, or
-// when it no longer exists (a deleted dependency must never deadlock its
-// dependents).
-func (d *DB) unfinishedDeps(task *models.Task) ([]string, error) {
-	deps := parseDeps(task.DependsOn)
-	if len(deps) == 0 {
-		return nil, nil
-	}
-	var open []string
-	for _, id := range deps {
-		dep, err := d.GetTask(id, task.Project)
-		if err != nil {
-			return nil, err
-		}
-		if dep == nil {
-			continue // missing dependency — treat as resolved
-		}
-		if dep.Status != "done" && dep.Status != "cancelled" {
-			open = append(open, id)
-		}
-	}
-	return open, nil
-}
-
-// dependsReaches reports whether `from` can reach `target` by following
-// depends_on edges — used to reject cycles before they are written.
-func (d *DB) dependsReaches(from, target, project string, seen map[string]bool) bool {
-	if from == target {
-		return true
-	}
-	if seen[from] {
-		return false
-	}
-	seen[from] = true
-	t, err := d.GetTask(from, project)
-	if err != nil || t == nil {
-		return false
-	}
-	for _, next := range parseDeps(t.DependsOn) {
-		if d.dependsReaches(next, target, project, seen) {
-			return true
-		}
-	}
-	return false
-}
-
-// SetTaskDependencies replaces a task's dependency list. It validates that each
-// dependency exists in the same project, rejects self-references, and rejects
-// any edge that would introduce a cycle.
-func (d *DB) SetTaskDependencies(taskID, project string, deps []string) (*models.Task, error) {
-	task, err := d.GetTask(taskID, project)
-	if err != nil {
-		return nil, err
-	}
-	if task == nil {
-		return nil, fmt.Errorf("task not found: %s", taskID)
-	}
-	if task.Source == "linear" {
-		return nil, errLinearReadOnly
-	}
-
-	// Dedup + validate.
-	seen := map[string]bool{}
-	clean := make([]string, 0, len(deps))
-	for _, id := range deps {
-		id = strings.TrimSpace(id)
-		if id == "" || seen[id] {
-			continue
-		}
-		if id == taskID {
-			return nil, fmt.Errorf("a task cannot depend on itself")
-		}
-		dep, derr := d.GetTask(id, project)
-		if derr != nil {
-			return nil, derr
-		}
-		if dep == nil {
-			return nil, fmt.Errorf("dependency not found: %s", id)
-		}
-		// Would adding taskID → id create a cycle? Only if id already reaches taskID.
-		if d.dependsReaches(id, taskID, project, map[string]bool{}) {
-			return nil, fmt.Errorf("dependency would create a cycle: %s", id)
-		}
-		seen[id] = true
-		clean = append(clean, id)
-	}
-
-	raw, _ := json.Marshal(clean)
-	if _, err = d.conn.Exec(
-		"UPDATE tasks SET depends_on = ? WHERE id = ? AND project = ?",
-		string(raw), taskID, project,
-	); err != nil {
-		return nil, fmt.Errorf("set dependencies: %w", err)
-	}
-	task.DependsOn = string(raw)
-	return task, nil
-}
 
 // ReassignTask hands a task to a different agent without changing its status —
 // the orchestrator's "you take this now" lever. Stamps assigned_to + claimed_by.
