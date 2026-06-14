@@ -23,3 +23,11 @@ jobs:
         env:
           CGO_ENABLED: "1"
         run: go test -race -count=1 ./...
+
+      # Non-blocking: surfaces known vulnerabilities in PRs without freezing the
+      # pipeline on stdlib advisories that only a Go toolchain release can fix.
+      - name: govulncheck
+        continue-on-error: true
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          "$(go env GOPATH)/bin/govulncheck" ./...

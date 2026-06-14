@@ -1,0 +1,20 @@
+version: 2
+updates:
+  # Go modules — keep deps current so they don't drift years behind (the audit
+  # found go-sqlite3 and mcp-go badly stale).
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns:
+          - "*"
+
+  # GitHub Actions — keep CI actions patched (the workflows pin @v4/@v5).
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
