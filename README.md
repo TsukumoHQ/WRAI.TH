@@ -1,12 +1,10 @@
 <div align="center">
 
-<img src="docs/assets/wraith-banner.webp" alt="wrai.th" width="700">
-
 # wrai.th
 
-**Multi-agent orchestration as a management game.**
+**Mission control for your AI agents.**
 
-Your AI agents are robots. Your projects are planets. You run the galaxy.
+Stop babysitting one chat. Run a *fleet* -- agents that remember across sessions, talk to each other, and ship tasks while you watch from one dashboard.
 
 <br>
 
@@ -14,15 +12,14 @@ Your AI agents are robots. Your projects are planets. You run the galaxy.
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![MCP](https://img.shields.io/badge/MCP-Protocol-8A2BE2?style=for-the-badge)](https://modelcontextprotocol.io)
 [![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org)
-[![Uber Style](https://img.shields.io/badge/Style-Uber%20Go-00ADD8?style=for-the-badge)](https://github.com/uber-go/guide/blob/master/style.md)
 [![License](https://img.shields.io/badge/AGPL--3.0-blue?style=for-the-badge)](LICENSE)
 [![Discord](https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white)](https://discord.gg/QPq7qfbEk8)
 
-[The Big Bang](#-the-big-bang) · [Install](#-install) · [First Project](#-first-project-setup) · [How It Works](#-how-it-works) · [Agents](#-agents--hierarchy) · [Messaging](#-messaging--conversations) · [Memory](#-memory--knowledge) · [Tasks](#-task-execution) · [Heartbeat](#-passive-vs-proactive--heartbeat-loops) · [MCP Tools](#-mcp-tools)
+[Why](#-why) · [Install](#-install) · [First Project](#-first-project-setup) · [The Dashboard](#-the-dashboard) · [How It Works](#-how-it-works) · [Agents](#-agents--hierarchy) · [Messaging](#-messaging--conversations) · [Memory](#-memory--knowledge) · [Tasks](#-task-execution) · [MCP Tools](#-mcp-tools)
 
 <br>
 
-<img src="docs/screenshots/galaxy-view.png" alt="Galaxy View -- projects orbit as pixel-art planets" width="800">
+<img src="docs/screenshots/overview.png" alt="wrai.th mission control -- live overview of a project: tasks, agent load, and activity feed" width="850">
 
 *One binary. One SQLite file. 58 MCP tools. Zero required config.*
 
@@ -34,7 +31,7 @@ Your AI agents are robots. Your projects are planets. You run the galaxy.
 
 <br>
 
-## &#x1F4A5; The Big Bang
+## &#x1F4A5; Why
 
 AI agents have no persistent memory, no way to talk to each other, and no shared understanding of what they're working on. Every session starts from zero. Every agent works alone.
 
@@ -50,7 +47,7 @@ AI agents have no persistent memory, no way to talk to each other, and no shared
 
 All through MCP -- any AI client can plug in (Claude Code, Cursor, Windsurf, or anything that speaks the protocol). Same binary for solo devs and teams -- enable an API key and it becomes a shared server.
 
-The UI borrows from management games (Civilization, Factorio, Anno) -- because managing a fleet of AI agents looks a lot like managing a colony. The metaphor fits, so the interface does too.
+And you're never flying blind: the **mission-control dashboard** ([below](#-the-dashboard)) shows every project, every agent, and every task in real time -- who's shipping, who's blocked, and what just landed.
 
 <br>
 
@@ -103,7 +100,7 @@ This creates `.mcp.json` with the correct config (merges if one already exists):
 }
 ```
 
-That's it. Your agents register, talk, remember, and execute. You watch the galaxy.
+That's it. Your agents register, talk, remember, and execute. You watch the fleet.
 
 <details>
 <summary><b>Where to put the MCP config</b></summary>
@@ -188,7 +185,7 @@ Nested tasks (subtasks via `parent_task_id`, 3 levels deep), strict state machin
 Flexible hierarchy via `reports_to` -- classic tree, flat, or matrix. Teams with permission boundaries. Profiles define reusable archetypes (skills, working style, context keys) that agents boot into. Projects are first-class -- `create_project` / `delete_project` over MCP.
 
 ### You watch
-Open `localhost:8090`. Projects orbit as pixel art planets. Click one to land. Robots walk the surface. Message orbs fly between them. Drop directives into an agent's `loop.md` -- the colony is never still.
+Open `localhost:8090/v2/`. Every project, agent, and task live on one dashboard ([tour below](#-the-dashboard)) -- the board fills, messages stream, the activity feed never stops. Drop directives into an agent's `loop.md` to steer without breaking its loop.
 
 </td>
 </tr>
@@ -256,7 +253,7 @@ add_team_member({ team: "backend-squad", agent: "fullstack" })
 add_team_member({ team: "frontend-squad", agent: "fullstack" })
 ```
 
-The web UI draws hierarchy lines as arcs across the colony sky. `is_executive: true` adds a golden aura to the sprite.
+The dashboard's **Team** view renders this hierarchy as an org graph; `is_executive: true` flags leadership.
 
 ### Lifecycle states
 
@@ -387,60 +384,44 @@ Progressive disclosure: messages and memories are **index-only** (id, subject, k
 
 <br>
 
-## &#x1F30D; The Galaxy
+## &#x1F4FA; The Dashboard
 
-Open `http://localhost:8090`. Each project is a planet -- spinning pixel art drawn from 9 animated biomes.
+Open `http://localhost:8090/v2/`. One project at a time, every page live over SSE -- no refresh. Each project is a *crew*: drop in to see who's shipping, who's blocked, and what just landed.
 
-<img src="docs/screenshots/galaxy-view.png" alt="Galaxy View -- projects orbit as pixel-art planets" width="700">
+### Board -- a real kanban for your agents
 
-| Feature | Detail |
-|---|---|
-| **9 biomes** | Terran, ocean, forest, lava, desert, ice, tundra, barren, gas giant |
-| **Multi-ring orbits** | 2-3 distinct orbital rings -- largest planets on outer ring |
-| **Dynamic size** | Solo agent = 32px. Team of 10 = 64px dominating its orbit |
-| **Moons** | 1 moon per 4 agents (up to 4), orbiting with depth occlusion |
-| **Token usage** | Hover a planet to see real-time MCP token consumption (24h) |
-| **Space** | Procedural starfield, nebulae, black holes, asteroid belts, ring systems |
-| **Navigation** | Click planet to zoom in. `[Esc]` to zoom out |
+Tasks flow `todo → in progress → in review → done`, with `blocked` flagged in red. P0-P3 priority chips, profile avatars, drag to move, click to open. The `in-review` column is the "PR up" gate.
 
-Click a planet. The camera zooms through space, the planet grows, and you land on the surface.
+<img src="docs/screenshots/board.png" alt="Kanban board -- tasks across todo / in progress / in review / done, with P0-P3 priorities and blocked flags" width="850">
 
-<br>
+### Messages -- the comms channel
 
-## &#x1F916; The Colony
+Per-agent channels, team broadcasts, and group threads in one inbox. Priority chips, task-dispatch records, and a send box -- watch agents coordinate in real time, or jump in as any agent.
 
-<img src="docs/screenshots/colony-view.png" alt="Colony View -- robots, hierarchy lines, objectives, user questions" width="700">
+<img src="docs/screenshots/messages.png" alt="Messages view -- per-agent channels, threaded conversation, priorities, send box" width="850">
 
-Your agents are pixel art mechs --5 colors (blue, cyan, grey, orange, red, yellow) assigned by name hash. Idle animations desync per agent for natural movement.
+### Memory -- the shared brain
 
-Hierarchy lines arc across the sky like constellations. Message orbs fly between agents -- yellow zigzag for questions, green smooth for responses, purple flash for notifications, pink sharp for task dispatches.
+Every memory as a card: scope (`agent` / `project` / `global`), layer (`constraints` / `behavior` / `context`), confidence, version, author. Full-text search across the fleet's knowledge.
 
-| Visual | Meaning |
-|---|---|
-| Golden aura | Executive or rare golden variant |
-| Green glow | Working on a task |
-| Red shake | Blocked -- needs attention |
-| Dimmed sprite | Sleeping -- messages queuing |
-| Token counter | Colony header shows real-time MCP token/call count with animated digits |
+<img src="docs/screenshots/memory.png" alt="Memory view -- card grid of scoped, layered, versioned memories with search" width="850">
 
-**Four views:** Canvas `[1]` (agents + live activity), Kanban `[2]` (Trello-style task board), Stats `[3]` (token usage + activity charts), Notifications `[4]` (rules + delivery log)
+### Team & Stats -- the org and the numbers
 
-**Sidebar:** Messages `[M]`, Memories `[Y]`, Tasks `[T]` -- always one keypress away.
-
-<img src="docs/screenshots/kanban-view.png" alt="Kanban board -- tasks by status with P0-P3 priorities" width="700">
+The org tree (who reports to whom) with a live activity transcript, and a metrics page: cycle time, throughput, burndown, bottleneck, blocked tasks, throughput by agent.
 
 <table>
 <tr>
-<td><img src="docs/screenshots/sidebar-messages.png" alt="Messages" width="250"></td>
-<td><img src="docs/screenshots/sidebar-memories.png" alt="Memories" width="250"></td>
-<td><img src="docs/screenshots/sidebar-tasks.png" alt="Tasks" width="250"></td>
+<td width="50%"><img src="docs/screenshots/team.png" alt="Team view -- org hierarchy graph with live activity transcript"></td>
+<td width="50%"><img src="docs/screenshots/stats.png" alt="Stats view -- cycle time, throughput, burndown, bottleneck"></td>
 </tr>
 <tr>
-<td align="center"><em>Messages</em></td>
-<td align="center"><em>Memories</em></td>
-<td align="center"><em>Tasks</em></td>
+<td align="center"><em>Team -- org tree + live transcript</em></td>
+<td align="center"><em>Stats -- delivery metrics</em></td>
 </tr>
 </table>
+
+> The legacy galaxy/colony canvas UI (pixel-art planets) still ships at `http://localhost:8090/` -- the v2 dashboard above is the recommended interface.
 
 <br>
 
@@ -481,9 +462,7 @@ An agent starting a task calls this first and gets relevant memories + what prev
 
 ## &#x1F3AF; Task Execution
 
-The other half of the system. Memory is what agents know -- this is what they do.
-
-<img src="docs/screenshots/objectives.png" alt="Task board -- nested tasks with subtask progress rollup" width="500">
+The other half of the system. Memory is what agents know -- this is what they do. (See the [board](#-the-dashboard) above.)
 
 ### Nested tasks
 
@@ -881,10 +860,10 @@ internal/db/
   profiles.go / skills.go    Role archetypes + skill registry
 internal/ingest/             Activity tracking (Claude Code hooks)
 internal/web/static/
-  js/                        Galaxy/Colony renderer, kanban, stats, notifications
-  img/space/                 200+ pixel art sprites (9 biomes, 6 robot types,
-                             28 suns, 8 nebulae, 16 moons, 8 black holes...)
-  img/ui/                    Holo UI panels and icons
+  v2/                        v2 mission-control dashboard (SPA: board, memory,
+                             messages, stats, team, notifications)
+  js/                        Legacy galaxy/colony canvas renderer
+  img/                       Legacy pixel-art sprites + UI assets
 ```
 
 </details>
@@ -898,7 +877,7 @@ Real-time agent activity on the canvas via Claude Code hooks. The installer sets
 - **PostToolUse** → records each tool call (maps to `terminal`, `reading`, `typing`, `browsing`, `thinking`)
 - **Stop** → marks agent as `waiting`
 
-Each activity state shows as a live glow on the robot sprite. No network calls -- file-based, picked up by fsnotify.
+Each activity state surfaces live in the dashboard's Team transcript and agent indicators. No network calls -- file-based, picked up by fsnotify.
 
 ### MCP Token Usage
 
@@ -906,24 +885,11 @@ Every MCP tool response is automatically measured and stored in `token_usage` --
 
 | View | What you see |
 |---|---|
-| **Galaxy** | Hover planet → 24h token count |
-| **Colony header** | Real-time digital counter (tokens + calls), animated with lerp, polls every 5s |
-| **Agent detail** | SVG sparkline, 24h/7d stats grid (tokens, calls, avg/call, % of project), top 8 tools |
+| **Overview** | 24h token count per project in the KPI cards |
+| **Stats** | Throughput-by-agent, per-tool breakdown, time-series sparklines |
+| **Agent detail** | 24h/7d stats grid (tokens, calls, avg/call, % of project), top 8 tools |
 
 API endpoints: `GET /api/token-usage` (per-project), `/api/token-usage/project` (per-agent), `/api/token-usage/agent` (per-tool), `/api/token-usage/timeseries` (hourly/daily buckets for sparklines). Data auto-cleans after 90 days.
-
-<br>
-
-## &#x1F4C4; Research Paper
-
-The architecture behind wrai.th is formalized in our paper:
-
-> **Agentic Memory Atomicity: A Transactional Memory Architecture for Ephemeral AI Agent Systems**
-> Loïc Mancino & Jérôme Chincarini — Synergix Labs, March 2026
->
-> *81% boot token reduction, 80% knowledge convergence in 30 spawns, sub-linear cost scaling.*
-
-[Read the paper (PDF)](notebooks/paper.pdf)
 
 <br>
 
@@ -933,7 +899,7 @@ Opinionated tooling built for a specific workflow. Moves fast.
 
 Something breaks? [Open an issue](https://github.com/Synergix-lab/WRAI.TH/issues). Want to contribute? [Open a PR](https://github.com/Synergix-lab/WRAI.TH/pulls).
 
-**Stack:** Go 1.25+, SQLite FTS5 (`github.com/mattn/go-sqlite3`, CGO), `mcp-go`, Vanilla JS ES modules, Canvas 2D
+**Stack:** Go 1.25+, SQLite FTS5 (`github.com/mattn/go-sqlite3`, CGO), `mcp-go`, Vanilla JS ES modules (v2 dashboard SPA + legacy canvas)
 
 ```bash
 git clone https://github.com/Synergix-lab/WRAI.TH.git
