@@ -4,13 +4,15 @@
 // modules) receives a `ctx` and self-subscribes to events + selection changes.
 import {
   api, boardForSelection, BUCKETS, isActive,
-  colorFor, initialFor, connectStream,
+  colorFor, initialFor, connectStream, fmtAgo,
 } from './api.js';
 import { initBoard } from './board.js';
 import { initStats } from './stats.js';
 import { initNotifications } from './notifications.js';
 import { initHome } from './home.js';
 import { initTeam } from './team.js';
+import { initMessages } from './messages.js';
+import { initMemory } from './memory.js';
 import { initLinearStrip } from './linear.js';
 
 const $ = (id) => document.getElementById(id);
@@ -29,7 +31,7 @@ const selSubs = new Set();
 
 /* ---------------- shared context handed to pages ---------------- */
 const ctx = {
-  api, esc, colorFor, initialFor, BUCKETS, isActive,
+  api, esc, colorFor, initialFor, fmtAgo, BUCKETS, isActive,
   get selection() { return selection; },
   get projects() { return projects; },
   get settings() { return settings; },
@@ -115,6 +117,8 @@ function setLive(state) {
 const PAGES = {
   overview: { init: () => overviewPage(ctx), instance: null },
   board: { init: (el) => initBoard(el, ctx), instance: null },
+  messages: { init: (el) => initMessages(el, ctx), instance: null },
+  memory: { init: (el) => initMemory(el, ctx), instance: null },
   stats: { init: (el) => initStats(el, ctx), instance: null },
   notifications: { init: (el) => initNotifications(el, ctx), instance: null },
   team: { init: (el) => initTeam(el, ctx), instance: null },
@@ -124,6 +128,7 @@ let linearStrip = null;
 
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
+  if (h === 'messages') return { view: 'global', project: null, page: 'messages' };
   if (h.startsWith('p/')) {
     const rest = h.slice(2);
     const i = rest.indexOf('/');
@@ -185,8 +190,8 @@ function route() {
   startStream();
   if (selectionChanged) selSubs.forEach((fn) => { try { fn(selection); } catch (_) { /* isolated */ } });
 
-  // Chrome.
-  if (next.view === 'home') showHomeChrome(); else showProjectChrome(next.project);
+  // Chrome. Global (fleet messages) borrows the home chrome — no project tabs.
+  if (next.view === 'home' || next.view === 'global') showHomeChrome(); else showProjectChrome(next.project);
 
   // Page visibility.
   document.querySelectorAll('.page').forEach((p) => { p.hidden = p.dataset.page !== next.page; });

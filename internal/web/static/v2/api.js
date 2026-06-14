@@ -40,6 +40,17 @@ export const api = {
   stats: (project, cycle) => getJSON(`/api/stats?${q({ project, cycle })}`),
   events: (project, limit = 50) =>
     getJSON(`/api/events/recent?${q({ project, limit })}`),
+  // messages (comms)
+  messages: (project) => getJSON(`/api/messages?${q({ project })}`),
+  messagesAll: () => getJSON('/api/messages/all-projects'),
+  sendMessage: (project, to, content, replyTo) =>
+    sendJSON('POST', '/api/user-response', { project, to, content, reply_to: replyTo || '' }),
+  // memory (curate)
+  memories: (project, opts = {}) => getJSON(`/api/memories?${q({ project, ...opts })}`),
+  searchMemories: (project, query) => getJSON(`/api/memories/search?${q({ project, q: query })}`),
+  setMemory: (body) => sendJSON('POST', '/api/memories', body),
+  deleteMemory: (id) => sendJSON('DELETE', `/api/memories/${encodeURIComponent(id)}`),
+  resolveMemory: (key, body) => sendJSON('POST', `/api/memories/${encodeURIComponent(key)}/resolve`, body),
   // mutations (native projects only)
   transition: (id, body) =>
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/transition`, body),

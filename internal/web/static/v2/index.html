@@ -41,6 +41,8 @@
     <nav class="proj-tabs" id="projTabs" hidden aria-label="Project sections">
       <a class="tab" data-route="overview">overview</a>
       <a class="tab" data-route="board">board</a>
+      <a class="tab" data-route="messages">messages</a>
+      <a class="tab" data-route="memory">memory</a>
       <a class="tab" data-route="stats">stats</a>
       <a class="tab" data-route="notifications">notifications</a>
       <a class="tab tab-team" data-route="team">team<span class="tab-pulse" aria-hidden="true"></span></a>
@@ -56,6 +58,7 @@
           <div class="home-hero-text">
             <h1 class="home-title">control room</h1>
             <p class="home-sub">each project is a place — enter one to watch its board, its agents, its conversations.</p>
+            <a class="fleet-comms-link" href="#/messages">fleet comms — message any agent, any project →</a>
           </div>
           <div class="home-agg" id="homeAgg" aria-label="All-projects summary"></div>
         </div>
@@ -99,6 +102,53 @@
           </div>
         </div>
         <div class="board" id="board" aria-label="Kanban board"></div>
+      </section>
+
+      <!-- ============ MESSAGES · COMMS ============ -->
+      <section class="page page-messages" data-page="messages" hidden>
+        <div class="msg-layout">
+          <aside class="msg-rail" aria-label="Conversations">
+            <div class="msg-rail-head">
+              <span class="card-label">comms</span>
+              <div class="scope-toggle" id="msgScope" role="group" aria-label="Message scope">
+                <button class="scope-btn" data-scope="project" type="button">this project</button>
+                <button class="scope-btn" data-scope="all" type="button">all projects</button>
+              </div>
+            </div>
+            <input class="msg-rail-search" id="msgRailSearch" type="search" placeholder="filter agents…" aria-label="Filter agents" />
+            <div class="msg-rail-list" id="msgRailList"></div>
+          </aside>
+          <section class="msg-thread" aria-label="Conversation">
+            <div class="msg-thread-head" id="msgThreadHead"></div>
+            <div class="msg-thread-body" id="msgThreadBody"></div>
+            <form class="msg-composer" id="msgComposer" hidden>
+              <textarea class="msg-input" id="msgInput" rows="1" placeholder="message…" aria-label="Message"></textarea>
+              <button class="msg-send" id="msgSend" type="submit">send</button>
+            </form>
+          </section>
+        </div>
+      </section>
+
+      <!-- ============ MEMORY · CURATE ============ -->
+      <section class="page main page-memory" data-page="memory" hidden>
+        <div class="mem-bar">
+          <input class="mem-search" id="memSearch" type="search" placeholder="search the fleet's memory…" aria-label="Search memory" />
+          <select class="mem-filter" id="memScope" aria-label="Scope filter">
+            <option value="">all scopes</option>
+            <option value="agent">agent</option>
+            <option value="project">project</option>
+            <option value="global">global</option>
+          </select>
+          <select class="mem-filter" id="memLayer" aria-label="Layer filter">
+            <option value="">all layers</option>
+            <option value="constraints">constraints</option>
+            <option value="behavior">behavior</option>
+            <option value="context">context</option>
+          </select>
+          <button class="mem-add" id="memAdd" type="button">+ add directive</button>
+        </div>
+        <section class="card mem-conflicts" id="memConflicts" hidden aria-label="Memory conflicts"></section>
+        <div class="mem-list" id="memList" aria-label="Memories"></div>
       </section>
 
       <!-- ============ STATS ============ -->
