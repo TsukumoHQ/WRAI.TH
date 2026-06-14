@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"agent-relay/internal/cli"
 	"agent-relay/internal/config"
@@ -124,7 +125,11 @@ func startServer() {
 	<-ctx.Done()
 	close(cleanupDone)
 	log.Println("shutting down...")
-	if err := r.Shutdown(context.Background()); err != nil {
+	// Bound the shutdown: Shutdown cancels SSE streams so they unblock, but cap
+	// the wait so a stuck handler can't hang the process forever.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
+	if err := r.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
 }

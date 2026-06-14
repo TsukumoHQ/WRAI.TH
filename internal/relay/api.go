@@ -976,6 +976,8 @@ func (r *Relay) apiStreamActivity(w http.ResponseWriter, req *http.Request) {
 		select {
 		case <-req.Context().Done():
 			return
+		case <-r.shutdownCtx.Done():
+			return
 		case snap, ok := <-ch:
 			if !ok {
 				return
@@ -1005,6 +1007,8 @@ func (r *Relay) apiStreamEvents(w http.ResponseWriter, req *http.Request) {
 	for {
 		select {
 		case <-req.Context().Done():
+			return
+		case <-r.shutdownCtx.Done():
 			return
 		case evt, ok := <-ch:
 			if !ok {

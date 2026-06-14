@@ -40,6 +40,11 @@ type Relay struct {
 	Version    string
 	httpServer *http.Server
 	StartedAt  time.Time
+	// shutdownCtx is cancelled by Shutdown so long-lived handlers (SSE streams)
+	// unblock and return — otherwise http.Server.Shutdown waits forever on them
+	// (their only other exit is the client closing the request).
+	shutdownCtx    context.Context
+	shutdownCancel context.CancelFunc
 }
 
 // New creates a fully wired Relay with all tools registered.
@@ -73,6 +78,7 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	// Initialize notifications subsystem (rules evaluator + digest scheduler).
 	// Seeds default rules on first run.
 	notifier := NewNotifier(database, registry, events)
+	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	handlers.SetNotifier(notifier)
 
 	// The Linear connector is wired after construction via ReconfigureLinear()
@@ -93,17 +99,19 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	)
 
 	return &Relay{
-		MCPServer: mcpSrv,
-		HTTP:      httpSrv,
-		DB:        database,
-		Registry:  registry,
-		Ingester:  ingester,
-		Events:    events,
-		Handlers:  handlers,
-		Notifier:  notifier,
-		taskConn:  connector.Noop{},
-		Config:    cfg,
-		StartedAt: time.Now().UTC(),
+		MCPServer:      mcpSrv,
+		HTTP:           httpSrv,
+		DB:             database,
+		Registry:       registry,
+		Ingester:       ingester,
+		Events:         events,
+		Handlers:       handlers,
+		Notifier:       notifier,
+		taskConn:       connector.Noop{},
+		Config:         cfg,
+		StartedAt:      time.Now().UTC(),
+		shutdownCtx:    shutdownCtx,
+		shutdownCancel: shutdownCancel,
 	}
 }
 
@@ -142,8 +150,13 @@ func (r *Relay) buildMiddlewareChain(handler http.Handler) http.Handler {
 	return handler
 }
 
-// Shutdown gracefully stops the HTTP server.
+// Shutdown gracefully stops the HTTP server. It first cancels shutdownCtx so
+// long-lived SSE handlers unblock and return, then waits for in-flight handlers
+// via http.Server.Shutdown (bounded by the caller's ctx).
 func (r *Relay) Shutdown(ctx context.Context) error {
+	if r.shutdownCancel != nil {
+		r.shutdownCancel()
+	}
 	if r.httpServer != nil {
 		return r.httpServer.Shutdown(ctx)
 	}
