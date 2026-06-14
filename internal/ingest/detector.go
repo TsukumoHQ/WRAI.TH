@@ -183,9 +183,13 @@ func (d *Detector) run(ctx context.Context) {
 }
 
 func (d *Detector) tick(now time.Time) {
+	// Collect channel events while holding the lock, but emit them only after
+	// releasing it: sending on d.out while holding d.mu means a stalled consumer
+	// (buffer full) would block tick with the lock held, head-of-line-blocking
+	// every RecordEvent/GetSessions. broadcast() stays under the lock because it
+	// reads d.sessions via getSessionsLocked.
+	var pending []AgentEvent
 	d.mu.Lock()
-	defer d.mu.Unlock()
-
 	for sid, s := range d.sessions {
 		elapsed := now.Sub(s.lastEvent)
 
@@ -201,12 +205,12 @@ func (d *Detector) tick(now time.Time) {
 			if s.state != "exited" {
 				s.state = "exited"
 				s.activity = ActivityIdle
-				d.out <- AgentEvent{
+				pending = append(pending, AgentEvent{
 					Type:      EventAgentExit,
 					SessionID: sid,
 					Activity:  ActivityIdle,
 					Timestamp: now,
-				}
+				})
 			}
 			delete(d.sessions, sid)
 			continue
@@ -216,12 +220,12 @@ func (d *Detector) tick(now time.Time) {
 			s.idleSent = true
 			s.state = "idle"
 			s.activity = ActivityIdle
-			d.out <- AgentEvent{
+			pending = append(pending, AgentEvent{
 				Type:      EventIdle,
 				SessionID: sid,
 				Activity:  ActivityIdle,
 				Timestamp: now,
-			}
+			})
 			continue
 		}
 
@@ -229,14 +233,19 @@ func (d *Detector) tick(now time.Time) {
 			s.waitSent = true
 			s.state = "waiting"
 			s.activity = ActivityWaiting
-			d.out <- AgentEvent{
+			pending = append(pending, AgentEvent{
 				Type:      EventWaiting,
 				SessionID: sid,
 				Activity:  ActivityWaiting,
 				Timestamp: now,
-			}
+			})
 		}
 	}
 
 	d.broadcast()
+	d.mu.Unlock()
+
+	for _, ev := range pending {
+		d.out <- ev
+	}
 }
