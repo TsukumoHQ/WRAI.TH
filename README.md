@@ -10,7 +10,7 @@ Your AI agents are robots. Your projects are planets. You run the galaxy.
 
 <br>
 
-[![Beta](https://img.shields.io/badge/v0.5.0-Public%20Beta-ff6b35?style=for-the-badge)](https://github.com/Synergix-lab/WRAI.TH/releases/tag/v0.5.0)
+[![Release](https://img.shields.io/badge/v1.0.0-Stable-2ecc71?style=for-the-badge)](https://github.com/Synergix-lab/WRAI.TH/releases/tag/v1.0.0)
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![MCP](https://img.shields.io/badge/MCP-Protocol-8A2BE2?style=for-the-badge)](https://modelcontextprotocol.io)
 [![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org)
@@ -24,10 +24,9 @@ Your AI agents are robots. Your projects are planets. You run the galaxy.
 
 <img src="docs/screenshots/galaxy-view.png" alt="Galaxy View -- projects orbit as pixel-art planets" width="800">
 
-*One binary. One SQLite file. 61 MCP tools. Zero required config.*
+*One binary. One SQLite file. 58 MCP tools. Zero required config.*
 
-**Public Beta** -- actively developed, battle-tested on real multi-agent projects, API stable.
-Breaking changes possible before 1.0 but will be documented.
+**v1.0 -- stable.** Battle-tested on real multi-agent projects, API stable. Breaking changes are documented in [CHANGELOG.md](CHANGELOG.md).
 
 **100% local by default. Optional API key for team/server deployments. No cloud, no telemetry.**
 
@@ -44,10 +43,10 @@ AI agents have no persistent memory, no way to talk to each other, and no shared
 - **Context that persists** -- memory survives `/clear`, context resets, and session restarts. An agent that reboots picks up where it left off.
 - **Token-aware context management** -- budget pruning scores messages by priority × relevance × freshness and selects the highest-value subset that fits. `get_session_context` restores full agent state in a single call.
 - **Real communication** -- 5 addressing modes (direct, broadcast, team, conversation, user), priority routing (P0-P3), TTL expiry, delivery tracking.
-- **Nested tasks** -- subtasks via `parent_task_id`, up to 3 levels deep, with roll-up. Not just a flat list -- a hierarchy that agents navigate.
-- **Shared knowledge** -- three-layer stack: scoped memories, Obsidian vault with FTS5 search, and RAG context that fuses both.
-- **File coordination** -- advisory locks prevent merge conflicts before they happen.
-- **Profile archetypes** -- reusable role definitions with auto-injected vault docs, so agents boot with the right context.
+- **Nested tasks** -- subtasks via `parent_task_id`, up to 3 levels deep, with roll-up. Not just a flat list -- a hierarchy that agents navigate. Optional Linear mirror for teams already on Linear.
+- **Shared knowledge** -- scoped, conflict-aware memory (agent / project / global) with FTS5 search, plus `query_context` RAG that fuses memories and past task results.
+- **Profile archetypes** -- reusable role definitions (skills, working style, context keys) so agents boot with the right role.
+- **Server-side notifications** -- rules fire on relay events (task blocked, P0 message, ...) and fan out to delivery channels, with a test-fire endpoint.
 
 All through MCP -- any AI client can plug in (Claude Code, Cursor, Windsurf, or anything that speaks the protocol). Same binary for solo devs and teams -- enable an API key and it becomes a shared server.
 
@@ -68,11 +67,11 @@ The installer checks dependencies, builds from source (Go + GCC) or falls back t
 
 ```bash
 git clone https://github.com/Synergix-lab/WRAI.TH.git && cd WRAI.TH
-go build -tags fts5 -o agent-relay .
+CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 ./agent-relay serve
 ```
 
-Requires Go 1.23+ and a C compiler (GCC/Clang) for SQLite FTS5.
+Requires Go 1.25+ and a C compiler (GCC/Clang) for CGO + SQLite FTS5 (`github.com/mattn/go-sqlite3`).
 
 </details>
 
@@ -127,7 +126,7 @@ If the relay appears at multiple levels, Claude Code deduplicates by server name
 
 > **Tip:** Don't put `?project=` in the URL. Agents pass `project` explicitly on each tool call, which lets a single connection work across multiple projects.
 
-> **Token tip:** Add `?tools=discovery` to the URL for worker agents. The session then exposes just two tools — `discover_tools(category)` and `call_tool(tool, args)` — and loads tool schemas on demand: ~460 tokens at session start instead of ~11,000. List tools return compact markdown tables by default (~half the tokens of JSON); pass `format: "json"` for structured output.
+> **Token tip:** Add `?tools=discovery` to the URL for agents that only need a few tools. The session then exposes just two tools — `discover_tools(category)` and `call_tool(tool, args)` — and loads tool schemas on demand: ~460 tokens at session start instead of ~11,000. List tools return compact markdown tables by default (~half the tokens of JSON); pass `format: "json"` for structured output.
 
 </details>
 
@@ -145,15 +144,14 @@ create_project({ name: "my-app", cwd: "/path/to/repo" })
 
 This returns a full onboarding plan that Claude executes autonomously -- like a management game tutorial. It will:
 
-1. Read the relay's embedded docs to learn the system
+1. Read the relay's bundled docs (the `/relay` skill) to learn the system
 2. Analyze your codebase (stack, architecture, conventions)
-3. Create an Obsidian vault with project documentation
-4. Store knowledge as shared memories
-5. Set up the org (teams, profiles, CTO agent)
-6. Plan the first tasks
-7. Output ready-to-paste `claude -w` commands to spawn worker agents
+3. Store knowledge as shared memories
+4. Set up the org (teams, profiles, CTO agent)
+5. Plan the first tasks
+6. Output ready-to-run `claude` commands to bring more agents online
 
-Each spawned worker auto-onboards: loads context, researches the tech stack, updates memories, then pings the CTO that they're ready.
+Each new agent auto-onboards: loads context, researches the tech stack, updates memories, then pings the CTO that it's ready.
 
 **Interactive mode:** Add `interactive: true` to review and approve each phase before it executes -- Claude will present its findings and proposed memories/teams/profiles for your approval before creating them:
 
@@ -165,7 +163,7 @@ create_project({ name: "my-app", cwd: "/path/to/repo", interactive: true })
 
 ## &#x2728; How It Works
 
-Most of the 61 MCP tools weren't designed by a human. Multiple teams of agents at [synergix-lab](https://github.com/synergix-lab) ran Q&A sessions directly on the wrai.th codebase -- identifying what they needed to work better as a team. Conversations, conflict-aware memory, nested tasks, team permissions, vault auto-injection -- all requested by agents who hit friction and asked for features themselves. The relay is shaped by its own users.
+Most of the 58 MCP tools weren't designed by a human. Multiple teams of agents at [synergix-lab](https://github.com/synergix-lab) ran Q&A sessions directly on the wrai.th codebase -- identifying what they needed to work better as a team. Conversations, conflict-aware memory, nested tasks, team permissions, context budget pruning -- all requested by agents who hit friction and asked for features themselves. The relay is shaped by its own users.
 
 <table>
 <tr>
@@ -178,7 +176,7 @@ Persistent identity -- respawn across sessions with full context restore. One Cl
 5 addressing modes: direct, broadcast, team channels, group conversations, user questions. Messages carry priority (P0 interrupt → P3 info), TTL expiry, and per-recipient delivery tracking. Context budget pruning keeps inboxes lean -- agents declare interest tags at boot, and the relay scores messages by priority × relevance × freshness. [Details below](#-messaging--conversations).
 
 ### They remember
-Three-layer knowledge stack: scoped memory (agent / project / global), vault docs (Obsidian-compatible, FTS5-indexed), and RAG context that fuses both. Survives `/clear`, context resets, session restarts. An agent that reboots picks up where it left off. [Details below](#-memory--knowledge).
+Scoped memory (agent / project / global), conflict-aware and FTS5-indexed, plus `query_context` RAG that fuses memories with past task results. Survives `/clear`, context resets, session restarts. An agent that reboots picks up where it left off. [Details below](#-memory--knowledge).
 
 </td>
 <td width="50%">
@@ -187,7 +185,7 @@ Three-layer knowledge stack: scoped memory (agent / project / global), vault doc
 Nested tasks (subtasks via `parent_task_id`, 3 levels deep), strict state machine with an `in-review` stage, P0-P3 priorities, dispatch by profile archetype. Progress rolls up through the subtask tree. The kanban is the real-time view. [Details below](#-task-execution).
 
 ### They organize
-Flexible hierarchy via `reports_to` -- classic tree, flat, or matrix. Teams with permission boundaries. Profiles define reusable archetypes with auto-injected vault docs. Advisory file locks prevent merge conflicts -- agents claim files they're editing, others see the lock and steer clear.
+Flexible hierarchy via `reports_to` -- classic tree, flat, or matrix. Teams with permission boundaries. Profiles define reusable archetypes (skills, working style, context keys) that agents boot into. Projects are first-class -- `create_project` / `delete_project` over MCP.
 
 ### You watch
 Open `localhost:8090`. Projects orbit as pixel art planets. Click one to land. Robots walk the surface. Message orbs fly between them. Drop directives into an agent's `loop.md` -- the colony is never still.
@@ -380,10 +378,8 @@ When teams are configured, messaging follows boundaries:
   "profile": { "slug": "backend", "skills": [...] },
   "pending_tasks": { "assigned_to_me": [...], "dispatched_by_me": [...] },
   "unread_messages": [{ "id": "...", "from": "cto", "subject": "Sprint plan" }],
-  "unread_hint": "Use get_inbox for full content",
   "active_conversations": [{ "id": "...", "title": "...", "unread": 3 }],
-  "relevant_memories": [{ "key": "stack", "tags": "[\"infra\"]" }],
-  "vault_context": [{ "path": "guides/auth.md", "content": "..." }]
+  "relevant_memories": [{ "key": "stack", "tags": "[\"infra\"]" }]
 }
 ```
 
@@ -427,13 +423,11 @@ Hierarchy lines arc across the sky like constellations. Message orbs fly between
 | Dimmed sprite | Sleeping -- messages queuing |
 | Token counter | Colony header shows real-time MCP token/call count with animated digits |
 
-**Three views:** Canvas `[1]` (agents + live activity), Kanban `[2]` (Trello-style task board), Vault `[3]` (knowledge base with FTS5 search)
+**Four views:** Canvas `[1]` (agents + live activity), Kanban `[2]` (Trello-style task board), Stats `[3]` (token usage + activity charts), Notifications `[4]` (rules + delivery log)
 
 **Sidebar:** Messages `[M]`, Memories `[Y]`, Tasks `[T]` -- always one keypress away.
 
 <img src="docs/screenshots/kanban-view.png" alt="Kanban board -- tasks by status with P0-P3 priorities" width="700">
-
-<img src="docs/screenshots/vault-browser.png" alt="Vault browser -- Obsidian-compatible docs with FTS5 search" width="700">
 
 <table>
 <tr>
@@ -452,7 +446,7 @@ Hierarchy lines arc across the sky like constellations. Message orbs fly between
 
 ## &#x1F9E0; Memory & Knowledge
 
-The biggest problem in multi-agent systems: agents forget everything between sessions. Context resets, `/clear`, crashes -- gone. wrai.th solves this with three layers that form a persistent knowledge stack.
+The biggest problem in multi-agent systems: agents forget everything between sessions. Context resets, `/clear`, crashes -- gone. wrai.th solves this with two layers that form a persistent knowledge stack.
 
 ### Layer 1 -- Scoped Memory (SQLite + FTS5)
 
@@ -469,41 +463,9 @@ First match wins. An agent's private note overrides the project convention, whic
 
 Each memory carries metadata: `confidence` (stated / inferred / observed), `layer` (constraints / behavior / context), `tags`, `version`, and full provenance (who wrote it, when). When two agents write conflicting values for the same key, both are preserved with a `conflict_with` flag -- nothing is silently overwritten. `resolve_conflict` picks the winner; the loser is archived.
 
-### Layer 2 -- Vault (Obsidian-compatible docs)
+### Layer 2 -- RAG via `query_context`
 
-Point the relay at any directory of markdown files -- your Obsidian vault, your architecture docs, your API specs:
-
-```
-register_vault({ path: "/path/to/your/obsidian-vault" })
-```
-
-The relay indexes every `.md` file into FTS5 and watches for changes via fsnotify. Edit a doc in Obsidian → it's searchable by agents within seconds. No export, no sync, no pipeline.
-
-```
-search_vault({ query: "authentication flow" })          # FTS5 search
-search_vault({ query: "supabase OR firebase" })          # boolean operators
-get_vault_doc({ path: "guides/auth-config.md" })         # full document
-list_vault_docs({ tags: '["decisions"]' })               # browse by tag
-```
-
-**Profile auto-injection** -- profiles specify `vault_paths` glob patterns. When an agent boots with that profile, matching docs are automatically loaded into `get_session_context`:
-
-```
-register_profile({
-  slug: "backend",
-  vault_paths: '["team/docs/backend.md", "guides/api-*.md"]'
-})
-```
-
-The backend agent doesn't need to know which docs exist -- they're injected at boot based on its role.
-
-**Built-in relay docs** --8 markdown files (boot sequence, messaging, memory, tasks, teams, profiles, vault, common patterns) ship embedded in the binary via `go:embed`. They're indexed as the `_relay` project and available to every agent on every project, zero config. Agents learn how to use the relay by searching the relay's own docs.
-
-Everything is also available via REST (`/api/vault/search`, `/api/vault/docs`, `/api/vault/doc/:path`) and through the web UI's Vault tab `[3]` with full-text search.
-
-### Layer 3 -- RAG via `query_context`
-
-Fuses both systems into a single ranked response:
+Fuses memory with execution history into a single ranked response:
 
 ```
 query_context({ query: "supabase migration patterns" })
@@ -512,6 +474,8 @@ query_context({ query: "supabase migration patterns" })
 ```
 
 An agent starting a task calls this first and gets relevant memories + what previous agents learned from similar work. Knowledge compounds across sessions.
+
+> **Note:** The relay focuses on structured, low-latency knowledge -- scoped memory and task-result RAG. Long-form document indexing (Obsidian-style vault search) is not part of the core relay. The `/relay` skill and `skill/tools-reference.md` ship the relay's own usage docs.
 
 <br>
 
@@ -550,7 +514,7 @@ Each task carries: `priority` (P0 critical → P3 low), `profile_slug` (which ar
 ### Dispatch by profile, not by name
 
 ```
-dispatch_task({ profile_slug: "backend", title: "Add rate limiting", priority: "P1" })
+dispatch_task({ profile: "backend", title: "Add rate limiting", priority: "P1" })
 ```
 
 The task targets the `backend` **profile** -- not a specific agent. Any agent registered with that profile sees it in their `get_session_context` response. First to `claim_task` owns it. This decouples task assignment from agent identity -- agents can restart, rotate, or scale without losing work.
@@ -625,7 +589,7 @@ Each tick: the agent reads the frequency file, executes the actions, and goes qu
 
 ### Who gets a heartbeat
 
-Only permanent agents: CEO, CTO, CMO, tech leads, devops -- roles that need continuous awareness. Pool workers (backend-1, backend-2, frontend-3) are one-shot: they spawn, claim a task, complete it, exit. No heartbeat needed.
+Only permanent agents: CEO, CTO, CMO, tech leads, devops -- roles that need continuous awareness. Task-scoped agents are ephemeral: they come online, claim a task, complete it, and exit. No heartbeat needed.
 
 ### Directives
 
@@ -647,7 +611,7 @@ The agent picks them up on the next tick and executes in priority. This is how y
 | **5m** | `list_tasks({ status: "blocked" })` → unblock or escalate |
 | **15m** | `set_memory` with current architecture decisions, check the task board |
 | **30m** | Post sync to `team:engineering`, review in-progress tasks |
-| **60m** | Vault doc updates, team health check, dispatch new tasks from backlog |
+| **60m** | Memory sync of architecture decisions, team health check, dispatch new tasks from backlog |
 
 The relay doesn't enforce heartbeat -- it's a pattern built on top of the primitives (inbox, tasks, memory, messaging). The infrastructure just makes it work: messages stack while the agent sleeps, `get_session_context` restores full state on each tick, memories persist across cycles.
 
@@ -667,44 +631,64 @@ That's the only contract.
 
 ## &#x1F6E0; MCP Tools
 
-61 tools. No SDK, no wrapper. Agents call them directly through the MCP connection.
+58 tools, grouped into 10 categories. No SDK, no wrapper. Agents call them directly through the MCP connection. With `?tools=discovery`, the session exposes just `discover_tools(category)` + `call_tool(tool, args)` and loads schemas on demand (categories below are the discovery taxonomy).
 
 <details>
-<summary><strong>Identity & Session</strong> --7 tools</summary>
+<summary><strong>Session</strong> --4 tools</summary>
+
+Identity + boot.
 
 | Tool | What it does |
 |---|---|
 | `whoami` | Identify session via transcript salt |
-| `register_agent` | Announce presence, receive compact context |
-| `get_session_context` | Compact index: profile, tasks, message/memory indexes (~4.5K tokens) |
+| `register_agent` | Announce presence, receive compact context (respawn-aware) |
+| `get_session_context` | Compact boot index: profile, tasks, message/memory indexes (~4.5K tokens) |
+| `query_context` | RAG: ranked memories + past task results |
+
+</details>
+
+<details>
+<summary><strong>Agents</strong> --4 tools</summary>
+
+| Tool | What it does |
+|---|---|
 | `list_agents` | All agents with status and roles |
 | `sleep_agent` | Go idle (messages still queue) |
-| `deactivate_agent` | Leave the roster |
+| `deactivate_agent` | Leave the roster (reactivatable) |
 | `delete_agent` | Soft-delete |
 
 </details>
 
 <details>
-<summary><strong>Messaging</strong> --11 tools</summary>
+<summary><strong>Messaging</strong> --6 tools</summary>
 
 | Tool | What it does |
 |---|---|
 | `send_message` | Direct, broadcast `*`, team `team:slug`, user, or conversation. Supports `priority` (P0-P3) and `ttl_seconds` |
 | `get_inbox` | Unread messages with truncation control. `apply_budget: true` for context-budget pruning |
-| `ack_delivery` | Acknowledge receipt of a message (transitions delivery: surfaced → acknowledged) |
+| `ack_delivery` | Acknowledge receipt (transitions delivery: surfaced → acknowledged) |
 | `get_thread` | Full reply chain from any message |
 | `mark_read` | Mark messages or conversations as read |
-| `create_conversation` | Group thread with members |
-| `get_conversation_messages` | Paginated (`full` / `compact` / `digest`) |
-| `invite_to_conversation` | Add agent mid-thread |
-| `leave_conversation` | Leave a conversation |
-| `archive_conversation` | Archive a conversation |
-| `list_conversations` | Browse with unread counts |
+| `get_team_inbox` | Messages sent to `team:slug` |
 
 </details>
 
 <details>
-<summary><strong>Memory</strong> --7 tools</summary>
+<summary><strong>Conversations</strong> --6 tools</summary>
+
+| Tool | What it does |
+|---|---|
+| `create_conversation` | Group thread with members |
+| `list_conversations` | Browse with unread counts |
+| `get_conversation_messages` | Paginated (`full` / `compact` / `digest`) |
+| `invite_to_conversation` | Add agent mid-thread |
+| `leave_conversation` | Leave a conversation |
+| `archive_conversation` | Archive a conversation |
+
+</details>
+
+<details>
+<summary><strong>Memory</strong> --6 tools</summary>
 
 Scoped, tagged, conflict-aware. Survives `/clear` and context resets.
 
@@ -716,12 +700,11 @@ Scoped, tagged, conflict-aware. Survives `/clear` and context resets.
 | `list_memories` | Browse collective knowledge |
 | `delete_memory` | Soft-delete |
 | `resolve_conflict` | Two agents disagreed -- pick the winner |
-| `query_context` | RAG: ranked memories + past task results |
 
 </details>
 
 <details>
-<summary><strong>Tasks & Boards</strong> --19 tools</summary>
+<summary><strong>Tasks</strong> --15 tools</summary>
 
 ```
 task  ->  pending -> accepted -> in-progress -> in-review -> done
@@ -739,65 +722,53 @@ subtasks nest via parent_task_id, up to 3 levels deep
 | `get_task` / `list_tasks` | Filter by status, priority (P0-P3), board |
 | `update_task` | Update task fields |
 | `move_task` | Move task to a different board or parent |
-| `batch_complete_tasks` | Complete multiple tasks in one call |
-| `batch_dispatch_tasks` | Dispatch multiple tasks in one call |
+| `batch_complete_tasks` / `batch_dispatch_tasks` | Bulk complete / dispatch in one call |
 | `archive_tasks` | Clean up done/cancelled |
-| `create_board` / `list_boards` / `archive_board` / `delete_board` | Sprint management |
+
+</details>
+
+<details>
+<summary><strong>Boards</strong> --4 tools</summary>
+
+| Tool | What it does |
+|---|---|
+| `create_board` / `list_boards` | Sprint containers |
+| `archive_board` / `delete_board` | Retire a board |
 
 </details>
 
 <details>
 <summary><strong>Profiles</strong> --4 tools</summary>
 
-Reusable role definitions -- skills, working style, auto-injected vault docs.
+Reusable role definitions -- skills, working style, context keys.
 
 | Tool | What it does |
 |---|---|
-| `register_profile` | Define archetype with skills, context keys, vault patterns |
+| `register_profile` | Define archetype with skills and context keys |
 | `get_profile` / `list_profiles` | Retrieve profiles |
 | `find_profiles` | Search by skill tag |
 
 </details>
 
 <details>
-<summary><strong>Teams & Orgs</strong> --8 tools</summary>
+<summary><strong>Teams</strong> --7 tools</summary>
 
 | Tool | What it does |
 |---|---|
 | `create_org` / `list_orgs` | Organization structure |
 | `create_team` / `list_teams` | Team types: `admin`, `regular`, `bot` |
 | `add_team_member` / `remove_team_member` | Roles: admin, lead, member, observer |
-| `get_team_inbox` | Messages sent to `team:slug` |
-| `add_notify_channel` | Cross-team direct channel |
+| `add_notify_channel` | Cross-team direct channel allowlist |
 
 </details>
 
 <details>
-<summary><strong>Vault</strong> --4 tools</summary>
+<summary><strong>Projects</strong> --2 tools</summary>
 
 | Tool | What it does |
 |---|---|
-| `register_vault` | Point at a directory -- relay indexes + watches (fsnotify) |
-| `search_vault` | Full-text search (FTS5) |
-| `get_vault_doc` | Full document by path |
-| `list_vault_docs` | Browse with tag filters |
-
-Built-in docs ship embedded in the binary -- available to every agent on every project, zero config.
-
-</details>
-
-<details>
-<summary><strong>File Locks</strong> --3 tools</summary>
-
-Advisory locks to coordinate file ownership across agents.
-
-| Tool | What it does |
-|---|---|
-| `claim_files` | Declare which files you're editing (broadcasts a steering-priority message) |
-| `release_files` | Release claimed files |
-| `list_locks` | Show all active locks in the project |
-
-Locks are advisory -- they don't prevent edits, they signal intent. TTL (default 30min) ensures abandoned locks don't persist.
+| `create_project` | Bootstrap a project + return the autonomous onboarding plan |
+| `delete_project` | Remove a project and its data |
 
 </details>
 
@@ -813,7 +784,7 @@ flowchart LR
     B(Browser) -->|SSE + REST| R
 
     subgraph R[wrai.th]
-        H[handlers.go<br>61 MCP tools]
+        H[handlers_*.go<br>58 MCP tools]
         DB[(SQLite FTS5)]
         UI[Canvas 2D UI]
         H <--> DB
@@ -821,7 +792,7 @@ flowchart LR
     end
 ```
 
-Single binary. SQLite on disk. No external services. The web UI is embedded via `go:embed`.
+Single binary. SQLite on disk. No required external services. The web UI is embedded via `go:embed`. An optional [Linear](https://linear.app) connector mirrors tasks when `RELAY_LINEAR_MODE` is enabled.
 
 ### REST API
 
@@ -854,17 +825,29 @@ Every resource exposed through MCP is also available via REST at `/api/*`. The w
 | `GET` | `/api/boards?project=X` | List boards |
 | `GET` | `/api/profiles?project=X` | List profiles |
 | `GET` | `/api/teams?project=X` | List teams |
-| `GET` | `/api/vault/search?project=X&q=...` | Search vault docs |
-| `GET` | `/api/vault/docs?project=X` | List vault docs |
-| `PUT` | `/api/vault/doc/:path` | Update vault doc |
-| `GET` | `/api/vault/stats?project=X` | Vault statistics |
+| `PUT` | `/api/agents/avatar` | Set/clear an agent's avatar image |
+| `GET` | `/api/file-locks?project=X` | Active advisory file locks |
+| `GET` | `/api/notification-rules?project=X` | List notification rules |
+| `POST` | `/api/notification-rules` | Create a notification rule |
+| `PATCH` | `/api/notification-rules/:id` | Update a rule |
+| `DELETE` | `/api/notification-rules/:id` | Delete a rule |
+| `POST` | `/api/notification-rules/:id/test-fire` | Test-fire a rule |
+| `GET` | `/api/notification-events?project=X` | Notification event log |
+| `GET` | `/api/notification-deliveries?project=X` | Per-channel delivery log |
+| `GET` | `/api/token-usage?project=X` | Per-project token usage |
+| `GET` | `/api/token-usage/project` / `/agent` / `/timeseries` | Per-agent, per-tool, bucketed usage |
+| `GET` | `/api/cycles?project=X` | Linear cycles (mirror mode) |
+| `GET` | `/api/linear/teams` | Linear teams (mirror mode) |
+| `POST` | `/api/connectors/linear/webhook` | Inbound Linear webhook (HMAC) |
+| `GET` | `/api/stats?project=X` | Aggregate project stats |
 | `GET` | `/api/activity` | Current agent activity states |
 | `GET` | `/api/activity/stream` | SSE -- real-time agent activity |
 | `GET` | `/api/events/stream` | SSE -- MCP tool events |
+| `GET` | `/api/events/recent?project=X` | Recent MCP events (ring buffer) |
 | `POST` | `/api/user-response` | Reply to a user_question from the web UI |
 | `GET` | `/api/health` | Uptime, version, DB stats |
 | `GET` | `/api/settings` | Relay settings |
-| `PUT` | `/api/settings` | Update a setting |
+| `PUT` | `/api/settings` | Update an allowlisted setting |
 
 </details>
 
@@ -875,26 +858,30 @@ Two SSE streams for real-time: `/api/activity/stream` pushes agent activity stat
 
 ```
 main.go                      Entry point
-docs/                        Embedded agent documentation
+skill/                       /relay skill + tools reference + Claude Code hooks
+internal/cli/                CLI subcommands (init, send, inbox, stats, update...)
+internal/config/             Env config (ports, auth, Linear mode)
+internal/models/             Domain types (agent, task, message, profile, skill...)
+internal/connector/linear/   Optional Linear mirror connector
 internal/relay/
   relay.go                   MCP + HTTP server
-  handlers.go                61 tool implementations
-  api.go                     REST API + SSE events
+  toolset.go                 Tool registry + discover_tools / call_tool
   tools.go                   MCP tool definitions
+  handlers_*.go              Tool implementations, split by domain
+  api.go / api_notifications.go  REST API + SSE events
   budget.go                  Context budget pruning (utility scoring)
   cleanup.go                 TTL expiry, stale lock cleanup
   events.go                  Real-time event bus
+  linear_manager.go / linear_webhook.go  Linear mirror sync
 internal/db/
   db.go                      SQLite migrations, FTS5
   agents.go / tasks.go       Core domain
   deliveries.go              Per-recipient delivery tracking
   file_locks.go              Advisory file locks
-  profiles.go                Role archetypes
-  vault.go                   FTS5 document index
+  profiles.go / skills.go    Role archetypes + skill registry
 internal/ingest/             Activity tracking (Claude Code hooks)
-internal/vault/              Markdown file watcher (fsnotify)
 internal/web/static/
-  js/                        Galaxy/Colony renderer, kanban, vault browser
+  js/                        Galaxy/Colony renderer, kanban, stats, notifications
   img/space/                 200+ pixel art sprites (9 biomes, 6 robot types,
                              28 suns, 8 nebulae, 16 moons, 8 black holes...)
   img/ui/                    Holo UI panels and icons
@@ -946,7 +933,7 @@ Opinionated tooling built for a specific workflow. Moves fast.
 
 Something breaks? [Open an issue](https://github.com/Synergix-lab/WRAI.TH/issues). Want to contribute? [Open a PR](https://github.com/Synergix-lab/WRAI.TH/pulls).
 
-**Stack:** Go 1.22+, SQLite FTS5 (`modernc.org/sqlite`), `mcp-go`, Vanilla JS ES modules, Canvas 2D
+**Stack:** Go 1.25+, SQLite FTS5 (`github.com/mattn/go-sqlite3`, CGO), `mcp-go`, Vanilla JS ES modules, Canvas 2D
 
 ```bash
 git clone https://github.com/Synergix-lab/WRAI.TH.git
