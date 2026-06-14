@@ -873,3 +873,22 @@ func TestAPIGetActivity(t *testing.T) {
 		t.Errorf("expected 0 sessions with nil ingester, got %d", len(sessions))
 	}
 }
+
+func TestApiPutSetting_Allowlist(t *testing.T) {
+	r := testRelay(t)
+
+	// Allowed key → 200.
+	w := doAPI(r, "PUT", "/settings", `{"linear_api_key":"lin_test"}`)
+	if w.Code != 200 {
+		t.Fatalf("allowed setting rejected: %d %s", w.Code, w.Body.String())
+	}
+
+	// Disallowed key → 403, and nothing written.
+	w = doAPI(r, "PUT", "/settings", `{"evil_key":"x"}`)
+	if w.Code != 403 {
+		t.Fatalf("disallowed setting accepted: %d %s", w.Code, w.Body.String())
+	}
+	if got := r.DB.GetSetting("evil_key"); got != "" {
+		t.Fatalf("disallowed key was written: %q", got)
+	}
+}

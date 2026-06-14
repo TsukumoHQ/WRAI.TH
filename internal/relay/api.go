@@ -297,11 +297,30 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 	})
 }
 
+// writableSettings is the allowlist of keys the settings API may write. Without
+// it, an (unauthenticated by default) caller could set arbitrary key→value pairs
+// — including swapping linear_api_key or repointing the connector.
+var writableSettings = map[string]bool{
+	"sun_type":        true,
+	setLinearEnabled:  true,
+	setLinearAPIKey:   true,
+	setLinearTeamKey:  true,
+	setLinearProject:  true,
+	setLinearInterval: true,
+}
+
 func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 	var body map[string]string
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
+	}
+	// Reject the whole request if any key is not writable (fail before applying).
+	for k := range body {
+		if !writableSettings[k] {
+			http.Error(w, fmt.Sprintf(`{"error":"setting %q is not writable"}`, k), http.StatusForbidden)
+			return
+		}
 	}
 	linearChanged := false
 	for k, v := range body {
