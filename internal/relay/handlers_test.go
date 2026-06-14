@@ -1244,3 +1244,19 @@ func TestCreateProjectValidation(t *testing.T) {
 		t.Errorf("expected 'name is required', got: %s", msg)
 	}
 }
+
+func TestClampLimit(t *testing.T) {
+	cases := []struct{ in, want int }{
+		{10, 10},      // normal — unchanged
+		{200, 200},    // at the cap
+		{201, 200},    // over the cap — clamped
+		{100000, 200}, // pathological dump — clamped
+		{0, 0},        // 0 preserved (default/unbounded semantics)
+		{-1, -1},      // negative preserved
+	}
+	for _, c := range cases {
+		if got := clampLimit(c.in); got != c.want {
+			t.Errorf("clampLimit(%d) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}

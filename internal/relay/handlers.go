@@ -164,6 +164,19 @@ func strOrDash(p *string) string {
 	return *p
 }
 
+// maxToolLimit caps any caller-supplied "limit" on list/get tools so a single
+// call (e.g. limit=100000) can't dump the whole table into an agent's context.
+// Only the upper bound is enforced — 0/negative keep their existing
+// "default / unbounded" semantics in the handlers that rely on them.
+const maxToolLimit = 200
+
+func clampLimit(n int) int {
+	if n > maxToolLimit {
+		return maxToolLimit
+	}
+	return n
+}
+
 // HandleWhoami finds the caller's Claude Code session by grepping transcripts for a unique salt.
 func (h *Handlers) HandleWhoami(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	salt := req.GetString("salt", "")
@@ -524,7 +537,7 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 	project := resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	unreadOnly := req.GetBool("unread_only", true)
-	limit := req.GetInt("limit", 10)
+	limit := clampLimit(req.GetInt("limit", 10))
 	fullContent := req.GetBool("full_content", false)
 	budgetMode := req.GetBool("apply_budget", false)
 
@@ -914,7 +927,7 @@ func (h *Handlers) HandleGetConversationMessages(ctx context.Context, req mcp.Ca
 	if convID == "" {
 		return mcp.NewToolResultError("conversation_id is required"), nil
 	}
-	limit := req.GetInt("limit", 50)
+	limit := clampLimit(req.GetInt("limit", 50))
 
 	// Verify membership
 	isMember, err := h.db.IsConversationMember(convID, agent)
@@ -1264,7 +1277,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 	}
 	scope := req.GetString("scope", "")
 	tags := req.GetStringSlice("tags", nil)
-	limit := req.GetInt("limit", 20)
+	limit := clampLimit(req.GetInt("limit", 20))
 
 	memories, err := h.db.SearchMemory(project, agent, query, tags, scope, limit)
 	if err != nil {
@@ -1307,7 +1320,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 	scope := req.GetString("scope", "")
 	agentFilter := req.GetString("agent", "")
 	tags := req.GetStringSlice("tags", nil)
-	limit := req.GetInt("limit", 50)
+	limit := clampLimit(req.GetInt("limit", 50))
 
 	// Bug fix: scope=agent must be filtered by the calling agent to prevent leaking
 	// other agents' private memories. If no explicit agent filter, use the caller's identity.
@@ -2064,7 +2077,7 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 	priority := req.GetString("priority", "")
 	assignedTo := req.GetString("assigned_to", "")
 	boardID := req.GetString("board_id", "")
-	limit := req.GetInt("limit", 50)
+	limit := clampLimit(req.GetInt("limit", 50))
 	includeArchived := req.GetBool("include_archived", false)
 
 	tasks, err := h.db.ListTasks(project, status, profile, priority, assignedTo, boardID, limit, includeArchived)
@@ -2725,7 +2738,7 @@ func (h *Handlers) HandleQueryContext(ctx context.Context, req mcp.CallToolReque
 	if query == "" {
 		return mcp.NewToolResultError("query is required"), nil
 	}
-	limit := req.GetInt("limit", 10)
+	limit := clampLimit(req.GetInt("limit", 10))
 
 	// Source 1: memories via FTS5
 	memories, err := h.db.SearchMemory(project, agent, query, nil, "", limit)
@@ -2948,7 +2961,7 @@ func (h *Handlers) HandleRemoveTeamMember(ctx context.Context, req mcp.CallToolR
 func (h *Handlers) HandleGetTeamInbox(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := resolveProject(ctx, req)
 	teamSlug := req.GetString("team", "")
-	limit := req.GetInt("limit", 50)
+	limit := clampLimit(req.GetInt("limit", 50))
 
 	if teamSlug == "" {
 		return mcp.NewToolResultError("team is required"), nil
