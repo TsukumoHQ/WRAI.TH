@@ -81,7 +81,7 @@ export function initBoard(root, ctx) {
         if (!childrenOf.has(t.parent_task_id)) childrenOf.set(t.parent_task_id, []);
         childrenOf.get(t.parent_task_id).push(t);
       }
-      const a = t.assigned_to || t.claimed_by;
+      const a = taskAgent(t); // assigned_to | assignee (Linear) | claimed_by
       if (a && isActiveStatus(t.status)) activeByAgent.set(a, (activeByAgent.get(a) || 0) + 1);
     }
   }
@@ -158,8 +158,9 @@ export function initBoard(root, ctx) {
   // the current cycle aren't loaded → treated as resolved here (the server-side
   // gate stays authoritative).
   const depBlockers = (t) => parseDeps(t).map((id) => byId.get(id)).filter((d) => d && d.status !== 'done' && d.status !== 'cancelled');
-  // Known agent names across the loaded board — used for the reassign datalist.
-  const agentNames = () => [...new Set(tasks.flatMap((t) => [t.assigned_to, t.claimed_by].filter(Boolean)))].sort();
+  // Known agent names across the loaded board (incl. Linear assignees) — feeds
+  // the agent filter, the by-agent grouping, and the reassign datalist.
+  const agentNames = () => [...new Set(tasks.map(taskAgent).filter(Boolean))].sort();
 
   /* ---------------- render ---------------- */
   function render() {
