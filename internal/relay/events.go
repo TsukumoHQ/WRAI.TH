@@ -83,15 +83,22 @@ func (b *EventBus) Emit(evt MCPEvent) {
 	if len(b.history) > eventHistorySize {
 		b.history = b.history[len(b.history)-eventHistorySize:]
 	}
-	subs := b.subs
 	b.mu.Unlock()
 
-	for ch := range subs {
+	// Fan out under the read lock. Holding RLock for the whole loop is what makes
+	// this safe: iterating b.subs is synchronized against Subscribe/Unsubscribe
+	// (which take the full Lock), so we cannot hit "concurrent map iteration and
+	// map write", and Unsubscribe cannot close(ch) mid-send (it blocks on Lock
+	// until we release RLock). Sends are non-blocking, so holding RLock can't
+	// deadlock and slow subscribers are dropped via the default case.
+	b.mu.RLock()
+	for ch := range b.subs {
 		select {
 		case ch <- evt:
 		default: // drop if slow
 		}
 	}
+	b.mu.RUnlock()
 }
 
 // Recent returns up to limit most-recent events (newest first) optionally
