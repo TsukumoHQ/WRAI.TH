@@ -96,12 +96,15 @@ jobs:
         run: |
           VERSION="${GITHUB_REF_NAME}"
 
-          # Create release if it doesn't exist, then upload assets
-          gh release create "$VERSION" \
-            --title "$VERSION" \
-            --generate-notes \
-            --latest \
-            2>/dev/null || true
+          # Create the release only if it doesn't already exist (idempotent on
+          # re-run). Don't blanket-swallow errors — a real failure (auth, rate
+          # limit) should surface instead of silently continuing.
+          if ! gh release view "$VERSION" >/dev/null 2>&1; then
+            gh release create "$VERSION" \
+              --title "$VERSION" \
+              --generate-notes \
+              --latest
+          fi
 
           gh release upload "$VERSION" \
             artifacts/agent-relay-*.tar.gz \

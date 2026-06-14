@@ -19,5 +19,7 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@v7
         with:
-          version: latest
+          # Pinned for reproducible lint — a floating "latest" can turn main red
+          # with no code change when a new golangci release lands.
+          version: v2.12.2
           args: --timeout=5m
