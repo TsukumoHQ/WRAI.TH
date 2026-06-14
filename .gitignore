@@ -30,3 +30,6 @@ test.txt
 *.tmp
 *.log
 /tmp/
+
+# Research paper (kept local, under revision)
+/notebooks/
