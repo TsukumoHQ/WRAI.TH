@@ -43,7 +43,25 @@ type Task struct {
 	InReviewAt     *string `json:"in_review_at,omitempty"`
 	DoneAt         *string `json:"done_at,omitempty"`
 
+	// --- Command layer (orchestrator-owned) ---
+	DependsOn string `json:"depends_on"` // json array of task IDs this task waits on
+
 	Subtasks []Task `json:"subtasks,omitempty"`
+}
+
+// AuditEntry is one logged orchestrator/agent action against a resource — the
+// "why" trail behind every consequential move on the board.
+type AuditEntry struct {
+	ID           string `json:"id"`
+	Project      string `json:"project"`
+	Actor        string `json:"actor"`         // who did it ("user" for the orchestrator)
+	Action       string `json:"action"`        // transition | force_transition | set_dependencies | reassign
+	ResourceType string `json:"resource_type"` // "task"
+	ResourceID   string `json:"resource_id"`
+	Summary      string `json:"summary"`           // one-line human description
+	Details      string `json:"details,omitempty"` // optional json blob (old/new)
+	Reason       string `json:"reason,omitempty"`
+	CreatedAt    string `json:"created_at"`
 }
 
 type Board struct {

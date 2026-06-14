@@ -408,6 +408,9 @@ func migrate(conn *sql.DB) error {
 		"blocked_periods": "TEXT NOT NULL DEFAULT '[]'", // json array of {start,end} (blocked_at[])
 		"in_review_at":    "TEXT",
 		"done_at":         "TEXT",
+
+		// --- Command layer (orchestrator-owned) ---
+		"depends_on": "TEXT NOT NULL DEFAULT '[]'", // json array of task IDs this task waits on
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
@@ -428,6 +431,22 @@ func migrate(conn *sql.DB) error {
 		created_at TEXT NOT NULL
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_task_progress_notes_task ON task_progress_notes(task_id, created_at)`)
+
+	// Audit log — the "why" trail behind orchestrator/agent actions on the board.
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS audit_log (
+		id            TEXT PRIMARY KEY,
+		project       TEXT NOT NULL DEFAULT 'default',
+		actor         TEXT NOT NULL,
+		action        TEXT NOT NULL,
+		resource_type TEXT NOT NULL DEFAULT 'task',
+		resource_id   TEXT NOT NULL,
+		summary       TEXT NOT NULL DEFAULT '',
+		details       TEXT NOT NULL DEFAULT '',
+		reason        TEXT NOT NULL DEFAULT '',
+		created_at    TEXT NOT NULL
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_log(project, resource_id, created_at)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project, created_at)`)
 
 	// Linear connector sync log (capped audit trail of write-back outcomes).
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS linear_sync_log (

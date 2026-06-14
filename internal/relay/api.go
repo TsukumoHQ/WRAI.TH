@@ -18,7 +18,11 @@ import (
 // apiError logs the full error server-side and returns a safe message to the client.
 func apiError(w http.ResponseWriter, status int, msg string, err error) {
 	log.Printf("API error: %s: %v", msg, err)
-	b, _ := json.Marshal(map[string]string{"error": msg})
+	payload := map[string]string{"error": msg}
+	if err != nil {
+		payload["detail"] = err.Error() // surfaced to the same-origin dashboard
+	}
+	b, _ := json.Marshal(payload)
 	http.Error(w, string(b), status)
 }
 
@@ -106,8 +110,14 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiDispatchTask(w, req)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/transition") && req.Method == http.MethodPost:
 		r.apiTransitionTask(w, req, path)
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/dependencies") && req.Method == http.MethodPost:
+		r.apiSetTaskDependencies(w, req, path)
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/reassign") && req.Method == http.MethodPost:
+		r.apiReassignTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/progress") && req.Method == http.MethodGet:
 		r.apiGetTaskProgress(w, req, path)
+	case path == "/audit" && req.Method == http.MethodGet:
+		r.apiGetAudit(w, req)
 	case strings.HasPrefix(path, "/tasks/") && req.Method == http.MethodPut:
 		r.apiUpdateTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && req.Method == http.MethodDelete:
@@ -1226,6 +1236,7 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		Agent   string  `json:"agent"`
 		Result  *string `json:"result,omitempty"`
 		Reason  *string `json:"reason,omitempty"`
+		Force   bool    `json:"force,omitempty"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -1240,6 +1251,17 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 	}
 	if body.Agent == "" {
 		body.Agent = "user"
+	}
+	// A forced move bypasses the state machine + dependency gate — the DB grants
+	// that only to the "user" actor.
+	if body.Force {
+		body.Agent = "user"
+	}
+
+	// Capture the prior status for the audit trail before the move.
+	var fromStatus string
+	if prev, perr := r.DB.GetTask(taskID, body.Project); perr == nil && prev != nil {
+		fromStatus = prev.Status
 	}
 
 	var task *models.Task
@@ -1268,6 +1290,25 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		return
 	}
 
+	// Audit the move (best-effort). A forced move is flagged distinctly.
+	action := "transition"
+	if body.Force {
+		action = "force_transition"
+	}
+	reason := ""
+	if body.Reason != nil {
+		reason = *body.Reason
+	}
+	_ = r.DB.RecordAudit(models.AuditEntry{
+		Project:      body.Project,
+		Actor:        body.Agent,
+		Action:       action,
+		ResourceType: "task",
+		ResourceID:   taskID,
+		Summary:      fmt.Sprintf("%s → %s", orDash(fromStatus), body.Status),
+		Reason:       reason,
+	})
+
 	// Emit the matching semantic event so notification rules fire for web-UI
 	// driven transitions too (the MCP handlers emit their own).
 	if evType, line := semanticForStatus(body.Status, task.Title); evType != "" {
@@ -1285,6 +1326,111 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 	}
 
 	writeJSON(w, task)
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "—"
+	}
+	return s
+}
+
+// apiSetTaskDependencies replaces a task's dependency list. Path: /tasks/{id}/dependencies
+func (r *Relay) apiSetTaskDependencies(w http.ResponseWriter, req *http.Request, path string) {
+	trimmed := strings.TrimPrefix(path, "/tasks/")
+	taskID, _, _ := strings.Cut(trimmed, "/")
+	if taskID == "" {
+		http.Error(w, `{"error":"missing task id"}`, http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Project   string   `json:"project"`
+		DependsOn []string `json:"depends_on"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	task, err := r.DB.SetTaskDependencies(taskID, body.Project, body.DependsOn)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "failed to set dependencies", err)
+		return
+	}
+	_ = r.DB.RecordAudit(models.AuditEntry{
+		Project:      body.Project,
+		Actor:        "user",
+		Action:       "set_dependencies",
+		ResourceType: "task",
+		ResourceID:   taskID,
+		Summary:      fmt.Sprintf("set %d dependenc%s", len(body.DependsOn), pluralize(len(body.DependsOn), "y", "ies")),
+		Details:      task.DependsOn,
+	})
+	writeJSON(w, task)
+}
+
+// apiReassignTask hands a task to a different agent. Path: /tasks/{id}/reassign
+func (r *Relay) apiReassignTask(w http.ResponseWriter, req *http.Request, path string) {
+	trimmed := strings.TrimPrefix(path, "/tasks/")
+	taskID, _, _ := strings.Cut(trimmed, "/")
+	if taskID == "" {
+		http.Error(w, `{"error":"missing task id"}`, http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Project string `json:"project"`
+		Agent   string `json:"agent"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	prev := ""
+	if cur, perr := r.DB.GetTask(taskID, body.Project); perr == nil && cur != nil && cur.AssignedTo != nil {
+		prev = *cur.AssignedTo
+	}
+	task, err := r.DB.ReassignTask(taskID, body.Project, body.Agent)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "failed to reassign task", err)
+		return
+	}
+	_ = r.DB.RecordAudit(models.AuditEntry{
+		Project:      body.Project,
+		Actor:        "user",
+		Action:       "reassign",
+		ResourceType: "task",
+		ResourceID:   taskID,
+		Summary:      fmt.Sprintf("%s → %s", orDash(prev), body.Agent),
+	})
+	writeJSON(w, task)
+}
+
+// apiGetAudit returns the audit trail for a project, optionally scoped to one task.
+func (r *Relay) apiGetAudit(w http.ResponseWriter, req *http.Request) {
+	project := projectFromRequest(req)
+	resource := req.URL.Query().Get("resource")
+	limit := 0
+	if l := req.URL.Query().Get("limit"); l != "" {
+		fmt.Sscanf(l, "%d", &limit)
+	}
+	entries, err := r.DB.ListAudit(project, resource, limit)
+	if err != nil {
+		http.Error(w, `{"error":"failed to list audit"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, entries)
+}
+
+func pluralize(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
 
 // semanticForStatus maps a kanban status to its semantic event type + line.

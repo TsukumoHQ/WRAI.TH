@@ -87,6 +87,13 @@ export function initBoard(root, ctx) {
     if (!kids.length) return null;
     return { done: kids.filter((k) => k.status === 'done').length, total: kids.length };
   };
+  const parseDeps = (t) => { try { const a = JSON.parse(t.depends_on || '[]'); return Array.isArray(a) ? a : []; } catch (_) { return []; } };
+  // Unresolved dependencies, resolved against the loaded board set. Tasks outside
+  // the current cycle aren't loaded → treated as resolved here (the server-side
+  // gate stays authoritative).
+  const depBlockers = (t) => parseDeps(t).map((id) => byId.get(id)).filter((d) => d && d.status !== 'done' && d.status !== 'cancelled');
+  // Known agent names across the loaded board — used for the reassign datalist.
+  const agentNames = () => [...new Set(tasks.flatMap((t) => [t.assigned_to, t.claimed_by].filter(Boolean)))].sort();
 
   /* ---------------- render ---------------- */
   function render() {
@@ -135,6 +142,7 @@ export function initBoard(root, ctx) {
       <div class="kcard-meta">
         ${labels.map((l) => `<span class="lchip">${esc(l)}</span>`).join('')}
         ${roll ? `<span class="rollup" title="${roll.done}/${roll.total} children done">▣ ${roll.done}/${roll.total}</span>` : ''}
+        ${(() => { const b = depBlockers(t); return b.length ? `<span class="dep-chip" title="waiting on ${b.length} unfinished task${b.length === 1 ? '' : 's'}">⛓ ${b.length}</span>` : ''; })()}
         ${inReview ? `<span class="review-timer" data-since="${esc(t.in_review_at)}">in review ${fmtAgo(t.in_review_at)}</span>` : ''}
         ${blocked ? `<span class="blocked-badge" title="${esc(t.blocked_reason || 'blocked')}"><span class="blk-dot"></span>blocked</span>` : ''}
       </div>
@@ -354,6 +362,12 @@ export function initBoard(root, ctx) {
   }
 
   /* ---------------- detail slide-over ---------------- */
+  const STATUSES = [
+    { v: 'pending', l: 'pending' }, { v: 'accepted', l: 'accepted' },
+    { v: 'in-progress', l: 'in-progress' }, { v: 'in-review', l: 'in-review' },
+    { v: 'blocked', l: 'blocked' }, { v: 'done', l: 'done' }, { v: 'cancelled', l: 'cancelled' },
+  ];
+
   async function openDetail(t) {
     const node = document.createElement('div');
     node.className = 'sheet-inner';
@@ -367,6 +381,89 @@ export function initBoard(root, ctx) {
         ? notes.slice().reverse().map((n) => `<div class="note"><div class="note-head"><span class="kc-avatar sm" style="background:${colorFor(n.agent)}">${esc(initialFor(n.agent))}</span><span>${esc(n.agent)}</span><span class="note-ts">${fmtAgo(n.created_at)} ago</span></div><div class="note-body">${esc(n.note)}</div></div>`).join('')
         : '<div class="empty">No progress notes</div>';
     } catch (_) { notesEl.innerHTML = '<div class="empty">Could not load notes</div>'; }
+    if (canEdit && t.source !== 'linear') {
+      wireCommand(node, t);
+      loadAudit(node, t);
+    }
+  }
+
+  // The orchestrator command panel: dependencies, reassign, force status.
+  function commandSection(t) {
+    const deps = parseDeps(t);
+    const depRows = deps.length ? deps.map((id) => {
+      const d = byId.get(id);
+      const done = d && (d.status === 'done' || d.status === 'cancelled');
+      const title = d ? (d.title || id.slice(0, 8)) : id.slice(0, 8);
+      return `<li class="dep-row"><span class="dep-stat ${done ? 'ok' : 'open'}" aria-hidden="true"></span><span class="dep-name">${esc(title)}</span><button class="dep-del" data-dep="${esc(id)}" aria-label="Remove dependency ${esc(title)}">✕</button></li>`;
+    }).join('') : '<li class="dep-empty">no dependencies</li>';
+    const cand = tasks.filter((o) => o.id !== t.id && !deps.includes(o.id))
+      .map((o) => `<option value="${esc(o.id)}">${esc(o.title || o.id.slice(0, 8))}</option>`).join('');
+    const agents = agentNames().map((a) => `<option value="${esc(a)}"></option>`).join('');
+    const statusOpts = STATUSES.map((s) => `<option value="${s.v}"${s.v === t.status ? ' selected' : ''}>${s.l}</option>`).join('');
+    return `<div class="sheet-section command">
+        <div class="sheet-label">command</div>
+        <div class="cmd-block">
+          <div class="cmd-h">dependencies</div>
+          <ul class="dep-list">${depRows}</ul>
+          <select class="cmd-input dep-pick" aria-label="Add a dependency"><option value="">+ add dependency…</option>${cand}</select>
+        </div>
+        <div class="cmd-block">
+          <div class="cmd-h">reassign</div>
+          <div class="cmd-row">
+            <input class="cmd-input reassign-input" list="cmdAgentList" placeholder="agent name" aria-label="Reassign to agent" />
+            <datalist id="cmdAgentList">${agents}</datalist>
+            <button class="cmd-btn reassign-btn" type="button">assign</button>
+          </div>
+        </div>
+        <div class="cmd-block">
+          <div class="cmd-h">force status</div>
+          <div class="cmd-row">
+            <select class="cmd-input force-status" aria-label="Force status">${statusOpts}</select>
+            <button class="cmd-btn force-btn" type="button">force</button>
+          </div>
+          <input class="cmd-input force-reason" placeholder="reason (optional)" aria-label="Reason for forcing status" />
+        </div>
+        <div class="cmd-msg" aria-live="polite"></div>
+      </div>`;
+  }
+
+  function wireCommand(node, t) {
+    const project = t.project || selection();
+    const msg = node.querySelector('.cmd-msg');
+    const ok = (s) => { msg.textContent = s; msg.dataset.kind = 'ok'; };
+    const fail = (e) => { msg.textContent = e.message || String(e); msg.dataset.kind = 'err'; };
+    const refresh = async (apply) => {
+      try { await apply(); ok('saved'); await load(false); const nt = byId.get(t.id); if (nt) openDetail(nt); }
+      catch (e) { fail(e); }
+    };
+    const deps = parseDeps(t);
+    node.querySelector('.dep-pick')?.addEventListener('change', (e) => {
+      const id = e.target.value;
+      if (id) refresh(() => ctx.api.setDependencies(t.id, project, [...deps, id]));
+    });
+    node.querySelectorAll('.dep-del').forEach((b) => b.addEventListener('click', () => {
+      refresh(() => ctx.api.setDependencies(t.id, project, deps.filter((d) => d !== b.dataset.dep)));
+    }));
+    node.querySelector('.reassign-btn')?.addEventListener('click', () => {
+      const agent = node.querySelector('.reassign-input').value.trim();
+      if (agent) refresh(() => ctx.api.reassign(t.id, project, agent));
+    });
+    node.querySelector('.force-btn')?.addEventListener('click', () => {
+      const status = node.querySelector('.force-status').value;
+      const reason = node.querySelector('.force-reason').value.trim() || undefined;
+      if (status && status !== t.status) refresh(() => ctx.api.transition(t.id, { project, status, reason, force: true }));
+    });
+  }
+
+  async function loadAudit(node, t) {
+    const el = node.querySelector('.sheet-audit');
+    if (!el) return;
+    try {
+      const rows = await ctx.api.audit(t.project || selection(), t.id, 30);
+      el.innerHTML = Array.isArray(rows) && rows.length
+        ? rows.map((a) => `<div class="audit-row"><span class="audit-act">${esc(a.action.replace(/_/g, ' '))}</span><span class="audit-sum">${esc(a.summary || '')}</span>${a.reason ? `<span class="audit-reason">${esc(a.reason)}</span>` : ''}<span class="audit-ts">${fmtAgo(a.created_at)} ago</span></div>`).join('')
+        : '<div class="empty">No actions logged yet</div>';
+    } catch (_) { el.innerHTML = '<div class="empty">Could not load audit</div>'; }
   }
 
   function detailShell(t) {
@@ -390,7 +487,9 @@ export function initBoard(root, ctx) {
       ${t.blocked_reason ? `<div class="sheet-blocked"><span class="blk-dot"></span>${esc(t.blocked_reason)}</div>` : ''}
       <div class="sheet-section"><div class="sheet-label">timeline</div><ol class="trail">${trail}</ol></div>
       ${t.description ? `<div class="sheet-section"><div class="sheet-label">description</div><div class="sheet-desc">${esc(t.description).slice(0, 4000)}</div></div>` : ''}
-      <div class="sheet-section"><div class="sheet-label">progress notes</div><div class="sheet-notes"><div class="skel" style="height:14px;width:60%"></div></div></div>`;
+      ${canEdit && t.source !== 'linear' ? commandSection(t) : ''}
+      <div class="sheet-section"><div class="sheet-label">progress notes</div><div class="sheet-notes"><div class="skel" style="height:14px;width:60%"></div></div></div>
+      ${canEdit && t.source !== 'linear' ? '<div class="sheet-section"><div class="sheet-label">audit</div><div class="sheet-audit"><div class="skel" style="height:14px;width:50%"></div></div></div>' : ''}`;
   }
 
   function buildTrail(t) {

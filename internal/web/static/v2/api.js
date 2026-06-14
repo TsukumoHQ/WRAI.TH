@@ -13,9 +13,9 @@ async function sendJSON(method, url, body) {
     body: body == null ? undefined : JSON.stringify(body),
   });
   if (!res.ok) {
-    let detail = '';
-    try { detail = (await res.json()).error || ''; } catch (_) { /* ignore */ }
-    throw new Error(detail || `${res.status} ${url}`);
+    let msg = '';
+    try { const j = await res.json(); msg = j.detail || j.error || ''; } catch (_) { /* ignore */ }
+    throw new Error(msg || `${res.status} ${url}`);
   }
   return res.status === 204 ? null : res.json();
 }
@@ -43,6 +43,12 @@ export const api = {
   // mutations (native projects only)
   transition: (id, body) =>
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/transition`, body),
+  setDependencies: (id, project, dependsOn) =>
+    sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/dependencies`, { project, depends_on: dependsOn }),
+  reassign: (id, project, agent) =>
+    sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/reassign`, { project, agent }),
+  audit: (project, resource, limit = 50) =>
+    getJSON(`/api/audit?${q({ project, resource, limit })}`),
   setAgentAvatar: (project, name, url) =>
     sendJSON('PUT', '/api/agents/avatar', { project, name, url }),
   dispatchTask: (body) => sendJSON('POST', '/api/tasks', body),

@@ -2199,6 +2199,38 @@ body.view-galaxy .quest-tracker { display: none !important; }
   color: #fff;
 }
 
+/* v2 cross-link — sends you to the new control room */
+.v2-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 13px;
+  border: 1px solid rgba(108, 92, 231, 0.45);
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.18), rgba(108, 92, 231, 0.06));
+  color: #c4bdff;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-decoration: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.2s, border-color 0.2s, color 0.2s, transform 0.2s;
+}
+.v2-link:hover {
+  background: linear-gradient(135deg, rgba(108, 92, 231, 0.4), rgba(108, 92, 231, 0.18));
+  border-color: #6c5ce7;
+  color: #fff;
+  transform: translateY(-1px);
+}
+.v2-link:focus-visible {
+  outline: 2px solid #a29bfe;
+  outline-offset: 2px;
+}
+.v2-link-arrow { font-size: 12px; line-height: 1; }
+
 /* Help modal */
 .help-modal { position: fixed; inset: 0; z-index: var(--z-modal); display: flex; align-items: center; justify-content: center; }
 .help-modal.hidden { display: none; }

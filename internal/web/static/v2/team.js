@@ -185,7 +185,7 @@ export function initTeam(root, ctx) {
     const save = async (url) => {
       status.textContent = '…';
       try {
-        await api.setAgentAvatar(ctx.selection, a.name, url);
+        await ctx.api.setAgentAvatar(ctx.selection, a.name, url);
         a.avatar_url = url || null;
         renderNodes(); placeNodes();
         status.textContent = url ? 'ok' : 'retiré';
