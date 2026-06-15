@@ -1026,9 +1026,21 @@ func (r *Relay) apiStreamEvents(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // disable proxy (nginx) buffering of the stream
 
 	ch := r.Events.Subscribe()
 	defer r.Events.Unsubscribe(ch)
+
+	// Flush headers + an opening comment immediately so the client's EventSource
+	// fires onopen right away. Without this the headers aren't sent until the
+	// first event, so a quiet project leaves the UI stuck on "connecting".
+	_, _ = fmt.Fprint(w, ": connected\n\n")
+	flusher.Flush()
+
+	// Heartbeat keeps idle connections (and proxies) alive and lets the client
+	// detect a dead stream.
+	ping := time.NewTicker(25 * time.Second)
+	defer ping.Stop()
 
 	for {
 		select {
@@ -1036,6 +1048,9 @@ func (r *Relay) apiStreamEvents(w http.ResponseWriter, req *http.Request) {
 			return
 		case <-r.shutdownCtx.Done():
 			return
+		case <-ping.C:
+			_, _ = fmt.Fprint(w, ": ping\n\n")
+			flusher.Flush()
 		case evt, ok := <-ch:
 			if !ok {
 				return
