@@ -58,7 +58,7 @@ func (d *DB) GetAllRecentMessages(project string, limit int) ([]models.Message, 
 		SELECT id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at
 		FROM messages
 		WHERE project = ?
-		ORDER BY created_at ASC
+		ORDER BY created_at DESC
 		LIMIT ?
 	`
 	return d.queryMessages(query, project, limit)
@@ -108,7 +108,7 @@ func (d *DB) GetAllRecentMessagesAllProjects(limit int) ([]models.Message, error
 	query := `
 		SELECT id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at
 		FROM messages
-		ORDER BY created_at ASC
+		ORDER BY created_at DESC
 		LIMIT ?
 	`
 	return d.queryMessages(query, limit)
