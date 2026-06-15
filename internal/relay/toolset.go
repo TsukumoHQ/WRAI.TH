@@ -60,6 +60,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: claimTaskTool(), Handler: h.HandleClaimTask}, "tasks"},
 		{server.ServerTool{Tool: startTaskTool(), Handler: h.HandleStartTask}, "tasks"},
 		{server.ServerTool{Tool: reviewTaskTool(), Handler: h.HandleReviewTask}, "tasks"},
+		{server.ServerTool{Tool: commentTool(), Handler: h.HandleComment}, "tasks"},
 		{server.ServerTool{Tool: completeTaskTool(), Handler: h.HandleCompleteTask}, "tasks"},
 		{server.ServerTool{Tool: blockTaskTool(), Handler: h.HandleBlockTask}, "tasks"},
 		{server.ServerTool{Tool: resumeTaskTool(), Handler: h.HandleResumeTask}, "tasks"},

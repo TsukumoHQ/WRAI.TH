@@ -60,12 +60,13 @@ func (r *Relay) apiLinearWebhook(w http.ResponseWriter, req *http.Request) {
 	}()
 }
 
-// pushInReviewAsync fires the connector's one owned write-back (→ In Review +
-// comment) for a Linear-sourced task, after the local in_review_at stamp has
-// already succeeded. It is a no-op in native mode (the no-op connector reports
-// Active()==false) or for tasks without a Linear issue id. Best-effort: a failed
-// push never affects the local transition (Linear reconcile is the backstop).
-func pushInReviewAsync(conn connector.TaskConnector, task *models.Task, agent string, comment *string) {
+// pushStatusAsync mirrors a relay status change to the Linear issue (move state +
+// optional comment), after the local transition has already succeeded. No-op in
+// native mode or for tasks without a Linear issue id. Best-effort: a failed push
+// never affects the local transition (Linear reconcile is the backstop). The
+// comment is posted only when a note is supplied, so routine claim/start moves
+// stay quiet in Linear.
+func pushStatusAsync(conn connector.TaskConnector, task *models.Task, status string, note *string) {
 	if conn == nil || !conn.Active() || task == nil {
 		return
 	}
@@ -73,28 +74,30 @@ func pushInReviewAsync(conn connector.TaskConnector, task *models.Task, agent st
 		return
 	}
 	issueID := *task.LinearIssueID
-	body := buildReviewComment(task, agent, comment)
+	comment := ""
+	if note != nil {
+		comment = strings.TrimSpace(*note)
+	}
 	go func() {
-		if err := conn.PushInReview(issueID, body); err != nil {
-			log.Printf("[linear] push in-review %s: %v", issueID, err)
+		if err := conn.PushStatus(issueID, status, comment); err != nil {
+			log.Printf("[linear] push status %s %s: %v", status, issueID, err)
 		}
 	}()
 }
 
-// buildReviewComment composes the Linear comment posted on the In Review
-// write-back: who moved it plus the optional result/PR note the agent attached.
-func buildReviewComment(task *models.Task, agent string, note *string) string {
-	var b strings.Builder
-	b.WriteString("Moved to In Review by ")
-	if agent != "" {
-		b.WriteString(agent)
-	} else {
-		b.WriteString("a relay agent")
+// pushCommentAsync posts a standalone comment to a Linear-sourced task's issue.
+func pushCommentAsync(conn connector.TaskConnector, task *models.Task, body string) {
+	if conn == nil || !conn.Active() || task == nil || strings.TrimSpace(body) == "" {
+		return
 	}
-	b.WriteString(".")
-	if note != nil && strings.TrimSpace(*note) != "" {
-		b.WriteString("\n\n")
-		b.WriteString(strings.TrimSpace(*note))
+	if task.Source != "linear" || task.LinearIssueID == nil || *task.LinearIssueID == "" {
+		return
 	}
-	return b.String()
+	issueID := *task.LinearIssueID
+	go func() {
+		if err := conn.Comment(issueID, body); err != nil {
+			log.Printf("[linear] push comment %s: %v", issueID, err)
+		}
+	}()
 }
+

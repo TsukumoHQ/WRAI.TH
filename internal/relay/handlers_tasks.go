@@ -146,6 +146,7 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
+	pushStatusAsync(h.getConnector(), task, "accepted", nil)
 	return h.resultJSONTracked(project, agent, "claim_task", task)
 }
 
@@ -167,6 +168,7 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "start", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.in_progress", "start", project, task)
+	pushStatusAsync(h.getConnector(), task, "in-progress", nil)
 	return h.resultJSONTracked(project, agent, "start_task", task)
 }
 
@@ -200,6 +202,7 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "resume", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.in_progress", "resume", project, task)
+	pushStatusAsync(h.getConnector(), task, "in-progress", nil)
 
 	return h.resultJSONTracked(project, agent, "resume_task", task)
 }
@@ -226,12 +229,45 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 	// Notify dispatcher — work is up for review.
 	h.registry.Notify(project, task.DispatchedBy, agent, fmt.Sprintf("In review: %s", task.Title), task.ID)
 
-	// Write-back (Linear mode): after the local stamp succeeds, fire-and-forget
-	// the agent's one owned transition (→ In Review + comment). No-op in native.
+	// Write-back (Linear mode): after the local stamp succeeds, move the issue to
+	// In Review + optional comment, fire-and-forget. No-op in native.
 	comment := optionalString(req.GetString("comment", ""))
-	pushInReviewAsync(h.getConnector(), task, agent, comment)
+	pushStatusAsync(h.getConnector(), task, "in-review", comment)
 
 	return h.resultJSONTracked(project, agent, "review_task", task)
+}
+
+// HandleComment posts a comment on a task. On a Linear-mirrored task it goes to
+// the Linear issue (Linear is SSOT); otherwise it is saved as a local progress
+// note so the action still lands somewhere.
+func (h *Handlers) HandleComment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	body := strings.TrimSpace(req.GetString("body", ""))
+	if taskID == "" || body == "" {
+		return mcp.NewToolResultError("task_id and body are required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+	task, err := h.db.GetTask(taskID, project)
+	if err != nil || task == nil {
+		return mcp.NewToolResultError("task not found"), nil
+	}
+
+	conn := h.getConnector()
+	if task.Source == "linear" && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
+		if err := conn.Comment(*task.LinearIssueID, body); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to post comment to Linear: %v", err)), nil
+		}
+		return h.resultJSONTracked(project, agent, "comment", map[string]any{"posted": "linear", "task_id": taskID})
+	}
+	if err := h.db.AddProgressNote(taskID, project, agent, body); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to add note: %v", err)), nil
+	}
+	return h.resultJSONTracked(project, agent, "comment", map[string]any{"posted": "note", "task_id": taskID})
 }
 
 func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -254,6 +290,7 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "complete", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
 	emitTaskEvent(h.events, "task.done", "complete", project, task)
+	pushStatusAsync(h.getConnector(), task, "done", result)
 
 	// Notify dispatcher
 	h.registry.Notify(project, task.DispatchedBy, agent, fmt.Sprintf("Task done: %s", task.Title), task.ID)
@@ -309,6 +346,7 @@ func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest)
 		blockedExtra["reason"] = *reason
 	}
 	emitTaskEvent(h.events, "task.blocked", "block", project, task, blockedExtra)
+	pushStatusAsync(h.getConnector(), task, "blocked", reason)
 
 	// Notify dispatcher — blocked is critical
 	reasonStr := ""
@@ -346,6 +384,7 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to cancel task: %v", err)), nil
 	}
+	pushStatusAsync(h.getConnector(), task, "cancelled", reason)
 
 	// Notify dispatcher
 	reasonStr := ""
