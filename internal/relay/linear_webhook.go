@@ -84,20 +84,3 @@ func pushStatusAsync(conn connector.TaskConnector, task *models.Task, status str
 		}
 	}()
 }
-
-// pushCommentAsync posts a standalone comment to a Linear-sourced task's issue.
-func pushCommentAsync(conn connector.TaskConnector, task *models.Task, body string) {
-	if conn == nil || !conn.Active() || task == nil || strings.TrimSpace(body) == "" {
-		return
-	}
-	if task.Source != "linear" || task.LinearIssueID == nil || *task.LinearIssueID == "" {
-		return
-	}
-	issueID := *task.LinearIssueID
-	go func() {
-		if err := conn.Comment(issueID, body); err != nil {
-			log.Printf("[linear] push comment %s: %v", issueID, err)
-		}
-	}()
-}
-
