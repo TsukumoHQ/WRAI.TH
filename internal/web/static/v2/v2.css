@@ -937,3 +937,24 @@ button { font-family: inherit; }
 /* overload — an agent group holding too many active tasks */
 .col-over .col-head { background: color-mix(in srgb, var(--red) 8%, transparent); }
 .over-flag { color: var(--red); }
+
+/* ============================================================= *
+ *  Task sheet — comment box (→ Linear on mirror tasks, else note)
+ * ============================================================= */
+.cmt-input {
+  width: 100%; resize: vertical; min-height: 52px;
+  background: var(--bg-card); border: 1px solid var(--border); color: var(--text);
+  border-radius: 7px; padding: 8px 10px; font-family: inherit; font-size: 12.5px; line-height: 1.45;
+}
+.cmt-input:focus-visible { outline: none; border-color: var(--accent-dim); }
+.cmt-row { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.cmt-send {
+  background: var(--accent); color: #06120c; border: 0; border-radius: 7px;
+  padding: 7px 14px; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.cmt-send:hover { filter: brightness(1.08); }
+.cmt-send:disabled { opacity: .5; cursor: not-allowed; }
+.cmt-send:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+.cmt-msg { font-size: 11px; }
+.cmt-msg[data-kind="ok"] { color: var(--accent); }
+.cmt-msg[data-kind="err"] { color: var(--red); }

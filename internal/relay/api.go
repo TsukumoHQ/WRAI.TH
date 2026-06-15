@@ -112,6 +112,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiTransitionTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/reassign") && req.Method == http.MethodPost:
 		r.apiReassignTask(w, req, path)
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/comment") && req.Method == http.MethodPost:
+		r.apiTaskComment(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/progress") && req.Method == http.MethodGet:
 		r.apiGetTaskProgress(w, req, path)
 	case path == "/audit" && req.Method == http.MethodGet:
@@ -1342,11 +1344,13 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		r.Events.EmitSemantic(evType, body.Project, body.Agent, payload)
 	}
 
-	// Write-back (Linear mode): a web-driven → In Review fires the one owned
-	// transition + comment, fire-and-forget. No-op in native mode.
-	if body.Status == "in-review" {
-		pushInReviewAsync(r.TaskConn(), task, body.Agent, body.Result)
+	// Write-back (Linear mode): mirror the status change to the Linear issue
+	// (state move + optional comment), fire-and-forget. No-op in native mode.
+	note := body.Result
+	if note == nil {
+		note = body.Reason
 	}
+	pushStatusAsync(r.TaskConn(), task, body.Status, note)
 
 	writeJSON(w, task)
 }
@@ -1395,6 +1399,53 @@ func (r *Relay) apiReassignTask(w http.ResponseWriter, req *http.Request, path s
 		Summary:      fmt.Sprintf("%s → %s", orDash(prev), body.Agent),
 	})
 	writeJSON(w, task)
+}
+
+// apiTaskComment posts a comment on a task. On a Linear-mirrored task it goes to
+// the Linear issue; otherwise it's saved as a local progress note. Path:
+// /tasks/{id}/comment
+func (r *Relay) apiTaskComment(w http.ResponseWriter, req *http.Request, path string) {
+	trimmed := strings.TrimPrefix(path, "/tasks/")
+	taskID, _, _ := strings.Cut(trimmed, "/")
+	if taskID == "" {
+		http.Error(w, `{"error":"missing task id"}`, http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Project string `json:"project"`
+		Body    string `json:"body"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	body.Body = strings.TrimSpace(body.Body)
+	if body.Body == "" {
+		http.Error(w, `{"error":"body is required"}`, http.StatusBadRequest)
+		return
+	}
+	task, err := r.DB.GetTask(taskID, body.Project)
+	if err != nil || task == nil {
+		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
+		return
+	}
+	conn := r.TaskConn()
+	if task.Source == "linear" && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
+		if err := conn.Comment(*task.LinearIssueID, body.Body); err != nil {
+			apiError(w, http.StatusBadGateway, "failed to post comment to Linear", err)
+			return
+		}
+		writeJSON(w, map[string]any{"posted": "linear"})
+		return
+	}
+	if err := r.DB.AddProgressNote(taskID, body.Project, "user", body.Body); err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to add note", err)
+		return
+	}
+	writeJSON(w, map[string]any{"posted": "note"})
 }
 
 // apiGetAudit returns the audit trail for a project, optionally scoped to one task.

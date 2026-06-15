@@ -29,6 +29,13 @@ type TaskConnector interface {
 	// the team's In Review state and post a comment. Bounded retries inside.
 	PushInReview(linearIssueID, comment string) error
 
+	// PushStatus moves the issue to the workflow state matching a relay status and
+	// posts an optional comment — the status write-back for any transition.
+	PushStatus(linearIssueID, status, comment string) error
+
+	// Comment posts a standalone comment to the issue (no state change).
+	Comment(linearIssueID, body string) error
+
 	// ReconcileCycle pulls the active cycle's issues and upserts the mirror,
 	// healing missed webhooks. Returns the number of rows upserted.
 	ReconcileCycle(project string) (upserted int, err error)
@@ -48,6 +55,8 @@ type Noop struct{}
 
 func (Noop) Ingest(_ []byte, _ string) ([]TaskEvent, error) { return nil, nil }
 func (Noop) PushInReview(_ string, _ string) error          { return nil }
+func (Noop) PushStatus(_, _, _ string) error                { return nil }
+func (Noop) Comment(_, _ string) error                      { return nil }
 func (Noop) ReconcileCycle(_ string) (int, error)           { return 0, nil }
 func (Noop) Active() bool                                   { return false }
 

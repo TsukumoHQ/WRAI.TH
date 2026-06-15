@@ -56,6 +56,8 @@ export const api = {
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/transition`, body),
   reassign: (id, project, agent) =>
     sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/reassign`, { project, agent }),
+  comment: (id, project, body) =>
+    sendJSON('POST', `/api/tasks/${encodeURIComponent(id)}/comment`, { project, body }),
   audit: (project, resource, limit = 50) =>
     getJSON(`/api/audit?${q({ project, resource, limit })}`),
   setAgentAvatar: (project, name, url) =>

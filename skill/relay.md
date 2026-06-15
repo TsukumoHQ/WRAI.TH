@@ -164,4 +164,4 @@ The relay auto-normalizes JSON keys to snake_case on ingestion, but agents shoul
 
 ## Reference
 
-See `skill/tools-reference.md` for the full 58 MCP tools list.
+See `skill/tools-reference.md` for the full 59 MCP tools list.

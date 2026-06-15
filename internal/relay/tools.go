@@ -375,6 +375,17 @@ func startTaskTool() mcp.Tool {
 	)
 }
 
+func commentTool() mcp.Tool {
+	return mcp.NewTool(
+		"comment",
+		mcp.WithDescription("Comment on a task. On a Linear-mirrored task the comment is posted to the Linear issue (Linear is the source of truth); otherwise it is saved as a local progress note."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+		mcp.WithString("body", mcp.Description("Comment text"), mcp.Required()),
+	)
+}
+
 func reviewTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"review_task",

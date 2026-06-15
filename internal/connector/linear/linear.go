@@ -5,6 +5,7 @@ package linear
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -30,6 +31,7 @@ type Connector struct {
 	viewerID    string               // the API key's own user id (anti-loop)
 	reviewState string               // cached "In Review" state id
 	states      map[string]stateInfo // team workflow states by id (cache)
+	stateList   []stateInfo          // same states in workflow order (for outbound resolution)
 
 	lastWebhookAt   atomic.Int64 // unix ms
 	lastReconcileAt atomic.Int64 // unix ms
@@ -147,6 +149,10 @@ func looksLikeReview(name string) bool {
 	return strings.Contains(strings.ToLower(name), "review")
 }
 
+func looksLikeBlocked(name string) bool {
+	return strings.Contains(strings.ToLower(name), "block")
+}
+
 // Warmup fetches the viewer id (anti-loop) and the team's workflow states. It is
 // best-effort: failures are logged and retried lazily on first use. Safe to call
 // from a startup goroutine.
@@ -214,6 +220,7 @@ func (c *Connector) ensureReviewState(ctx context.Context) (string, error) {
 	}
 	c.mu.Lock()
 	c.states = byID
+	c.stateList = states
 	if chosen != "" {
 		c.reviewState = chosen
 	}
@@ -222,6 +229,29 @@ func (c *Connector) ensureReviewState(ctx context.Context) (string, error) {
 		return "", errNoReviewState
 	}
 	return chosen, nil
+}
+
+// statesList returns the team's workflow states in order, fetching+caching on
+// first use. Tolerates a team with no "In Review" state (the states are still
+// cached for outbound resolution).
+func (c *Connector) statesList(ctx context.Context) ([]stateInfo, error) {
+	c.mu.RLock()
+	list := c.stateList
+	c.mu.RUnlock()
+	if len(list) > 0 {
+		return list, nil
+	}
+	// ensureReviewState populates c.stateList even when no review state exists.
+	if _, err := c.ensureReviewState(ctx); err != nil && err != errNoReviewState {
+		return nil, err
+	}
+	c.mu.RLock()
+	list = c.stateList
+	c.mu.RUnlock()
+	if len(list) == 0 {
+		return nil, fmt.Errorf("no team workflow states")
+	}
+	return list, nil
 }
 
 // Status returns a small health snapshot for /api/health.
