@@ -199,7 +199,9 @@ export function initBoard(root, ctx) {
     const pr = priorityRank(t.priority);
     const stale = staleness(t);
     // Drag only makes sense in status mode (drop maps a column → a status).
-    const draggable = canEdit && t.source !== 'linear' && groupBy === 'status';
+    // Status-mode drag: native tasks on writable projects, and mirror tasks
+    // (the status move round-trips to Linear). Not in the all-projects view.
+    const draggable = groupBy === 'status' && selection() !== 'all' && (t.source === 'linear' || canEdit);
     // Outside status mode, show a status pill so the card stays legible.
     const statusTag = groupBy !== 'status' ? `<span class="kcard-status s-${esc(col)}">${esc((COLUMNS.find((c) => c.key === col) || {}).label || t.status)}</span>` : '';
     const projTag = (selection() === 'all' && t.project) ? `<span class="kcard-proj">${esc(t.project)}</span>` : '';
@@ -398,7 +400,8 @@ export function initBoard(root, ctx) {
   function openCard(id) {
     const t = byId.get(id);
     if (!t) return;
-    if (t.source === 'linear' && t.external_url) { window.open(t.external_url, '_blank', 'noopener'); return; }
+    // Mirror tasks open the detail sheet too (status change + comment → Linear);
+    // the sheet keeps an "open in Linear ↗" link.
     openDetail(t);
   }
 
@@ -494,6 +497,7 @@ export function initBoard(root, ctx) {
     node.innerHTML = detailShell(t);
     node.querySelector('.sheet-close').addEventListener('click', ctx.closeSheet);
     ctx.openSheet(node);
+    wireComment(node, t);
     const notesEl = node.querySelector('.sheet-notes');
     try {
       const notes = await ctx.api.progress(t.id, t.project || selection());
@@ -564,6 +568,26 @@ export function initBoard(root, ctx) {
     } catch (_) { el.innerHTML = '<div class="empty">Could not load audit</div>'; }
   }
 
+  // Comment box → Linear comment on a mirror task, else a local progress note.
+  function wireComment(node, t) {
+    const send = node.querySelector('.cmt-send');
+    const input = node.querySelector('.cmt-input');
+    const msg = node.querySelector('.cmt-msg');
+    if (!send || !input) return;
+    send.addEventListener('click', async () => {
+      const body = input.value.trim();
+      if (!body) return;
+      send.disabled = true;
+      try {
+        const r = await ctx.api.comment(t.id, t.project || selection(), body);
+        input.value = '';
+        if (r && r.posted === 'linear') { msg.textContent = 'posted to Linear'; msg.dataset.kind = 'ok'; }
+        else { openDetail(t); } // native note added — refresh the sheet to show it
+      } catch (e) { msg.textContent = e.message || 'failed'; msg.dataset.kind = 'err'; }
+      finally { send.disabled = false; }
+    });
+  }
+
   function detailShell(t) {
     const col = columnFor(t);
     const cdef = COLUMNS.find((c) => c.key === col) || {};
@@ -586,6 +610,11 @@ export function initBoard(root, ctx) {
       <div class="sheet-section"><div class="sheet-label">timeline</div><ol class="trail">${trail}</ol></div>
       ${t.description ? `<div class="sheet-section"><div class="sheet-label">description</div><div class="sheet-desc">${esc(t.description).slice(0, 4000)}</div></div>` : ''}
       ${canEdit && t.source !== 'linear' ? commandSection(t) : ''}
+      <div class="sheet-section">
+        <div class="sheet-label">${t.source === 'linear' ? 'comment → linear' : 'comment'}</div>
+        <textarea class="cmt-input" rows="2" placeholder="${t.source === 'linear' ? 'post a comment to the Linear issue…' : 'add a progress note…'}" aria-label="Comment"></textarea>
+        <div class="cmt-row"><button class="cmt-send" type="button">${t.source === 'linear' ? 'post to Linear' : 'add note'}</button><span class="cmt-msg" aria-live="polite"></span></div>
+      </div>
       <div class="sheet-section"><div class="sheet-label">progress notes</div><div class="sheet-notes"><div class="skel" style="height:14px;width:60%"></div></div></div>
       ${canEdit && t.source !== 'linear' ? '<div class="sheet-section"><div class="sheet-label">audit</div><div class="sheet-audit"><div class="skel" style="height:14px;width:50%"></div></div></div>' : ''}`;
   }
