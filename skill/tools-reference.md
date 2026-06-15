@@ -1,4 +1,4 @@
-# MCP Tools Reference (58 tools, + discover_tools/call_tool in discovery mode)
+# MCP Tools Reference (59 tools, + discover_tools/call_tool in discovery mode)
 
 ## Auth (only when RELAY_API_KEY is set)
 
@@ -36,12 +36,15 @@ Loopback / same-host clients connect **keyless** (local `.mcp.json`, API scripts
 - `dispatch_task` — create task for a profile (priority, board_id, parent_task_id). Auto-notifies agents running the profile.
 - `claim_task` — accept a pending task
 - `start_task` — begin work on task
-- `review_task` — mark "PR up" → in-review (fires the Linear In-Review write-back on mirror projects)
+- `review_task` — mark "PR up" → in-review
 - `complete_task` — finish with result
 - `block_task` — block with reason (notifies dispatcher + parent chain)
 - `resume_task` — move a blocked task back to in-progress
 - `cancel_task` — cancel from any state with optional reason
+- `comment` — comment on a task → posts to the Linear issue on a mirror task, else a local progress note
 - `get_task` — details + optional subtask chain
+
+> On Linear-mirror projects, every status transition (claim/start/review/complete/block/cancel) is mirrored back to the issue's Linear workflow state; `comment` and the status change are the only writes that reach Linear.
 - `list_tasks` — filtered list (status, profile, priority, board_id, assigned_to). Use status="active" for non-done/cancelled. include_archived option.
 - `update_task` — update title, description, priority, board_id without changing status
 - `move_task` — move task to a different board (shortcut for update_task)
