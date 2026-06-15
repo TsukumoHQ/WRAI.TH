@@ -105,6 +105,11 @@ flags:
 		os.Exit(1)
 	}
 
+	// 5b. Refresh the shipped skill + activity hooks (best-effort — never fails
+	// the binary update). A binary-only swap would leave the /relay skill and the
+	// ingest hooks stale on the user's machine.
+	refreshSkillAndHooks(latestVersion)
+
 	// 6. Restart service
 	restartService()
 
@@ -349,6 +354,46 @@ func tryDownloadUpdate(binPath, version string) bool {
 // download fetches url to dst with curl (already a dependency of the updater).
 func download(dst, url string) error {
 	return exec.Command("curl", "-fsSL", "-o", dst, url).Run()
+}
+
+// refreshSkillAndHooks pulls the /relay skill docs and the activity-tracking
+// hooks for the just-installed version and writes them to the user's Claude
+// config (same layout as install.sh): skill → ~/.claude/commands/, hooks →
+// ~/.claude/hooks/. Best-effort — a failure here never fails the binary update.
+func refreshSkillAndHooks(version string) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	base := "https://raw.githubusercontent.com/" + repo + "/" + version + "/skill/"
+	fmt.Print("  refreshing skill + hooks... ")
+
+	// Skill docs → ~/.claude/commands/
+	cmdDir := filepath.Join(home, ".claude", "commands")
+	_ = os.MkdirAll(cmdDir, 0o755)
+	skillOK := 0
+	for _, f := range []string{"relay.md", "tools-reference.md"} {
+		if download(filepath.Join(cmdDir, f), base+f) == nil {
+			skillOK++
+		}
+	}
+
+	// Activity hooks → ~/.claude/hooks/ (executable)
+	hooksDir := filepath.Join(home, ".claude", "hooks")
+	_ = os.MkdirAll(hooksDir, 0o755)
+	hooks := []string{
+		"ingest-pre-tool.sh", "ingest-post-tool.sh", "ingest-stop.sh",
+		"ingest-subagent-start.sh", "ingest-subagent-stop.sh",
+	}
+	hookOK := 0
+	for _, h := range hooks {
+		dst := filepath.Join(hooksDir, h)
+		if download(dst, base+"hooks/"+h) == nil {
+			_ = os.Chmod(dst, 0o755)
+			hookOK++
+		}
+	}
+	fmt.Printf("skill %d/2, hooks %d/%d\n", skillOK, hookOK, len(hooks))
 }
 
 // verifyChecksum compares the SHA-256 of file against the entry for name in a

@@ -17,6 +17,17 @@ Tell user to run `/mcp` to reload. Stop here.
 
 **Available?** Proceed below.
 
+### Auth (only if the relay has `RELAY_API_KEY` set)
+
+Local/loopback clients (same host) connect **keyless** — `http://localhost:8090/mcp` and same-host API scripts work as-is. Only **remote** callers (through a reverse proxy / different host) need a token:
+
+```json
+{ "mcpServers": { "agent-relay": { "type": "http", "url": "https://relay.example.com/mcp",
+  "headers": { "Authorization": "Bearer <RELAY_API_KEY>" } } } }
+```
+
+API scripts: add `-H "Authorization: Bearer <RELAY_API_KEY>"`. A `401 {"error":"unauthorized"}` means the key is required (you're not on loopback) and missing/wrong.
+
 ## Identity
 
 1. Infer agent name + project from context, or ask user.
@@ -49,24 +60,18 @@ Re-registering the same name+project is a respawn: it updates `role`/`descriptio
 ### Tasks
 - **`tasks`**: List assigned + dispatched tasks. Use `list_tasks(status: "active")` for non-done/cancelled.
 - **`dispatch <profile> <title> [--priority P0-P3] [--board id] [--parent id]`**: Create task. Auto-notifies agents running that profile.
-- **`claim/start/done/block <task_id> [result|reason]`**: State transitions
-- **`task <id>`**: Details + subtasks + goal chain
-- **`move <task_id> --board <id> --goal <id>`**: `move_task` — move to different board/goal
+- **`claim/start/review/done/block <task_id> [result|reason]`**: State transitions (`review_task` = "PR up" → in-review)
+- **`task <id>`**: Details + subtask chain
+- **`move <task_id> --board <id>`**: `move_task` — move to a different board
 - **`batch-done <tasks_json>`**: `batch_complete_tasks` — complete multiple tasks at once
 - **`batch-dispatch <tasks_json>`**: `batch_dispatch_tasks` — dispatch multiple tasks at once
 - **`list_tasks(include_archived: true)`**: Include archived tasks in results
 
-State machine: `pending → accepted → in-progress → done|blocked|cancelled`. `done` and `cancelled` reachable from any state.
+State machine: `pending → accepted → in-progress → in-review → done|blocked|cancelled`. `done` and `cancelled` reachable from any state; `blocked` resumes via `resume_task`.
 
 ### Project Setup
 - **`create_project(name, [description], [cwd], [interactive])`**: One-command colony setup — generates 8-phase onboarding prompt (analyze codebase, define profiles, spawn workers with boot sequence, plan sprints)
 - Interactive mode pauses at each phase for user approval; auto mode executes everything
-
-### Goals
-- **`create_goal(type, title, [parent_goal_id], [owner_agent])`**: Types: mission, project_goal, agent_goal
-- **`list_goals / get_goal / update_goal / get_goal_cascade`**: Manage goal hierarchy
-
-Goal cascade: Mission → Project Goal → Agent Goal → Task. Agents see the full WHY chain.
 
 ### Teams & Orgs
 - **`teams / create-team / join-team / leave-team / team-inbox`**: Team management
@@ -136,8 +141,8 @@ Link session to agent: pass `session_id` from `whoami` in `register_agent`.
 
 ## Token Efficiency
 
-- **Worker agents should connect with `?tools=discovery`** (`http://localhost:8090/mcp?tools=discovery`): only 2 tools are exposed (~460 tokens of schemas instead of ~11,000). Call `discover_tools(category)` to fetch one category's schemas, then `call_tool(tool: "send_message", args: {...})` to invoke. Categories: session, messaging, conversations, tasks, boards, goals, memory, profiles, agents, teams, locks, projects.
-- **`get_inbox`, `list_tasks`, `list_agents`, `list_memories`, `list_goals` return compact markdown tables by default** (~half the tokens of JSON). Pass `format: "json"` when you need the structured shape.
+- **Worker agents should connect with `?tools=discovery`** (`http://localhost:8090/mcp?tools=discovery`): only 2 tools are exposed (~460 tokens of schemas instead of ~11,000). Call `discover_tools(category)` to fetch one category's schemas, then `call_tool(tool: "send_message", args: {...})` to invoke. Categories: session, messaging, conversations, tasks, boards, memory, profiles, agents, teams, projects.
+- **`get_inbox`, `list_tasks`, `list_agents`, `list_memories` return compact markdown tables by default** (~half the tokens of JSON). Pass `format: "json"` when you need the structured shape.
 - Default connection (no `?tools=`) keeps full schemas for compatibility.
 
 ## Data Conventions
@@ -151,12 +156,12 @@ Link session to agent: pass `session_id` from `whoami` in `register_agent`.
 - Any structured data exchanged between agents
 
 ```
-✅ {"task_id": "abc", "assigned_to": "bot-a", "parent_goal_id": "g1"}
-❌ {"taskId": "abc", "assignedTo": "bot-a", "parentGoalId": "g1"}
+✅ {"task_id": "abc", "assigned_to": "bot-a", "parent_task_id": "t1"}
+❌ {"taskId": "abc", "assignedTo": "bot-a", "parentTaskId": "t1"}
 ```
 
 The relay auto-normalizes JSON keys to snake_case on ingestion, but agents should follow this convention to avoid confusion.
 
 ## Reference
 
-See `skill/tools-reference.md` for the full 65 MCP tools list.
+See `skill/tools-reference.md` for the full 58 MCP tools list.

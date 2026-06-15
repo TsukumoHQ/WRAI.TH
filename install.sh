@@ -588,50 +588,49 @@ install_hooks() {
   local settings_file="$HOME/.claude/settings.json"
   mkdir -p "$hooks_dir"
 
-  # Create PostToolUse hook script
-  cat > "$hooks_dir/ingest-post-tool.sh" <<'HOOK_EOF'
+  # Download all five activity hooks from the repo; inline fallback for the two
+  # core ones so an offline install still gets basic tracking.
+  local hook
+  for hook in ingest-pre-tool ingest-post-tool ingest-stop ingest-subagent-start ingest-subagent-stop; do
+    curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/skill/hooks/${hook}.sh" -o "$hooks_dir/${hook}.sh" 2>/dev/null || true
+    [[ -s "$hooks_dir/${hook}.sh" ]] && chmod +x "$hooks_dir/${hook}.sh"
+  done
+
+  if [[ ! -s "$hooks_dir/ingest-post-tool.sh" ]]; then
+    cat > "$hooks_dir/ingest-post-tool.sh" <<'HOOK_EOF'
 #!/usr/bin/env bash
 command -v jq &>/dev/null || exit 0
-
 EVENTS_DIR="$HOME/.pixel-office/events"
 mkdir -p "$EVENTS_DIR"
-
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
 FILENAME="$EVENTS_DIR/tool-end-$$-$(date +%s).json"
 TMP="$FILENAME.tmp"
-printf '{"type":"tool_end","session_id":"%s","tool":"%s","ts":"%s"}' \
-  "$SESSION_ID" "$TOOL_NAME" "$TS" > "$TMP"
+printf '{"type":"tool_end","session_id":"%s","tool":"%s","ts":"%s"}' "$SESSION_ID" "$TOOL_NAME" "$TS" > "$TMP"
 mv "$TMP" "$FILENAME"
-
 exit 0
 HOOK_EOF
-  chmod +x "$hooks_dir/ingest-post-tool.sh"
-
-  # Create Stop hook script
-  cat > "$hooks_dir/ingest-stop.sh" <<'HOOK_EOF'
+    chmod +x "$hooks_dir/ingest-post-tool.sh"
+  fi
+  if [[ ! -s "$hooks_dir/ingest-stop.sh" ]]; then
+    cat > "$hooks_dir/ingest-stop.sh" <<'HOOK_EOF'
 #!/usr/bin/env bash
 command -v jq &>/dev/null || exit 0
-
 EVENTS_DIR="$HOME/.pixel-office/events"
 mkdir -p "$EVENTS_DIR"
-
 INPUT=$(cat)
 SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
 FILENAME="$EVENTS_DIR/stop-$$-$(date +%s).json"
 TMP="$FILENAME.tmp"
-printf '{"type":"stop","session_id":"%s","tool":"","file":"","ts":"%s"}' \
-  "$SESSION_ID" "$TS" > "$TMP"
+printf '{"type":"stop","session_id":"%s","tool":"","file":"","ts":"%s"}' "$SESSION_ID" "$TS" > "$TMP"
 mv "$TMP" "$FILENAME"
-
 exit 0
 HOOK_EOF
-  chmod +x "$hooks_dir/ingest-stop.sh"
+    chmod +x "$hooks_dir/ingest-stop.sh"
+  fi
 
   # Merge hooks into Claude Code settings.json (backup first)
   if [[ -f "$settings_file" ]]; then
@@ -645,41 +644,36 @@ path = os.path.expanduser('$settings_file')
 data = {}
 if os.path.exists(path):
     with open(path) as f:
-        data = json.load(f)
+        try:
+            data = json.load(f)
+        except Exception:
+            data = {}
 
 hooks = data.setdefault('hooks', {})
 
-# PostToolUse hook
-post_hooks = hooks.setdefault('PostToolUse', [])
-hook_cmd = '$hooks_dir/ingest-post-tool.sh'
-already = any(
-    h.get('hooks', [{}])[0].get('command', '') == hook_cmd
-    if isinstance(h, dict) else False
-    for h in post_hooks
-)
-if not already:
-    post_hooks.append({
-        'hooks': [{'type': 'command', 'command': hook_cmd, 'timeout': 5}]
-    })
-
-# Stop hook
-stop_hooks = hooks.setdefault('Stop', [])
-stop_cmd = '$hooks_dir/ingest-stop.sh'
-already = any(
-    h.get('hooks', [{}])[0].get('command', '') == stop_cmd
-    if isinstance(h, dict) else False
-    for h in stop_hooks
-)
-if not already:
-    stop_hooks.append({
-        'hooks': [{'type': 'command', 'command': stop_cmd, 'timeout': 5}]
-    })
+events = {
+    'PreToolUse': '$hooks_dir/ingest-pre-tool.sh',
+    'PostToolUse': '$hooks_dir/ingest-post-tool.sh',
+    'Stop': '$hooks_dir/ingest-stop.sh',
+    'SubagentStart': '$hooks_dir/ingest-subagent-start.sh',
+    'SubagentStop': '$hooks_dir/ingest-subagent-stop.sh',
+}
+for event, cmd in events.items():
+    if not os.path.exists(os.path.expanduser(cmd)):
+        continue
+    arr = hooks.setdefault(event, [])
+    already = any(
+        isinstance(h, dict) and h.get('hooks', [{}])[0].get('command', '') == cmd
+        for h in arr
+    )
+    if not already:
+        arr.append({'hooks': [{'type': 'command', 'command': cmd, 'timeout': 5}]})
 
 with open(path, 'w') as f:
     json.dump(data, f, indent=4)
     f.write('\n')
 " 2>/dev/null
-    success "Installed activity hooks (PostToolUse + Stop)"
+    success "Installed activity hooks (up to 5 events)"
   elif command -v jq &>/dev/null; then
     warn "Hook auto-config requires python3 — add hooks manually to ${BOLD}${settings_file}${RESET}"
   else
@@ -700,6 +694,9 @@ install_skill() {
   # Download the skill file from repo or use bundled version
   local tmpdir
   tmpdir=$(mktemp -d)
+
+  # Companion reference (best-effort — relay.md links to it).
+  curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/skill/tools-reference.md" -o "${skill_dir}/tools-reference.md" 2>/dev/null || true
 
   if curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/skill/relay.md" -o "$tmpdir/relay.md" 2>/dev/null; then
     cp "$tmpdir/relay.md" "$skill_path"

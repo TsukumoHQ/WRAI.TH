@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"net"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -12,12 +13,30 @@ import (
 
 // authMiddleware rejects requests without a valid Bearer token.
 // If apiKey is empty, all requests pass through (local-mode).
+//
+// When a key IS set, loopback clients (127.0.0.0/8, ::1) are still trusted
+// without a token, so enabling RELAY_API_KEY to expose the relay through an
+// external reverse proxy does not 401 every same-host client: the ~dozens of
+// local .mcp.json connections (http://localhost:8090/mcp), API scripts, the
+// ingest hooks, and health checks all keep working keyless. Remote callers
+// (through the proxy) still need the Bearer token.
+//
+// SECURITY: this is only safe if your reverse proxy does NOT reach the relay
+// over loopback. If Traefik/nginx connects to 127.0.0.1:8090, its proxied
+// public traffic would appear local and skip auth. Front the relay from a
+// non-loopback address (docker bridge / host LAN IP), or set
+// RELAY_TRUST_LOOPBACK=0 to require the token even from loopback.
 func authMiddleware(apiKey string, next http.Handler) http.Handler {
 	if apiKey == "" {
 		return next
 	}
+	trustLoopback := os.Getenv("RELAY_TRUST_LOOPBACK") != "0"
 	expected := []byte(apiKey)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if trustLoopback && isLoopbackRemote(r.RemoteAddr) {
+			next.ServeHTTP(w, r)
+			return
+		}
 		token := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if len(token) > len(prefix) && token[:len(prefix)] == prefix {
@@ -31,6 +50,18 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// isLoopbackRemote reports whether an http.Request RemoteAddr ("host:port") is a
+// loopback address. Uses the real TCP peer — not any X-Forwarded-For header — so
+// it can't be spoofed by a remote client setting a header.
+func isLoopbackRemote(remoteAddr string) bool {
+	host, _, err := net.SplitHostPort(remoteAddr)
+	if err != nil {
+		host = remoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // bodySizeLimitMiddleware wraps request bodies with http.MaxBytesReader.
