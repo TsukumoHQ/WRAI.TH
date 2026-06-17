@@ -939,6 +939,8 @@ CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 
 <div align="center">
 
+Running agents across a team? [tsukumo](https://tsukumo.ch/consulting?utm_source=wraith&utm_medium=oss-suite&utm_campaign=consulting) consults on doing it well in production.
+
 Built at [synergix-lab](https://github.com/synergix-lab) · AGPL-3.0 License
 
 <!-- [![Star History Chart](https://api.star-history.com/svg?repos=synergix-lab/agent-relay&type=Date)](https://star-history.com/#synergix-lab/agent-relay&Date) -->
