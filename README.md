@@ -937,6 +937,20 @@ CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 
 ---
 
+## Part of the suite
+
+wrai.th is the **orchestration** layer of a three-part suite for running AI coding agents in production, built by [tsukumo](https://tsukumo.ch):
+
+- **wrai.th** — orchestration: run and coordinate a fleet of agents (this repo).
+- **[trovex](https://trovex.dev)** — context: serve agents the one canonical doc per query instead of rereading the repo (~60% fewer tokens per lookup).
+- **[yoru](https://yoru.sh)** — observability: session receipts of what each agent actually did.
+
+Built and run in production by [tsukumo](https://tsukumo.ch), a developer studio and AI consultancy.
+
+<br>
+
+---
+
 <div align="center">
 
 Built at [synergix-lab](https://github.com/synergix-lab) · AGPL-3.0 License
