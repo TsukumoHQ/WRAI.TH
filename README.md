@@ -941,6 +941,8 @@ CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 
 Built at [synergix-lab](https://github.com/synergix-lab) · AGPL-3.0 License
 
+Built by [tsukumo](https://tsukumo.ch/?utm_source=wraith&utm_medium=oss-suite&utm_campaign=consulting) — we put AI agents into production for dev teams.
+
 <!-- [![Star History Chart](https://api.star-history.com/svg?repos=synergix-lab/agent-relay&type=Date)](https://star-history.com/#synergix-lab/agent-relay&Date) -->
 
 </div>
