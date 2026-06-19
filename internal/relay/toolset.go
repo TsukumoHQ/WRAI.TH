@@ -36,7 +36,7 @@ var toolCategories = []struct{ name, summary string }{
 // serves: relay.New registers from it, discover_tools/call_tool index it,
 // and the schema budget test measures it.
 func (h *Handlers) toolRegistry() []registeredTool {
-	return []registeredTool{
+	tools := []registeredTool{
 		{server.ServerTool{Tool: whoamiTool(), Handler: h.HandleWhoami}, "session"},
 		{server.ServerTool{Tool: registerAgentTool(), Handler: h.HandleRegisterAgent}, "session"},
 		{server.ServerTool{Tool: getSessionContextTool(), Handler: h.HandleGetSessionContext}, "session"},
@@ -112,6 +112,60 @@ func (h *Handlers) toolRegistry() []registeredTool {
 
 		{server.ServerTool{Tool: createProjectTool(), Handler: h.HandleCreateProject}, "projects"},
 		{server.ServerTool{Tool: deleteProjectTool(), Handler: h.HandleDeleteProject}, "projects"},
+	}
+	// When RELAY_REQUIRE_REGISTERED is on, wrap the actor-attributed write tools
+	// so an unregistered/anonymous identity is rejected before the write. Reads
+	// and the bootstrap tools (register_agent, whoami, get_session_context …)
+	// are never wrapped, so an agent can always register and orient first.
+	if h.requireRegistered {
+		for i := range tools {
+			if mutatingTools[tools[i].Tool.Name] {
+				tools[i].Handler = h.guardRegistered(tools[i].Handler)
+			}
+		}
+	}
+	return tools
+}
+
+// mutatingTools are the write tools gated by RELAY_REQUIRE_REGISTERED — those
+// that record or act under an agent identity. Pure reads and identity bootstrap
+// tools are intentionally absent so registration and orientation stay open.
+var mutatingTools = map[string]bool{
+	"send_message": true, "ack_delivery": true, "mark_read": true,
+	"dispatch_task": true, "claim_task": true, "start_task": true,
+	"review_task": true, "comment": true, "complete_task": true,
+	"block_task": true, "resume_task": true, "cancel_task": true,
+	"update_task": true, "archive_tasks": true, "move_task": true,
+	"batch_complete_tasks": true, "batch_dispatch_tasks": true,
+	"create_board": true, "archive_board": true, "delete_board": true,
+	"set_memory": true, "delete_memory": true, "resolve_conflict": true,
+	"register_profile": true,
+	"deactivate_agent": true, "delete_agent": true, "sleep_agent": true,
+	"create_org": true, "create_team": true, "add_team_member": true,
+	"remove_team_member": true, "add_notify_channel": true,
+	"create_conversation": true, "invite_to_conversation": true,
+	"leave_conversation": true, "archive_conversation": true,
+	"create_project": true, "delete_project": true,
+}
+
+// guardRegistered wraps a tool handler to reject calls whose acting agent is
+// anonymous or not registered in the project. Only installed when
+// RELAY_REQUIRE_REGISTERED is on (see toolRegistry).
+func (h *Handlers) guardRegistered(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		from := strings.ToLower(resolveAgent(ctx, req))
+		project := ProjectFromContext(ctx)
+		if from == "" || from == "anonymous" {
+			return mcp.NewToolResultError("RELAY_REQUIRE_REGISTERED is on: no agent identity. Set ?agent=<name> on the MCP URL (or pass `as`) after calling register_agent."), nil
+		}
+		agent, err := h.db.GetAgent(project, from)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
+		}
+		if agent == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("RELAY_REQUIRE_REGISTERED is on: agent %q is not registered in project %q — call register_agent first.", from, project)), nil
+		}
+		return next(ctx, req)
 	}
 }
 

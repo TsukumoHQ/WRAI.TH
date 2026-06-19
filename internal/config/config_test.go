@@ -30,6 +30,23 @@ func TestMaxBodyNegativeIgnored(t *testing.T) {
 	}
 }
 
+func TestRequireRegisteredOptIn(t *testing.T) {
+	t.Setenv("RELAY_REQUIRE_REGISTERED", "")
+	if Load().RequireRegistered {
+		t.Error("RequireRegistered should default to false")
+	}
+	for _, v := range []string{"1", "true", "yes", "TRUE"} {
+		t.Setenv("RELAY_REQUIRE_REGISTERED", v)
+		if !Load().RequireRegistered {
+			t.Errorf("RequireRegistered should be true for %q", v)
+		}
+	}
+	t.Setenv("RELAY_REQUIRE_REGISTERED", "0")
+	if Load().RequireRegistered {
+		t.Error("RequireRegistered should be false for \"0\"")
+	}
+}
+
 func TestRateLimitOptIn(t *testing.T) {
 	t.Setenv("RELAY_RATE_LIMIT", "")
 	if got := Load().RateLimit; got != 0 {

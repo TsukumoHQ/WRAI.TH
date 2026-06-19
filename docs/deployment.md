@@ -116,6 +116,7 @@ buffering **off** and a long read timeout.
 | `RELAY_CORS_ORIGINS` | _(none)_ | Comma-separated allowed origins (else same-origin only). |
 | `RELAY_MAX_BODY` | `1048576` (1 MiB) | Max request body, bytes. Set `0` to disable the cap. |
 | `RELAY_RATE_LIMIT` | _(off)_ | Requests/minute per IP. |
+| `RELAY_REQUIRE_REGISTERED` | _(off)_ | `1`/`true` rejects mutating tool calls from an anonymous or unregistered agent (reads + `register_agent` stay open). |
 | `RELAY_DB` | `~/.agent-relay/relay.db` | DB file path (set in dev/CI so a local run never migrates prod). |
 | `RELAY_LINEAR_MODE` | `false` | `1`/`true` enables the Linear mirror (needs `LINEAR_API_KEY`). |
 | `LINEAR_API_KEY` | _(unset)_ | Linear GraphQL personal key (mirror mode). |

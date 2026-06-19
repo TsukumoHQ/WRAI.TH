@@ -26,6 +26,10 @@ type Handlers struct {
 	notifier  *Notifier
 	connMu    sync.RWMutex
 	connector connector.TaskConnector
+
+	// requireRegistered gates mutating tools behind a registered acting agent
+	// (RELAY_REQUIRE_REGISTERED). Set from config in relay.New before dispatch.
+	requireRegistered bool
 }
 
 // SetNotifier connects the notifications subsystem so handlers can emit custom

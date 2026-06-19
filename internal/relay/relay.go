@@ -66,6 +66,7 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	events := NewEventBus()
 	registry := NewSessionRegistry(mcpSrv)
 	handlers := NewHandlers(database, registry, ingester, events)
+	handlers.requireRegistered = cfg.RequireRegistered
 
 	// Register every tool from the registry (single source of truth in
 	// toolset.go), plus the discovery pair used by ?tools=discovery
