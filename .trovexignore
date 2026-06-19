@@ -1,0 +1,14 @@
+# trovex write-guard zone franche — ONLY these .md STAY real files on disk.
+# Everything else routes to the trovex store (trovex_write).
+# Owner directive (2026-06-20): full-trovex, EXCEPT blog articles.
+#
+# Kept on disk for correctness (toolchain / harness / agents read these from
+# disk — routing them to the store would break the repo):
+README.md
+CLAUDE.md
+AGENTS.md
+LICENSE*
+.claude/*
+#
+# Blog articles stay publishable source files (they ship as web pages):
+**/blog/**
