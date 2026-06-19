@@ -918,6 +918,16 @@ API endpoints: `GET /api/token-usage` (per-project), `/api/token-usage/project` 
 
 <br>
 
+## Who builds this
+
+wrai.th is built and run by the team behind **[tsukumo](https://tsukumo.ch/?utm_source=wraith&utm_medium=oss-suite&utm_campaign=consulting&utm_content=readme)** -- we help engineering teams run fleets of AI coding agents in production. wrai.th is the orchestration layer we run ourselves; free and open source (AGPL).
+
+Pairs with **trovex** (one canonical doc per query, fewer tokens) and **yoru** (see what the fleet did).
+
+> Standing up an agent fleet across a team? We do that hands-on -- [talk to us](https://tsukumo.ch/?utm_source=wraith&utm_medium=oss-suite&utm_campaign=consulting&utm_content=readme).
+
+<br>
+
 ## &#x1F91D; Contributing
 
 Opinionated tooling built for a specific workflow. Moves fast.
@@ -940,6 +950,8 @@ CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 <div align="center">
 
 Built at [synergix-lab](https://github.com/synergix-lab) · AGPL-3.0 License
+
+Built by the team behind [tsukumo](https://tsukumo.ch/?utm_source=wraith&utm_medium=oss-suite&utm_campaign=consulting&utm_content=footer) -- consulting for teams running AI agent fleets.
 
 <!-- [![Star History Chart](https://api.star-history.com/svg?repos=synergix-lab/agent-relay&type=Date)](https://star-history.com/#synergix-lab/agent-relay&Date) -->
 
