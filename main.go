@@ -16,6 +16,8 @@ import (
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
 	"agent-relay/internal/relay"
+
+	"github.com/mark3labs/mcp-go/server"
 )
 
 var Version = "dev"
@@ -32,6 +34,9 @@ func main() {
 		case "serve":
 			startServer()
 			return
+		case "mcp":
+			startStdioMCP()
+			return
 		case "init", "update", "status", "agents", "inbox", "send", "thread", "stats", "conversations", "memories":
 			cli.Run(os.Args[1:])
 			return
@@ -44,6 +49,41 @@ func main() {
 
 	// No args → start server (backward compat).
 	startServer()
+}
+
+// startStdioMCP runs the relay's MCP server over stdio (stdin/stdout) — the
+// transport MCP clients launch directly (e.g. via an .mcpb bundle published to the
+// MCP registry). Exposes the same tools as the HTTP server; logs go to stderr so
+// they never corrupt the JSON-RPC stream on stdout. Blocks until the client closes.
+func startStdioMCP() {
+	log.SetFlags(0)
+	log.SetOutput(os.Stderr)
+
+	cfg := config.Load()
+	cfg.Version = Version
+
+	database, err := db.New()
+	if err != nil {
+		log.Fatalf("failed to init database: %v", err)
+	}
+	defer func() { _ = database.Close() }()
+
+	ingester, err := ingest.New(ingest.Config{
+		SessionProvider: func() map[string]bool {
+			return database.GetKnownSessionIDs()
+		},
+	})
+	if err != nil {
+		log.Fatalf("failed to init ingester: %v", err)
+	}
+	defer ingester.Stop()
+
+	r := relay.New(database, ingester, cfg)
+	r.Version = Version
+
+	if err := server.ServeStdio(r.MCPServer); err != nil {
+		log.Fatalf("stdio MCP server error: %v", err)
+	}
 }
 
 func startServer() {
