@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -138,14 +140,26 @@ func startServer() {
 	log.Printf("  auth: %s | cors: %s | max body: %s | rate limit: %s | require-registered: %s",
 		authStatus, corsStatus, bodyStatus, rateLimitStatus, requireReg)
 
+	// serveErr surfaces a bind/listen failure (e.g. EADDRINUSE when a stale
+	// relay still holds the port after sleep/wake) so we exit non-zero instead
+	// of hanging idle while an old process keeps serving the UI.
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("listening on %s (UI: http://localhost:%s)", addr, port)
-		if err := r.ListenAndServe(addr); err != nil {
-			log.Printf("server stopped: %v", err)
+		if err := r.ListenAndServe(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			serveErr <- err
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case err := <-serveErr:
+		if isAddrInUse(err) {
+			log.Fatalf("cannot bind %s: address already in use — another agent-relay is still running. "+
+				"Stop it first: lsof -ti tcp:%s | xargs kill -9", addr, port)
+		}
+		log.Fatalf("server failed: %v", err)
+	case <-ctx.Done():
+	}
 	close(cleanupDone)
 	log.Println("shutting down...")
 	// Bound the shutdown: Shutdown cancels SSE streams so they unblock, but cap
@@ -155,6 +169,12 @@ func startServer() {
 	if err := r.Shutdown(shutdownCtx); err != nil {
 		log.Printf("shutdown error: %v", err)
 	}
+}
+
+// isAddrInUse reports whether err is an EADDRINUSE listen failure — the case
+// where a stale relay (often surviving a sleep/wake cycle) still holds the port.
+func isAddrInUse(err error) bool {
+	return errors.Is(err, syscall.EADDRINUSE)
 }
 
 // isLoopbackHost reports whether a bind host is loopback-only (safe to serve
