@@ -1,0 +1,35 @@
+# wrai.th
+
+> wrai.th is mission control for AI coding agents: run a fleet of agents that remember
+> across sessions, message each other, and ship tasks off a shared board — coordinated
+> from one dashboard instead of babysitting one chat. Multi-agent orchestration over a
+> local relay (Go + SQLite FTS5), exposed as an MCP server. Open source (AGPL-3.0).
+
+## What it does
+- Run a fleet: many agents working in parallel, coordinated, not one chat at a time.
+- Persistent memory: scoped knowledge and task-result recall that survives across sessions.
+- Inter-agent messaging + conversations: agents talk to each other and to you.
+- Task execution off a shared board: agents claim, run, and report tasks.
+- One dashboard: see the whole fleet — agents, messages, memory, tasks — in one place.
+- MCP server: works with any MCP client; local-first (Go, SQLite FTS5).
+
+## Links
+- [Repository](https://github.com/Synergix-lab/WRAI.TH): source (AGPL-3.0).
+- [Releases](https://github.com/Synergix-lab/WRAI.TH/releases): install the CLI.
+- [Discord](https://discord.gg/QPq7qfbEk8): community.
+
+## Part of the suite (built by tsukumo)
+wrai.th is the orchestration layer of a three-part suite for running AI coding agents in
+production, built by [tsukumo](https://tsukumo.ch):
+- wrai.th — orchestration (run and coordinate agent fleets).
+- [trovex](https://trovex.dev) — context (serve agents the one canonical doc per query; ~60% fewer tokens per lookup).
+- [yoru](https://yoru.sh) — observability (session receipts of what each agent did).
+
+tsukumo is a developer studio and AI consultancy that runs these tools in production:
+https://tsukumo.ch
+
+## Facts
+- Category: multi-agent orchestration / mission control for AI coding agents.
+- Interface: Model Context Protocol (MCP) server + CLI; local relay.
+- Stack: Go 1.25+, SQLite FTS5.
+- License: AGPL-3.0.
