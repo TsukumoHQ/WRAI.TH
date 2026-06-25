@@ -34,6 +34,7 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithBoolean("is_executive", mcp.Description("Executive flag (crown in UI)")),
 		mcp.WithString("profile_slug", mcp.Description("Profile archetype this agent runs")),
 		mcp.WithString("session_id", mcp.Description("Claude Code session ID ($CLAUDE_SESSION_ID) for activity tracking")),
+		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: lets a SessionStart hook re-bind the rotated session_id after /clear.")),
 		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering (e.g. '[\"database\",\"auth\"]')")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
 	)

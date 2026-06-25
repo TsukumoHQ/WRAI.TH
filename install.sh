@@ -588,10 +588,10 @@ install_hooks() {
   local settings_file="$HOME/.claude/settings.json"
   mkdir -p "$hooks_dir"
 
-  # Download all five activity hooks from the repo; inline fallback for the two
-  # core ones so an offline install still gets basic tracking.
+  # Download the activity + session hooks from the repo; inline fallback for the
+  # two core ones so an offline install still gets basic tracking.
   local hook
-  for hook in ingest-pre-tool ingest-post-tool ingest-stop ingest-subagent-start ingest-subagent-stop; do
+  for hook in ingest-pre-tool ingest-post-tool ingest-stop ingest-subagent-start ingest-subagent-stop session-start; do
     curl -fsSL "https://raw.githubusercontent.com/${REPO}/main/skill/hooks/${hook}.sh" -o "$hooks_dir/${hook}.sh" 2>/dev/null || true
     [[ -s "$hooks_dir/${hook}.sh" ]] && chmod +x "$hooks_dir/${hook}.sh"
   done
@@ -600,16 +600,14 @@ install_hooks() {
     cat > "$hooks_dir/ingest-post-tool.sh" <<'HOOK_EOF'
 #!/usr/bin/env bash
 command -v jq &>/dev/null || exit 0
-EVENTS_DIR="$HOME/.pixel-office/events"
-mkdir -p "$EVENTS_DIR"
+RELAY_URL="${RELAY_URL:-http://localhost:8090}"
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
+SID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""')
+TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-FILENAME="$EVENTS_DIR/tool-end-$$-$(date +%s).json"
-TMP="$FILENAME.tmp"
-printf '{"type":"tool_end","session_id":"%s","tool":"%s","ts":"%s"}' "$SESSION_ID" "$TOOL_NAME" "$TS" > "$TMP"
-mv "$TMP" "$FILENAME"
+[ -z "$SID" ] && exit 0
+PAYLOAD=$(jq -nc --arg s "$SID" --arg t "$TOOL" --arg ts "$TS" '{session_id:$s, type:"tool_end", tool:$t, ts:$ts}')
+curl -fsS -m 2 -X POST "$RELAY_URL/api/ingest/activity" ${RELAY_API_KEY:+-H "Authorization: Bearer $RELAY_API_KEY"} -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null 2>&1 &
 exit 0
 HOOK_EOF
     chmod +x "$hooks_dir/ingest-post-tool.sh"
@@ -618,15 +616,13 @@ HOOK_EOF
     cat > "$hooks_dir/ingest-stop.sh" <<'HOOK_EOF'
 #!/usr/bin/env bash
 command -v jq &>/dev/null || exit 0
-EVENTS_DIR="$HOME/.pixel-office/events"
-mkdir -p "$EVENTS_DIR"
+RELAY_URL="${RELAY_URL:-http://localhost:8090}"
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
+SID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""')
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-FILENAME="$EVENTS_DIR/stop-$$-$(date +%s).json"
-TMP="$FILENAME.tmp"
-printf '{"type":"stop","session_id":"%s","tool":"","file":"","ts":"%s"}' "$SESSION_ID" "$TS" > "$TMP"
-mv "$TMP" "$FILENAME"
+[ -z "$SID" ] && exit 0
+PAYLOAD=$(jq -nc --arg s "$SID" --arg ts "$TS" '{session_id:$s, type:"stop", ts:$ts}')
+curl -fsS -m 2 -X POST "$RELAY_URL/api/ingest/activity" ${RELAY_API_KEY:+-H "Authorization: Bearer $RELAY_API_KEY"} -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null 2>&1 &
 exit 0
 HOOK_EOF
     chmod +x "$hooks_dir/ingest-stop.sh"
@@ -657,6 +653,7 @@ events = {
     'Stop': '$hooks_dir/ingest-stop.sh',
     'SubagentStart': '$hooks_dir/ingest-subagent-start.sh',
     'SubagentStop': '$hooks_dir/ingest-subagent-stop.sh',
+    'SessionStart': '$hooks_dir/session-start.sh',
 }
 for event, cmd in events.items():
     if not os.path.exists(os.path.expanduser(cmd)):
@@ -673,7 +670,7 @@ with open(path, 'w') as f:
     json.dump(data, f, indent=4)
     f.write('\n')
 " 2>/dev/null
-    success "Installed activity hooks (up to 5 events)"
+    success "Installed activity hooks (up to 6 events)"
   elif command -v jq &>/dev/null; then
     warn "Hook auto-config requires python3 — add hooks manually to ${BOLD}${settings_file}${RESET}"
   else

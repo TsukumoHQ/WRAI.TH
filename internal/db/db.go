@@ -271,6 +271,10 @@ func migrate(conn *sql.DB) error {
 		"interest_tags":     "TEXT NOT NULL DEFAULT '[]'",
 		"max_context_bytes": "INTEGER NOT NULL DEFAULT 16384",
 		"avatar_url":        "TEXT",
+		// cwd is the stable identity key for hook-based session binding: a Claude
+		// Code session_id rotates on /clear, but the worktree cwd does not. Kept
+		// out of agentColumns/scanAgent on purpose (dedicated queries only).
+		"cwd": "TEXT NOT NULL DEFAULT ''",
 	})
 
 	// Projects table (planet_type assigned per project)
@@ -311,6 +315,7 @@ func migrate(conn *sql.DB) error {
 	// Indexes (all idempotent)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project)`)
 	_, _ = conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_name ON agents(project, name)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_agents_cwd ON agents(cwd)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id)`)
@@ -575,6 +580,15 @@ func migrate(conn *sql.DB) error {
 		bytes      INTEGER NOT NULL DEFAULT 0,
 		created_at TEXT NOT NULL
 	)`)
+	// Real token counts from the Claude Code transcript (hook-POSTed), vs the
+	// legacy bytes/4 estimate. Rows from the old relay-payload path leave these 0;
+	// reporting prefers real counts per-row and falls back to bytes/4.
+	ensureColumns(conn, "token_usage", map[string]string{
+		"input_tokens":          "INTEGER NOT NULL DEFAULT 0",
+		"output_tokens":         "INTEGER NOT NULL DEFAULT 0",
+		"cache_read_tokens":     "INTEGER NOT NULL DEFAULT 0",
+		"cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
+	})
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_project_time ON token_usage(project, created_at)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_agent_time ON token_usage(project, agent, created_at)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage(created_at)`)

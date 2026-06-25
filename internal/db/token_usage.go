@@ -6,14 +6,27 @@ import (
 	"time"
 )
 
-// TokenRecord represents a single MCP tool response measurement.
+// TokenRecord represents a single token-usage measurement. Either the legacy
+// Bytes estimate (relay tool payloads) or the real per-turn counts read from the
+// Claude Code transcript by the Stop hook — never both in the same row.
 type TokenRecord struct {
-	Project   string
-	Agent     string
-	Tool      string
-	Bytes     int
-	CreatedAt string
+	Project       string
+	Agent         string
+	Tool          string
+	Bytes         int
+	Input         int
+	Output        int
+	CacheRead     int
+	CacheCreation int
+	CreatedAt     string
 }
+
+// tokenSum is the per-row token count used by all reporting: the real transcript
+// usage when present, else the legacy bytes/4 estimate. Old and new rows coexist
+// without double-counting.
+const tokenSum = `SUM(CASE WHEN (input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens) > 0
+		THEN input_tokens+output_tokens+cache_read_tokens+cache_creation_tokens
+		ELSE bytes/4 END)`
 
 // TokenUsageSummary aggregates token usage by a grouping key.
 type TokenUsageSummary struct {
@@ -35,14 +48,14 @@ func (d *DB) InsertTokenUsageBatch(records []TokenRecord) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.Prepare("INSERT INTO token_usage (project, agent, tool, bytes, created_at) VALUES (?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT INTO token_usage (project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
 
 	for _, r := range records {
-		if _, err := stmt.Exec(r.Project, r.Agent, r.Tool, r.Bytes, r.CreatedAt); err != nil {
+		if _, err := stmt.Exec(r.Project, r.Agent, r.Tool, r.Bytes, r.Input, r.Output, r.CacheRead, r.CacheCreation, r.CreatedAt); err != nil {
 			return fmt.Errorf("insert token usage: %w", err)
 		}
 	}
@@ -53,7 +66,7 @@ func (d *DB) InsertTokenUsageBatch(records []TokenRecord) error {
 // GetTokenUsageByProject returns token usage aggregated by project since the given time.
 func (d *DB) GetTokenUsageByProject(since string) ([]TokenUsageSummary, error) {
 	rows, err := d.ro().Query(`
-		SELECT project, SUM(bytes), SUM(bytes)/4, COUNT(*)
+		SELECT project, SUM(bytes), `+tokenSum+`, COUNT(*)
 		FROM token_usage
 		WHERE created_at >= ?
 		GROUP BY project
@@ -78,7 +91,7 @@ func (d *DB) GetTokenUsageByProject(since string) ([]TokenUsageSummary, error) {
 // GetTokenUsageByAgent returns token usage aggregated by agent within a project.
 func (d *DB) GetTokenUsageByAgent(project, since string) ([]TokenUsageSummary, error) {
 	rows, err := d.ro().Query(`
-		SELECT agent, SUM(bytes), SUM(bytes)/4, COUNT(*)
+		SELECT agent, SUM(bytes), `+tokenSum+`, COUNT(*)
 		FROM token_usage
 		WHERE project = ? AND created_at >= ?
 		GROUP BY agent
@@ -102,7 +115,7 @@ func (d *DB) GetTokenUsageByAgent(project, since string) ([]TokenUsageSummary, e
 
 // GetTokenUsageByTool returns token usage aggregated by tool for a specific agent.
 func (d *DB) GetTokenUsageByTool(project, agent, since string) ([]TokenUsageSummary, error) {
-	q := `SELECT tool, SUM(bytes), SUM(bytes)/4, COUNT(*) FROM token_usage WHERE project = ? AND created_at >= ?`
+	q := `SELECT tool, SUM(bytes), ` + tokenSum + `, COUNT(*) FROM token_usage WHERE project = ? AND created_at >= ?`
 	args := []any{project, since}
 
 	if agent != "" {
@@ -144,7 +157,7 @@ func (d *DB) PurgeOldTokenUsage(maxAge time.Duration) (int64, error) {
 func (d *DB) GetProjectTokens24h() (map[string]int64, error) {
 	since := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
 	rows, err := d.ro().Query(`
-		SELECT project, SUM(bytes)/4
+		SELECT project, `+tokenSum+`
 		FROM token_usage
 		WHERE created_at >= ?
 		GROUP BY project
@@ -186,7 +199,7 @@ func (d *DB) GetTokenTimeSeries(project, agent, since, bucket string) ([]TokenTi
 	}
 
 	q := `SELECT strftime('` + truncFmt + `', created_at) AS bucket,
-		SUM(bytes)/4, COUNT(*)
+		` + tokenSum + `, COUNT(*)
 		FROM token_usage
 		WHERE project = ? AND created_at >= ?`
 	args := []any{project, since}

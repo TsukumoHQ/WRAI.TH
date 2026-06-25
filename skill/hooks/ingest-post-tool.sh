@@ -1,15 +1,15 @@
 #!/bin/bash
-EVENTS_DIR="$HOME/.pixel-office/events"
-mkdir -p "$EVENTS_DIR"
-
+# PostToolUse → relay activity (tool finished). Fire-and-forget, never blocks.
+RELAY_URL="${RELAY_URL:-http://localhost:8090}"
 INPUT=$(cat)
-SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"')
-TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"')
+command -v jq >/dev/null 2>&1 || exit 0
+SID=$(printf '%s' "$INPUT" | jq -r '.session_id // ""')
+TOOL=$(printf '%s' "$INPUT" | jq -r '.tool_name // ""')
 TS=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-
-FILENAME="$EVENTS_DIR/tool-end-$$-$(date +%s).json"
-TMP="$FILENAME.tmp"
-printf '{"type":"tool_end","session_id":"%s","tool":"%s","ts":"%s"}' \
-  "$SESSION_ID" "$TOOL_NAME" "$TS" > "$TMP"
-mv "$TMP" "$FILENAME"
+[ -z "$SID" ] && exit 0
+PAYLOAD=$(jq -nc --arg s "$SID" --arg t "$TOOL" --arg ts "$TS" \
+  '{session_id:$s, type:"tool_end", tool:$t, ts:$ts}')
+curl -fsS -m 2 -X POST "$RELAY_URL/api/ingest/activity" \
+  ${RELAY_API_KEY:+-H "Authorization: Bearer $RELAY_API_KEY"} \
+  -H "Content-Type: application/json" -d "$PAYLOAD" >/dev/null 2>&1 &
 exit 0

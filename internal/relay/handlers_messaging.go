@@ -169,8 +169,9 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 
 	_ = h.db.TouchAgent(project, agent)
 
-	// Expire stale messages before querying
-	_, _ = h.db.ExpireMessages()
+	// Expiry is flagged by the background cleanup ticker (StartCleanup); the inbox
+	// queries also filter TTL-elapsed messages by timestamp, so we don't take a
+	// write-lock on this hot poll path just to expire.
 
 	// Build inbox filters
 	filter := db.InboxFilter{

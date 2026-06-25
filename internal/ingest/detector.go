@@ -245,7 +245,13 @@ func (d *Detector) tick(now time.Time) {
 	d.broadcast()
 	d.mu.Unlock()
 
+	// Non-blocking, like broadcast(): nothing consumes d.out in production, and a
+	// stalled/absent reader must not wedge tick (which would freeze idle/exit
+	// detection for every session). Drop when unread.
 	for _, ev := range pending {
-		d.out <- ev
+		select {
+		case d.out <- ev:
+		default:
+		}
 	}
 }

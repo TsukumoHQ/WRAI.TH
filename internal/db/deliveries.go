@@ -10,17 +10,32 @@ import (
 
 // CreateDeliveries creates delivery records for a message to the specified recipients.
 func (d *DB) CreateDeliveries(messageID, project string, recipients []string) error {
+	if len(recipients) == 0 {
+		return nil
+	}
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
+	// One transaction for the whole fan-out: N recipients = 1 write-lock acquire
+	// + 1 fsync instead of N. Matters on the hot send/broadcast path.
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return fmt.Errorf("create deliveries: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	stmt, err := tx.Prepare(
+		"INSERT INTO deliveries (id, message_id, to_agent, state, sequence_number, created_at, project) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
+	)
+	if err != nil {
+		return fmt.Errorf("create deliveries: prepare: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+
 	for i, agent := range recipients {
-		_, err := d.conn.Exec(
-			"INSERT INTO deliveries (id, message_id, to_agent, state, sequence_number, created_at, project) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
-			uuid.New().String(), messageID, agent, i, now, project,
-		)
-		if err != nil {
+		if _, err := stmt.Exec(uuid.New().String(), messageID, agent, i, now, project); err != nil {
 			return fmt.Errorf("create delivery for %s: %w", agent, err)
 		}
 	}
-	return nil
+	return tx.Commit()
 }
 
 // MarkDeliveriesSurfaced transitions the given delivery IDs from 'queued' to 'surfaced'.
@@ -57,6 +72,7 @@ func (d *DB) GetInboxViaDeliveries(project, agentName string, unreadOnly bool, l
 		WHERE d.project = ? AND d.to_agent = ?
 		  AND d.state IN ('queued', 'surfaced')
 		  AND m.expired_at IS NULL
+		  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`
 	args := []any{project, agentName}
 
@@ -141,6 +157,7 @@ func (d *DB) FetchInboxDeliveries(project, agentName string, unreadOnly bool, li
 		WHERE d.project = ? AND d.to_agent = ?
 		  AND d.state IN ('queued', 'surfaced')
 		  AND m.expired_at IS NULL
+		  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`
 	args := []any{project, agentName}
 

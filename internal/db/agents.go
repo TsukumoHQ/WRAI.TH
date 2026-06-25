@@ -245,6 +245,69 @@ func (d *DB) GetAgent(project, name string) (*models.Agent, error) {
 	return &a, nil
 }
 
+// GetAgentBySessionID resolves the active agent bound to a Claude Code session.
+// Used to attribute hook-POSTed token usage. found=false when no agent owns it.
+func (d *DB) GetAgentBySessionID(sessionID string) (project, name string, found bool, err error) {
+	if sessionID == "" {
+		return "", "", false, nil
+	}
+	row := d.ro().QueryRow(
+		"SELECT project, name FROM agents WHERE session_id = ? AND status = 'active' LIMIT 1",
+		sessionID,
+	)
+	switch e := row.Scan(&project, &name); {
+	case e == sql.ErrNoRows:
+		return "", "", false, nil
+	case e != nil:
+		return "", "", false, fmt.Errorf("get agent by session: %w", e)
+	}
+	return project, name, true, nil
+}
+
+// SetAgentCwd records the worktree cwd for an agent — the stable key used to
+// re-bind a rotating Claude Code session_id on SessionStart. No-op if the agent
+// row doesn't exist yet.
+func (d *DB) SetAgentCwd(project, name, cwd string) error {
+	if cwd == "" {
+		return nil
+	}
+	_, err := d.conn.Exec(
+		"UPDATE agents SET cwd = ? WHERE project = ? AND name = ?",
+		cwd, project, name,
+	)
+	if err != nil {
+		return fmt.Errorf("set agent cwd: %w", err)
+	}
+	return nil
+}
+
+// RebindSessionByCwd points the agent bound to cwd at a new session_id (Claude
+// Code rotates session_id on /clear; cwd is stable). Returns the agent's project
+// and name, and found=false when no active agent owns that cwd. cwd is globally
+// unique (one agent = one worktree), so no project scoping is needed.
+func (d *DB) RebindSessionByCwd(cwd, sessionID string) (project, name string, found bool, err error) {
+	if cwd == "" {
+		return "", "", false, nil
+	}
+	row := d.ro().QueryRow(
+		"SELECT project, name FROM agents WHERE cwd = ? AND status = 'active' LIMIT 1",
+		cwd,
+	)
+	switch e := row.Scan(&project, &name); {
+	case e == sql.ErrNoRows:
+		return "", "", false, nil
+	case e != nil:
+		return "", "", false, fmt.Errorf("rebind session by cwd: %w", e)
+	}
+	if _, e := d.conn.Exec(
+		"UPDATE agents SET session_id = ? WHERE project = ? AND name = ?",
+		sessionID, project, name,
+	); e != nil {
+		return "", "", false, fmt.Errorf("rebind session by cwd: %w", e)
+	}
+	return project, name, true, nil
+}
+
 // GetOrgTree returns all active agents ordered for tree display (managers first).
 func (d *DB) GetOrgTree(project string) ([]models.Agent, error) {
 	rows, err := d.ro().Query(

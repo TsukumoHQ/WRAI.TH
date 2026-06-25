@@ -383,7 +383,7 @@ func refreshSkillAndHooks(version string) {
 	_ = os.MkdirAll(hooksDir, 0o755)
 	hooks := []string{
 		"ingest-pre-tool.sh", "ingest-post-tool.sh", "ingest-stop.sh",
-		"ingest-subagent-start.sh", "ingest-subagent-stop.sh",
+		"ingest-subagent-start.sh", "ingest-subagent-stop.sh", "session-start.sh",
 	}
 	hookOK := 0
 	for _, h := range hooks {

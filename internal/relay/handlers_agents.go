@@ -114,6 +114,12 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError(fmt.Sprintf("failed to register agent: %v", err)), nil
 	}
 
+	// Bind the worktree cwd → agent so a SessionStart hook can re-attach a rotated
+	// session_id after /clear (cwd is the stable key; session_id is not).
+	if cwd := strings.TrimSpace(req.GetString("cwd", "")); cwd != "" {
+		_ = h.db.SetAgentCwd(project, name, cwd)
+	}
+
 	// Use the effective (post-merge) executive flag and profile slug so a respawn that
 	// omits these still drives the leadership-team side effect and session_context.
 	isExecutive = agent.IsExecutive

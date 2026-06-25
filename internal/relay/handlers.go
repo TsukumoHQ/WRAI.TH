@@ -94,6 +94,19 @@ func (h *Handlers) flushTokenUsage() {
 	}
 }
 
+// RecordTokens queues a real token-usage record (from the Stop hook reading the
+// transcript) onto the same batched flusher as the legacy estimate. Non-blocking:
+// drops on a full buffer rather than stalling the ingest request.
+func (h *Handlers) RecordTokens(rec db.TokenRecord) {
+	if rec.CreatedAt == "" {
+		rec.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	select {
+	case h.tokenCh <- rec:
+	default:
+	}
+}
+
 // resultJSONTracked marshals data, records token usage, and returns the MCP result.
 func (h *Handlers) resultJSONTracked(project, agent, tool string, data any) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(data)

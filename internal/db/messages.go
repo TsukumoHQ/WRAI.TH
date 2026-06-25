@@ -146,6 +146,7 @@ func (d *DB) getInboxLegacy(project, agentName string, unreadOnly bool, limit in
 				) AND m.from_agent != ?)
 			)
 			AND m.expired_at IS NULL
+			AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`, broadcastClause)
 	args := []any{project, agentName}
 	if !f.ExcludeBroadcasts {

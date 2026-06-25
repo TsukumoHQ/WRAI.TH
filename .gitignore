@@ -33,3 +33,7 @@ test.txt
 
 # Research paper (kept local, under revision)
 /notebooks/
+
+# local model cache + agent working vault (never commit)
+.fastembed_cache/
+vault/
