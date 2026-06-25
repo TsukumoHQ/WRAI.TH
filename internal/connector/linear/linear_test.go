@@ -315,9 +315,7 @@ func TestReconcileCycle(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		query := readQuery(r)
 		switch {
-		case strings.Contains(query, "ActiveCycle"):
-			writeData(w, `{"teams":{"nodes":[{"activeCycle":{"id":"cyc-1","name":"Cycle 7","startsAt":"2026-06-01T00:00:00Z","endsAt":"2026-06-14T00:00:00Z"}}]}}`)
-		case strings.Contains(query, "CycleIssues"):
+		case strings.Contains(query, "TeamOpenIssues"):
 			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
 				{"id":"i-parent","identifier":"SYN-1","number":1,"title":"Parent","priority":2,"estimate":3,"url":"u1","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"lead","displayName":"Lead"},"labels":{"nodes":[{"name":"x"}]}},
 				{"id":"i-child","identifier":"SYN-2","number":2,"title":"Child","priority":3,"url":"u2","state":{"id":"s2","name":"Todo","type":"unstarted"},"parent":{"id":"i-parent"},"labels":{"nodes":[]}}

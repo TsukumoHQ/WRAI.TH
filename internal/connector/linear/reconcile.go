@@ -9,15 +9,16 @@ import (
 
 const reconcileTimeout = 30 * time.Second
 
-// ReconcileCycle pulls the team's active cycle and upserts every issue into the
-// mirror, healing missed webhooks. It is idempotent and never touches the relay
-// overlay. The project argument is advisory; rows are stored under the
+// ReconcileCycle pulls all OPEN issues of the team and upserts every issue into
+// the mirror, healing missed webhooks and (without a public webhook endpoint)
+// driving auto-dispatch for ANY open issue — not just the active cycle. It is
+// idempotent and never touches the relay overlay. Rows are stored under the
 // connector's configured project so they stay consistent with webhook upserts.
 func (c *Connector) ReconcileCycle(_ string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), reconcileTimeout)
 	defer cancel()
 
-	issues, err := c.gql.activeCycleIssues(ctx, c.teamKey)
+	issues, err := c.gql.openTeamIssues(ctx, c.teamKey)
 	if err != nil {
 		return 0, err
 	}
@@ -124,7 +125,7 @@ func (c *Connector) runReconcile() {
 		return
 	}
 	if n > 0 {
-		log.Printf("[linear] reconcile healed %d issue(s) in active cycle", n)
+		log.Printf("[linear] reconcile healed %d open team issue(s)", n)
 	}
 }
 

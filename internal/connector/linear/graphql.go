@@ -131,33 +131,7 @@ func (c *graphqlClient) teamStates(ctx context.Context, teamKey string) ([]state
 	return out.Teams.Nodes[0].States.Nodes, nil
 }
 
-// --- active cycle issues (reconcile) ---
-
-// The active-cycle pull is split in two queries to stay under Linear's GraphQL
-// complexity budget (10k): one cheap cycle-meta lookup, then paginated issues.
-// A single nested teams→activeCycle→issues{...} query scores ~20k on a 50-issue
-// cycle and is rejected with "Query too complex".
-const activeCycleQuery = `query ActiveCycle($key: String!) {
-  teams(filter: { key: { eq: $key } }) {
-    nodes {
-      activeCycle { id name startsAt endsAt }
-    }
-  }
-}`
-
-const cycleIssuesQuery = `query CycleIssues($cycleId: ID!, $after: String) {
-  issues(filter: { cycle: { id: { eq: $cycleId } } }, first: 25, after: $after) {
-    pageInfo { hasNextPage endCursor }
-    nodes {
-      id identifier number title description priority estimate url
-      state { id name type }
-      assignee { id name displayName }
-      project { id name }
-      parent { id }
-      labels { nodes { name } }
-    }
-  }
-}`
+// --- open team issues (reconcile) ---
 
 // gqlIssue is the shape returned by the reconcile query (and reused for mapping).
 type gqlIssue struct {
@@ -202,32 +176,32 @@ func (i gqlIssue) parentLinearID() string {
 	return i.ParentID
 }
 
-func (c *graphqlClient) activeCycleIssues(ctx context.Context, teamKey string) ([]gqlIssue, error) {
-	var meta struct {
-		Teams struct {
-			Nodes []struct {
-				ActiveCycle *struct {
-					ID       string `json:"id"`
-					Name     string `json:"name"`
-					StartsAt string `json:"startsAt"`
-					EndsAt   string `json:"endsAt"`
-				} `json:"activeCycle"`
-			} `json:"nodes"`
-		} `json:"teams"`
-	}
-	if err := c.do(ctx, activeCycleQuery, map[string]any{"key": teamKey}, &meta); err != nil {
-		return nil, err
-	}
-	if len(meta.Teams.Nodes) == 0 {
-		return nil, fmt.Errorf("team %q not found", teamKey)
-	}
-	ac := meta.Teams.Nodes[0].ActiveCycle
-	if ac == nil {
-		return nil, nil // no active cycle right now — nothing to heal
-	}
+// teamOpenIssuesQuery pulls all NON-closed issues for a team (any cycle or none),
+// so auto-dispatch covers issues that aren't in the active cycle. Flat issues
+// query (not nested through team→cycle) stays under the complexity budget even
+// with per-issue cycle/project expanded.
+const teamOpenIssuesQuery = `query TeamOpenIssues($key: String!, $after: String) {
+  issues(
+    filter: { team: { key: { eq: $key } }, state: { type: { nin: ["completed", "canceled"] } } }
+    first: 50, after: $after
+  ) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id identifier number title description priority estimate url
+      state { id name type }
+      assignee { id name displayName }
+      project { id name }
+      parent { id }
+      cycle { id name startsAt endsAt }
+      labels { nodes { name } }
+    }
+  }
+}`
 
-	// Page through the cycle's issues (25/page keeps each request well under
-	// the complexity budget; bounded to 40 pages = 1000 issues as a backstop).
+// openTeamIssues returns every open (not completed/canceled) issue in the team,
+// paginated. Used by the reconcile poll so dispatch isn't limited to the active
+// cycle. Bounded to 40 pages (2000 issues) as a backstop.
+func (c *graphqlClient) openTeamIssues(ctx context.Context, teamKey string) ([]gqlIssue, error) {
 	var issues []gqlIssue
 	var after *string
 	for page := 0; page < 40; page++ {
@@ -240,11 +214,11 @@ func (c *graphqlClient) activeCycleIssues(ctx context.Context, teamKey string) (
 				Nodes []gqlIssue `json:"nodes"`
 			} `json:"issues"`
 		}
-		vars := map[string]any{"cycleId": ac.ID}
+		vars := map[string]any{"key": teamKey}
 		if after != nil {
 			vars["after"] = *after
 		}
-		if err := c.do(ctx, cycleIssuesQuery, vars, &out); err != nil {
+		if err := c.do(ctx, teamOpenIssuesQuery, vars, &out); err != nil {
 			return nil, err
 		}
 		issues = append(issues, out.Issues.Nodes...)
@@ -253,19 +227,6 @@ func (c *graphqlClient) activeCycleIssues(ctx context.Context, teamKey string) (
 		}
 		cur := out.Issues.PageInfo.EndCursor
 		after = &cur
-	}
-
-	// Backfill cycle fields onto each issue (the paginated query doesn't expand
-	// the per-issue cycle to keep complexity down — they're all in this cycle).
-	for i := range issues {
-		if issues[i].Cycle == nil {
-			issues[i].Cycle = &struct {
-				ID       string `json:"id"`
-				Name     string `json:"name"`
-				StartsAt string `json:"startsAt"`
-				EndsAt   string `json:"endsAt"`
-			}{ID: ac.ID, Name: ac.Name, StartsAt: ac.StartsAt, EndsAt: ac.EndsAt}
-		}
 	}
 	return issues, nil
 }
