@@ -1,4 +1,7 @@
+@import url('https://fonts.googleapis.com/css2?family=Lexend:wght@300;400;500;600;700&display=swap');
 :root {
+  /* corporate UI sans (Trust & Authority); --mono kept for data/code/timestamps */
+  --font: "Lexend", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --bg: #0a0c10;
   --bg-card: #10131a;
   --bg-elev: #161a23;
@@ -25,7 +28,7 @@ html, body { margin: 0; padding: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font-family: var(--mono);
+  font-family: var(--font);
   font-size: 13px;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
@@ -751,6 +754,18 @@ button { font-family: inherit; }
 .pulse-comet { mix-blend-mode: screen; }
 
 .stage-nodes, .stage-captions { position: absolute; inset: 0; pointer-events: none; }
+/* per-team tinted zone + section label (behind nodes) */
+.stage-zones { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.stage-zones .zone { position: absolute; border-radius: 14px;
+  background: linear-gradient(160deg, color-mix(in srgb, var(--zc) 9%, transparent), color-mix(in srgb, var(--zc) 3%, transparent));
+  border: 1px solid color-mix(in srgb, var(--zc) 22%, transparent);
+  box-shadow: inset 0 0 40px color-mix(in srgb, var(--zc) 6%, transparent); }
+.stage-zones .hublabel { position: absolute;
+  display: inline-flex; align-items: center; gap: 7px; padding: 3px 10px; border-radius: 7px;
+  font-size: 10px; font-weight: 600; letter-spacing: 1.4px; text-transform: uppercase;
+  color: var(--zc); background: color-mix(in srgb, var(--zc) 12%, var(--bg-card));
+  border: 1px solid color-mix(in srgb, var(--zc) 32%, transparent); }
+.stage-zones .hublabel .cnt { color: var(--text-dim); font-weight: 500; letter-spacing: .5px; }
 .agent-node {
   /* anchored so the AVATAR CENTRE (≈20px below the node top) sits exactly on the
      constellation point — that's where comets land and captions float from */
@@ -792,6 +807,9 @@ button { font-family: inherit; }
    It reveals on hover/focus/active, and the node lifts above its neighbours so
    the extra line isn't clipped. */
 .an-role { font-size: 9px; color: var(--text-muted); letter-spacing: .3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 92px; max-height: 0; opacity: 0; transition: max-height .15s ease, opacity .15s ease; }
+/* team-membership dots — one per team the agent belongs to (multi-team aware) */
+.an-teams { display: inline-flex; gap: 3px; justify-content: center; margin-top: 2px; }
+.an-team { width: 6px; height: 6px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(0,0,0,.35); }
 .agent-node { z-index: 1; }
 .agent-node:hover, .agent-node:focus-visible, .agent-node[data-state="active"] { z-index: 6; }
 .agent-node:hover .an-label, .agent-node:focus-visible .an-label, .agent-node[data-state="active"] .an-label { opacity: 1; }
@@ -827,14 +845,26 @@ button { font-family: inherit; }
 /* transcript column */
 .transcript { display: flex; flex-direction: column; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: var(--pad); min-width: 0; }
 .transcript-body { display: flex; flex-direction: column; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
-.tr-row { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; padding: 8px 0; border-top: 1px solid var(--border-soft); }
+.tr-row { padding: 7px 0; border-top: 1px solid var(--border-soft); cursor: pointer; transition: background .12s ease; }
 .tr-row:first-child { border-top: 0; }
+.tr-row:hover { background: color-mix(in srgb, var(--text) 4%, transparent); }
+.tr-row:focus-visible { outline: none; background: color-mix(in srgb, var(--accent) 12%, transparent); }
 .tr-row.flash { animation: flash 1.1s ease; }
+.tr-head { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; }
 .tr-discs { display: inline-flex; align-items: center; gap: 4px; }
 .tr-disc { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 9px; font-weight: 600; color: #0a0c10; flex: none; }
 .tr-arrow { color: var(--text-dim); font-size: 10px; }
 .tr-line { min-width: 0; font-size: 11.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tr-row.open .tr-line { white-space: normal; overflow: visible; font-weight: 600; }
 .tr-ts { font-size: 10px; color: var(--text-dim); white-space: nowrap; font-variant-numeric: tabular-nums; }
+/* full message — revealed on click. Wrapped, readable, never truncated. */
+.tr-full { display: none; margin: 7px 0 3px 27px; padding: 9px 11px; border-left: 2px solid var(--accent);
+  background: color-mix(in srgb, var(--text) 3%, transparent); border-radius: 0 6px 6px 0; }
+.tr-row.open .tr-full { display: block; }
+.tr-meta { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; margin-bottom: 5px; }
+.tr-subj { font-size: 12.5px; font-weight: 600; color: var(--text); margin-bottom: 5px; }
+.tr-body { font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow-y: auto; scrollbar-width: thin; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 
 /* ---------- phase 3 responsive ---------- */
 @media (max-width: 1080px) {
@@ -903,10 +933,13 @@ button { font-family: inherit; }
 .msg-rail-list { flex: 1; overflow-y: auto; scrollbar-width: thin; scrollbar-color: var(--border) transparent; }
 .msg-rail-row { display: flex; align-items: center; gap: 9px; padding: 9px 12px; cursor: pointer; border-left: 2px solid transparent; }
 .msg-rail-row:hover { background: var(--bg-elev); }
+.msg-rail-row:focus-visible { outline: none; background: var(--bg-elev); border-left-color: var(--accent); }
 .msg-rail-row.on { background: var(--bg-elev); border-left-color: var(--accent); }
 .msg-rail-av, .msg-rail-glyph { width: 26px; height: 26px; flex-shrink: 0; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
 .msg-rail-av { color: #06120c; }
 .msg-rail-glyph { background: var(--bg-elev); color: var(--text-muted); border: 1px solid var(--border); }
+.msg-rail-glyph.conv { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
+.msg-rail-group { padding: 9px 6px 4px; font-size: 9px; font-weight: 600; letter-spacing: 1.2px; text-transform: uppercase; color: var(--text-dim); }
 .msg-rail-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .msg-rail-name { font-size: 12.5px; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .msg-rail-n { color: var(--text-dim); font-weight: 600; font-size: 10px; }
@@ -930,7 +963,7 @@ button { font-family: inherit; }
 .msg-pr { font-size: 9px; font-weight: 700; border-radius: 4px; padding: 0 4px; }
 .msg-pr.p0 { color: var(--red); border: 1px solid color-mix(in srgb, var(--red) 40%, transparent); }
 .msg-pr.p1 { color: var(--amber); border: 1px solid color-mix(in srgb, var(--amber) 40%, transparent); }
-.msg-b-body { font-size: 12.5px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
+.msg-b-body { font-size: 12.5px; color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5; font-family: var(--mono); }
 .msg-composer { display: flex; gap: 8px; padding: 12px 16px; border-top: 1px solid var(--border-soft); align-items: flex-end; }
 .msg-input { flex: 1; resize: none; background: var(--bg-elev); border: 1px solid var(--border); color: var(--text); border-radius: 8px; padding: 9px 11px; font-family: inherit; font-size: 12.5px; line-height: 1.4; max-height: 140px; }
 .msg-input:focus-visible { outline: none; border-color: var(--accent-dim); }

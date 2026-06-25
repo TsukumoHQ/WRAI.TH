@@ -47,6 +47,10 @@ export const api = {
   // messages (comms)
   messages: (project) => getJSON(`/api/messages?${q({ project })}`),
   messagesAll: () => getJSON('/api/messages/all-projects'),
+  // conversations (multi-agent threads)
+  conversations: (project) => getJSON(`/api/conversations?${q({ project })}`),
+  conversationsAll: () => getJSON('/api/conversations/all'),
+  conversationMessages: (id) => getJSON(`/api/conversations/${encodeURIComponent(id)}/messages`),
   sendMessage: (project, to, content, replyTo) =>
     sendJSON('POST', '/api/user-response', { project, to, content, reply_to: replyTo || '' }),
   // memory (curate)

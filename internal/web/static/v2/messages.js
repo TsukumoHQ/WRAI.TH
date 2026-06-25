@@ -19,10 +19,13 @@ export function initMessages(root, ctx) {
   const SKIP = new Set(['', '*', 'system']);
 
   let msgs = [];
+  let convs = [];                 // [{id,title,members[],message_count,...}]
+  const convCache = new Map();    // conv id → messages[]
   let scopeMode = 'project';   // 'project' | 'all'
   let selected = ALL;
   let railFilter = '';
   let loadTok = 0;
+  const isConv = (k) => typeof k === 'string' && k.startsWith('conv:');
 
   const projScope = () => ctx.selection; // current project, or 'all'
   const canProjectScope = () => ctx.selection && ctx.selection !== 'all';
@@ -34,9 +37,32 @@ export function initMessages(root, ctx) {
     try {
       list = scopeMode === 'all' ? await ctx.api.messagesAll() : await ctx.api.messages(projScope());
     } catch (_) { list = []; }
+    let clist;
+    try {
+      clist = scopeMode === 'all' ? await ctx.api.conversationsAll() : await ctx.api.conversations(projScope());
+    } catch (_) { clist = []; }
     if (tok !== loadTok) return;
     msgs = Array.isArray(list) ? list : [];
+    convs = Array.isArray(clist) ? clist : [];
+    convCache.clear();
     render();
+  }
+
+  // Lazily fetch + cache a conversation's full message thread, then re-render.
+  async function selectKey(key) {
+    selected = key;
+    renderRail();
+    if (isConv(key)) {
+      const id = key.slice(5);
+      if (!convCache.has(id)) {
+        renderThread();                       // shows a loading/empty state meanwhile
+        try {
+          const m = await ctx.api.conversationMessages(id);
+          convCache.set(id, Array.isArray(m) ? m : []);
+        } catch (_) { convCache.set(id, []); }
+      }
+    }
+    renderThread();
   }
 
   // Distinct agents seen in traffic, newest-active first.
@@ -55,6 +81,7 @@ export function initMessages(root, ctx) {
   function threadFor(key) {
     if (key === ALL) return msgs;
     if (key === BROADCAST) return msgs.filter((m) => m.to === '*');
+    if (isConv(key)) return convCache.get(key.slice(5)) || [];
     return msgs.filter((m) => m.from === key || m.to === key);
   }
 
@@ -81,8 +108,16 @@ export function initMessages(root, ctx) {
       const bc = threadFor(BROADCAST).length;
       items.push(railRow(BROADCAST, 'broadcast', bc ? `${bc} sent` : 'message all', '*'));
     }
+    // Conversations (multi-agent named threads) — their own group above the DMs.
+    let cl = convs;
+    if (railFilter) cl = cl.filter((c) => (c.title || '').toLowerCase().includes(railFilter));
+    if (cl.length) {
+      items.push('<div class="msg-rail-group">conversations</div>');
+      for (const c of cl) items.push(convRow(c));
+    }
     let list = agents();
     if (railFilter) list = list.filter((a) => a.toLowerCase().includes(railFilter));
+    if (list.length) items.push('<div class="msg-rail-group">agents</div>');
     for (const a of list) {
       const th = threadFor(a);
       const lastMsg = th[0];
@@ -91,7 +126,22 @@ export function initMessages(root, ctx) {
     }
     railList.innerHTML = items.join('') || '<div class="empty">No agents in traffic</div>';
     railList.querySelectorAll('.msg-rail-row').forEach((el) =>
-      el.addEventListener('click', () => { selected = el.dataset.key; renderRail(); renderThread(); }));
+      el.addEventListener('click', () => selectKey(el.dataset.key)));
+  }
+
+  function convRow(c) {
+    const key = 'conv:' + c.id;
+    const title = c.title || 'untitled';
+    const members = (c.members || []).length;
+    const sub = `${members} member${members === 1 ? '' : 's'} · ${c.message_count || 0} msg`;
+    return `<div class="msg-rail-row${selected === key ? ' on' : ''}" data-key="${esc(key)}" role="button" tabindex="0">
+      <span class="msg-rail-glyph conv" aria-hidden="true">◇</span>
+      <span class="msg-rail-main">
+        <span class="msg-rail-name">${esc(title)}</span>
+        <span class="msg-rail-sub">${esc(sub)}</span>
+      </span>
+      <span class="msg-rail-right"></span>
+    </div>`;
   }
 
   function railRow(key, label, sub, avatarSeed, lastMsg, count) {
@@ -112,21 +162,25 @@ export function initMessages(root, ctx) {
   }
 
   function renderThread() {
-    const isAgent = selected !== ALL && selected !== BROADCAST;
-    const title = selected === ALL ? 'all traffic' : selected === BROADCAST ? 'broadcast to fleet' : selected;
-    const sub = selected === ALL ? 'every message in scope (read-only)'
-      : selected === BROADCAST ? 'goes to every agent in this project'
-        : (scopeMode === 'all' ? `in ${esc(lastProjectForAgent(selected))}` : 'direct message');
+    const conv = isConv(selected) ? convs.find((c) => 'conv:' + c.id === selected) : null;
+    const isAgent = selected !== ALL && selected !== BROADCAST && !isConv(selected);
+    let title; let sub;
+    if (isConv(selected)) {
+      title = (conv && conv.title) || 'conversation';
+      sub = conv && conv.members && conv.members.length ? conv.members.join(', ') : 'conversation thread';
+    } else if (selected === ALL) { title = 'all traffic'; sub = 'every message in scope (read-only)'; }
+    else if (selected === BROADCAST) { title = 'broadcast to fleet'; sub = 'goes to every agent in this project'; }
+    else { title = selected; sub = scopeMode === 'all' ? `in ${esc(lastProjectForAgent(selected))}` : 'direct message'; }
     threadHead.innerHTML = `<div class="msg-th-title">${esc(title)}</div><div class="msg-th-sub">${sub}</div>`;
 
     const list = threadFor(selected).slice().sort((a, b) => (Date.parse(a.created_at) || 0) - (Date.parse(b.created_at) || 0)).slice(-300);
     if (!list.length) {
-      threadBody.innerHTML = '<div class="empty">No messages yet</div>';
+      threadBody.innerHTML = `<div class="empty">${isConv(selected) ? 'Loading…' : 'No messages yet'}</div>`;
     } else {
       threadBody.innerHTML = list.map(bubble).join('');
       threadBody.scrollTop = threadBody.scrollHeight;
     }
-    // composer: agent DM or broadcast; all-traffic is read-only
+    // composer: agent DM or broadcast; all-traffic + conversations are read-only here.
     const showComposer = selected === BROADCAST || isAgent;
     composer.hidden = !showComposer;
     if (showComposer) input.placeholder = selected === BROADCAST ? 'broadcast to all agents…' : `message ${selected}…`;

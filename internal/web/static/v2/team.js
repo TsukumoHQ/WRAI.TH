@@ -25,13 +25,20 @@ export function initTeam(root, ctx) {
   const emptyEl = root.querySelector('#stageEmpty');
   const transcriptBody = root.querySelector('#transcriptBody');
   const transcriptMeta = root.querySelector('#transcriptMeta');
+  // Background layer for the per-team tinted zones + section labels (behind nodes).
+  const zonesEl = document.createElement('div');
+  zonesEl.className = 'stage-zones';
+  if (stage) stage.insertBefore(zonesEl, stage.firstChild);
 
   let agents = [];
   let nameSet = new Set();
   const pos = new Map();           // name → {nx, ny} normalized
   const nodeEl = new Map();        // name → element
   const heat = new Map();          // name → [ts, ...]
-  let transcript = [];             // {from, to, line, ts}
+  let transcript = [];             // {from, to, subject, content, ts}
+  let hubsMeta = [];               // [{name,cx,cy,rx,ry,label,count}] for team zones
+  let curProject = null;           // last loaded project (for transcript reseed)
+  let reseedTimer = null;
   let loadedFor = null;
   let W = 0, H = 0;
   let live = 0;
@@ -44,6 +51,7 @@ export function initTeam(root, ctx) {
   /* ----------------------------- data ----------------------------- */
   async function load() {
     const project = ctx.selection;
+    curProject = project;
     const t = ++token;
     skeleton();
     let list = [];
@@ -67,9 +75,8 @@ export function initTeam(root, ctx) {
         const sorted = msgs.slice().sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at));
         for (const m of sorted) {
           const ts = Date.parse(m.created_at) || Date.now();
-          const line = m.subject || excerpt(m.content);
           recordHeat(m.from, ts); for (const to of resolveTargets(m.to)) recordHeat(to, ts);
-          transcript.unshift({ from: m.from, to: m.to, line, ts });
+          transcript.unshift({ from: m.from, to: m.to, subject: m.subject || '', content: m.content || '', ts });
         }
         transcript = transcript.slice(0, MAX_TRANSCRIPT);
       }
@@ -88,88 +95,66 @@ export function initTeam(root, ctx) {
   // reports fan out on concentric rings; each branch owns an angular wedge sized
   // by its leaf count, so a hub with many direct reports spreads collision-free
   // instead of cramming into one row. Disconnected roots park along the top.
+  // Group by TEAM membership (agents carry teams[] — far more reliable than
+  // reports_to, whose targets are often inactive execs). Each team becomes a
+  // tinted zone + section label, its members arranged on a ring inside it, so the
+  // teams read at a glance. Agents with no team land in an "unassigned" cluster.
+  const TEAM_COLOR = { engineering: '#22c55e', growth: '#6e6bf2', leads: '#38bdf8', unassigned: '#64748b' };
+  // an agent's primary team: first non-"leads" team (leads is a cross-cutting hat).
+  function primaryTeam(a) {
+    const ts = a.teams || [];
+    const t = ts.find((x) => x.slug !== 'leads') || ts[0];
+    return t ? t.slug : 'unassigned';
+  }
   function computeLayout() {
     pos.clear();
+    hubsMeta = [];
     if (!agents.length) return;
-    const byName = new Map(agents.map((a) => [a.name, a]));
-    const parentOf = (a) =>
-      (a.reports_to && byName.has(a.reports_to) && a.reports_to !== a.name) ? a.reports_to : null;
 
-    const kids = new Map(agents.map((a) => [a.name, []]));
-    const roots = [];
+    const groups = new Map();
     for (const a of agents) {
-      const p = parentOf(a);
-      if (p) kids.get(p).push(a.name);
-      else roots.push(a.name);
+      const s = primaryTeam(a);
+      if (!groups.has(s)) groups.set(s, []);
+      groups.get(s).push(a.name);
     }
-    for (const arr of kids.values()) arr.sort((x, y) => rank(byName.get(x), byName.get(y)));
+    // unassigned last, otherwise larger teams first.
+    const list = [...groups.entries()]
+      .map(([slug, members]) => ({ slug, members }))
+      .sort((x, y) =>
+        (x.slug === 'unassigned' ? 1 : 0) - (y.slug === 'unassigned' ? 1 : 0)
+        || y.members.length - x.members.length);
 
-    // Leaf count per node (min 1), cycle-guarded — drives angular wedge size.
-    const leaves = new Map();
-    const counting = new Set();
-    const leafCount = (name) => {
-      if (leaves.has(name)) return leaves.get(name);
-      if (counting.has(name)) return 1;
-      counting.add(name);
-      const c = kids.get(name) || [];
-      const n = c.length ? c.reduce((s, ch) => s + leafCount(ch), 0) : 1;
-      leaves.set(name, n);
-      return n;
-    };
-    roots.forEach(leafCount);
-    roots.sort((a, b) => leafCount(b) - leafCount(a));
+    // Bounded grid of team cards — never overlapping, scales to N teams. Members
+    // pack in a mini-grid inside each card (all maths in normalized 0..1 space).
+    const N = list.length;
+    const cols = Math.min(3, N);
+    const rows = Math.ceil(N / cols);
+    const PADX = 0.02, PADY = 0.025, GAP = 0.014;
+    const cw = (1 - PADX * 2 - GAP * (cols - 1)) / cols;
+    const ch = (1 - PADY * 2 - GAP * (rows - 1)) / rows;
 
-    const TAU = Math.PI * 2;
-    // Recursively place a subtree: node at (depth·step) along the mid-angle of its
-    // wedge [a0,a1); children split the wedge by leaf share.
-    const fan = (name, a0, a1, depth, cx, cy, rx, ry, step, placed) => {
-      const ang = (a0 + a1) / 2;
-      if (depth > 0) {
-        const rr = depth * step;
-        pos.set(name, { nx: cx + rx * rr * Math.cos(ang), ny: cy + ry * rr * Math.sin(ang) });
-      } else {
-        pos.set(name, { nx: cx, ny: cy });
-      }
-      const c = kids.get(name) || [];
-      if (!c.length || placed.has(name)) return;
-      placed.add(name);
-      const total = c.reduce((s, ch) => s + leafCount(ch), 0) || 1;
-      let a = a0;
-      for (const ch of c) {
-        const w = (a1 - a0) * (leafCount(ch) / total);
-        fan(ch, a, a + w, depth + 1, cx, cy, rx, ry, step, placed);
-        a += w;
-      }
-    };
-
-    const subtreeDepth = (name, seen = new Set()) => {
-      if (seen.has(name)) return 0;
-      seen.add(name);
-      const c = kids.get(name) || [];
-      return c.length ? 1 + Math.max(...c.map((ch) => subtreeDepth(ch, seen))) : 0;
-    };
-
-    const primary = roots[0];
-    const secondary = roots.slice(1);
-    const placed = new Set();
-
-    // Primary tree → centred, fills the canvas. Reserve a top seam for parked roots.
-    const md = Math.max(1, subtreeDepth(primary));
-    const seam = secondary.length ? 0.18 : 0.04;     // fraction of the circle kept clear at top
-    const start = -Math.PI / 2 + (seam / 2) * TAU;    // begin just past 12 o'clock, sweep clockwise
-    fan(primary, start, start + (1 - seam) * TAU, 0, 0.5, 0.54, 0.38, 0.34, 1 / md, placed);
-
-    // Disconnected roots (and any small trees under them) park in a top row, each
-    // fanning its own children downward so nothing collides with the central hub.
-    secondary.forEach((nm, i) => {
-      const f = secondary.length === 1 ? 0.5 : i / (secondary.length - 1);
-      const cx = 0.22 + f * 0.56;
-      pos.set(nm, { nx: cx, ny: 0.08 });
-      const kc = kids.get(nm) || [];
-      if (kc.length) {
-        const dmd = Math.max(1, subtreeDepth(nm));
-        fan(nm, Math.PI * 0.18, Math.PI * 0.82, 0, cx, 0.08, 0.13, 0.16, 1 / dmd, placed);
-      }
+    list.forEach((g, gi) => {
+      const c = gi % cols, r = Math.floor(gi / cols);
+      const x0 = PADX + c * (cw + GAP);
+      const y0 = PADY + r * (ch + GAP);
+      const m = g.members;
+      const n = m.length;
+      const mcols = n <= 1 ? 1 : n <= 2 ? 2 : 3;
+      const mrows = Math.ceil(n / mcols);
+      const gx = cw / (mcols + 1);
+      const top = y0 + ch * 0.22;            // reserve the top of the card for the label
+      const usable = ch * 0.70;
+      const gy = usable / (mrows + 1);
+      m.forEach((name, i) => {
+        const cc = i % mcols, rr = Math.floor(i / mcols);
+        pos.set(name, { nx: x0 + gx * (cc + 1), ny: top + gy * (rr + 1) });
+      });
+      hubsMeta.push({
+        slug: g.slug, x0, y0, cw, ch,
+        color: TEAM_COLOR[g.slug] || colorFor(g.slug),
+        label: g.slug === 'unassigned' ? 'UNASSIGNED' : g.slug.toUpperCase(),
+        count: n,
+      });
     });
   }
   // Leaders / executives first, then by heat-ish role, then name.
@@ -184,6 +169,16 @@ export function initTeam(root, ctx) {
     W = r.width; H = r.height;
     svg.setAttribute('viewBox', `0 0 ${Math.max(1, W)} ${Math.max(1, H)}`);
     drawLinks();
+    renderZones();
+  }
+  // Tinted region + section label behind each hub's team, so teams read at a glance.
+  function renderZones() {
+    if (!zonesEl || !W) return;
+    zonesEl.innerHTML = hubsMeta.map((m) => {
+      const x = m.x0 * W, y = m.y0 * H, w = m.cw * W, h = m.ch * H, c = m.color;
+      return `<div class="zone" style="left:${x}px;top:${y}px;width:${w}px;height:${h}px;--zc:${c}"></div>`
+        + `<div class="hublabel" style="left:${x + 14}px;top:${y + 13}px;--zc:${c}">${esc(m.label)} <span class="cnt">${m.count}</span></div>`;
+    }).join('');
   }
   const centerOf = (name) => {
     const p = pos.get(name);
@@ -251,11 +246,15 @@ export function initTeam(root, ctx) {
   function nodeHTML(a) {
     const state = a.online ? (a.activity && a.activity !== 'idle' ? 'active' : 'online') : 'idle';
     const role = a.profile_slug || shortRole(a.role);
-    return `<div class="agent-node" data-name="${esc(a.name)}" data-state="${state}" style="--c:${colorFor(a.name)}" tabindex="0" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}">
+    // one dot per team the agent belongs to → shows multi-team membership at a glance.
+    const teams = (a.teams || []);
+    const dots = teams.map((t) =>
+      `<span class="an-team" style="background:${TEAM_COLOR[t.slug] || colorFor(t.slug)}" title="${esc(t.name || t.slug)}"></span>`).join('');
+    return `<div class="agent-node" data-name="${esc(a.name)}" data-state="${state}" style="--c:${colorFor(a.name)}" tabindex="0" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}${teams.length ? ' · teams: ' + esc(teams.map((t) => t.slug).join(', ')) : ''}">
       <span class="an-orbit" aria-hidden="true"></span>
       <span class="an-heat" aria-hidden="true"></span>
       <span class="an-avatar">${a.avatar_url ? `<img class="an-img" src="${esc(a.avatar_url)}" alt="" loading="lazy" onerror="this.remove()">` : esc(initialFor(a.name))}<span class="an-status" aria-hidden="true"></span></span>
-      <span class="an-label"><span class="an-name">${esc(a.name)}</span>${role ? `<span class="an-role">${esc(role)}</span>` : ''}</span>
+      <span class="an-label"><span class="an-name">${esc(a.name)}</span>${role ? `<span class="an-role">${esc(role)}</span>` : ''}${dots ? `<span class="an-teams">${dots}</span>` : ''}</span>
     </div>`;
   }
   const shortRole = (r) => String(r || '').split(/[.—-]/)[0].trim().split(/\s+/).slice(0, 3).join(' ');
@@ -326,9 +325,12 @@ export function initTeam(root, ctx) {
     for (const to of targets) recordHeat(to, ts);
     refreshHeat();
 
-    transcript.unshift({ from, to: rawTo, line, ts });
+    // Live event carries only the subject (label); prepend it now for instant
+    // feedback, then reseed shortly to backfill the full body from the API.
+    transcript.unshift({ from, to: rawTo, subject: line, content: '', ts });
     if (transcript.length > MAX_TRANSCRIPT) transcript.length = MAX_TRANSCRIPT;
     renderTranscript(true);
+    reseedSoon();
     toggleEmpty();
 
     if (root.hidden) return;                      // accrue silently when off-screen
@@ -395,7 +397,35 @@ export function initTeam(root, ctx) {
   }
 
   /* ------------------------- transcript --------------------------- */
-  function renderTranscript(flashFirst = false) {
+  // Refetch recent messages (which carry the full body) and rebuild the
+  // transcript, so live entries that arrived subject-only get their content
+  // backfilled. Debounced so a burst of messages triggers one fetch.
+  function reseedSoon() {
+    clearTimeout(reseedTimer);
+    reseedTimer = setTimeout(reseed, 1500);
+  }
+  async function reseed() {
+    if (!curProject) return;
+    let msgs;
+    try { msgs = await ctx.api.messagesLatest(curProject, isoSince(3 * 3600e3)); }
+    catch (_) { return; }
+    if (!Array.isArray(msgs)) return;
+    const open = new Set(
+      [...transcriptBody.querySelectorAll('.tr-row.open')].map((el) => el.dataset.key),
+    );
+    transcript = msgs
+      .map((m) => ({
+        from: m.from, to: m.to, subject: m.subject || '', content: m.content || '',
+        ts: Date.parse(m.created_at) || Date.now(),
+      }))
+      .sort((a, b) => b.ts - a.ts)
+      .slice(0, MAX_TRANSCRIPT);
+    renderTranscript(false, open);
+  }
+
+  const trKey = (m) => `${m.from}|${m.ts}`;
+
+  function renderTranscript(flashFirst = false, keepOpen = null) {
     transcriptMeta.textContent = transcript.length ? `${transcript.length} exchanges` : 'live';
     if (!transcript.length) {
       transcriptBody.innerHTML = '<div class="empty">No messages yet — they will appear here as agents talk.</div>';
@@ -403,27 +433,55 @@ export function initTeam(root, ctx) {
     }
     transcriptBody.innerHTML = transcript.map((m, i) => {
       const toLabel = m.to === '*' ? 'all' : m.to.startsWith('team:') ? m.to.slice(5) : m.to;
-      return `<div class="tr-row${flashFirst && i === 0 ? ' flash' : ''}">
-        <span class="tr-discs">
-          <span class="tr-disc" style="background:${colorFor(m.from)}" title="${esc(m.from)}">${esc(initialFor(m.from))}</span>
-          <span class="tr-arrow" aria-hidden="true">→</span>
-          <span class="tr-disc" style="background:${colorFor(toLabel)}" title="${esc(m.to)}">${esc(initialFor(toLabel))}</span>
-        </span>
-        <span class="tr-line">${m.line ? esc(m.line) : '<i class="text-dim">(no subject)</i>'}</span>
-        <span class="tr-ts">${fmtAgo(m.ts)}</span>
+      const toFull = m.to === '*' ? 'all agents' : m.to.startsWith('team:') ? `team ${m.to.slice(5)}` : m.to;
+      const head = m.subject || excerpt(m.content) || '(no subject)';
+      const key = trKey(m);
+      const isOpen = keepOpen && keepOpen.has(key);
+      const when = new Date(m.ts).toLocaleString();
+      const body = m.content
+        ? `<div class="tr-body">${esc(m.content)}</div>`
+        : (m.subject ? '' : '<div class="tr-body text-dim">(corps non disponible)</div>');
+      return `<div class="tr-row${isOpen ? ' open' : ''}${flashFirst && i === 0 ? ' flash' : ''}" data-key="${esc(key)}" role="button" tabindex="0" aria-expanded="${isOpen ? 'true' : 'false'}">
+        <div class="tr-head">
+          <span class="tr-discs">
+            <span class="tr-disc" style="background:${colorFor(m.from)}" title="${esc(m.from)}">${esc(initialFor(m.from))}</span>
+            <span class="tr-arrow" aria-hidden="true">→</span>
+            <span class="tr-disc" style="background:${colorFor(toLabel)}" title="${esc(m.to)}">${esc(initialFor(toLabel))}</span>
+          </span>
+          <span class="tr-line">${esc(head)}</span>
+          <span class="tr-ts">${fmtAgo(m.ts)}</span>
+        </div>
+        <div class="tr-full">
+          <div class="tr-meta">${esc(m.from)} → ${esc(toFull)} · ${esc(when)}</div>
+          ${m.subject ? `<div class="tr-subj">${esc(m.subject)}</div>` : ''}
+          ${body}
+        </div>
       </div>`;
     }).join('');
   }
 
+  // Click / keyboard toggles a row open to reveal the full message.
+  function toggleRow(row) {
+    if (!row) return;
+    const open = row.classList.toggle('open');
+    row.setAttribute('aria-expanded', open ? 'true' : 'false');
+  }
+  transcriptBody.addEventListener('click', (e) => toggleRow(e.target.closest('.tr-row')));
+  transcriptBody.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      const row = e.target.closest('.tr-row');
+      if (row) { e.preventDefault(); toggleRow(row); }
+    }
+  });
+
   function toggleEmpty() {
+    // Only a true empty board (no agents) gets the overlay. The old "silent"
+    // hint rendered a dark bar across the grid whenever the transcript was
+    // momentarily empty (e.g. just after a relay restart) — dropped.
     if (!agents.length) {
       emptyEl.hidden = false;
       emptyEl.dataset.kind = 'none';
       emptyEl.innerHTML = '<span class="se-title">no agents here yet</span><span class="se-sub">this project has no registered agents</span>';
-    } else if (!transcript.length) {
-      emptyEl.hidden = false;
-      emptyEl.dataset.kind = 'silent';      // constellation stays rendered behind this hint
-      emptyEl.innerHTML = '<span class="se-title">agents silencieux</span><span class="se-sub">the constellation is quiet — live messages will fly through</span>';
     } else {
       emptyEl.hidden = true;
     }
