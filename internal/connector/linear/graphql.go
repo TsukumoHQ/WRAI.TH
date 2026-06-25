@@ -152,6 +152,7 @@ const cycleIssuesQuery = `query CycleIssues($cycleId: ID!, $after: String) {
       id identifier number title description priority estimate url
       state { id name type }
       assignee { id name displayName }
+      project { id name }
       parent { id }
       labels { nodes { name } }
     }
@@ -178,7 +179,12 @@ type gqlIssue struct {
 		ID string `json:"id"`
 	} `json:"parent"`
 	ParentID string `json:"parentId"` // webhook flat fallback when parent is not expanded
-	Cycle    *struct {
+	Project  *struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"project"`
+	ProjectID string `json:"projectId"` // webhook flat fallback
+	Cycle     *struct {
 		ID       string `json:"id"`
 		Name     string `json:"name"`
 		StartsAt string `json:"startsAt"`

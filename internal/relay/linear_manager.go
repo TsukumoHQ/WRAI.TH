@@ -17,6 +17,7 @@ const (
 	setLinearTeamKey  = "linear_team_key" // e.g. SYN
 	setLinearProject  = "linear_project"  // relay project hosting the mirror (default: lowercased team key)
 	setLinearInterval = "linear_reconcile_interval"
+	setLinearRouting  = "linear_routing" // JSON {linearProjectId: agentName} — project→agent auto-dispatch
 )
 
 // effectiveLinearConfig resolves the Linear connector configuration: env wins

@@ -350,6 +350,7 @@ var writableSettings = map[string]bool{
 	setLinearTeamKey:  true,
 	setLinearProject:  true,
 	setLinearInterval: true,
+	setLinearRouting:  true,
 }
 
 func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {

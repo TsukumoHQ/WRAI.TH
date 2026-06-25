@@ -185,27 +185,27 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 	// emit when the state actually changed in this update.
 	var events []connector.TaskEvent
 	if c.shouldDispatch(env, iss) {
-		events = append(events, dispatchEvent(c.project, taskID, iss.Title, seed))
+		events = append(events, c.dispatchEvent(taskID, iss.Title, seed))
 	}
 	return events, nil
 }
 
 // dispatchEvent builds the semantic task.in_progress launch event. Shared by
 // the webhook path (Ingest) and the reconcile poll (transition detection).
-func dispatchEvent(project, taskID, title string, seed db.LinearMirrorSeed) connector.TaskEvent {
-	assignee := seedAssignee(seed)
+func (c *Connector) dispatchEvent(taskID, title string, seed db.LinearMirrorSeed) connector.TaskEvent {
+	agent := c.routedAgent(seed)
 	return connector.TaskEvent{
 		Type:    "task.in_progress",
-		Project: project,
-		Agent:   assignee,
+		Project: c.project,
+		Agent:   agent,
 		Payload: map[string]any{
-			"agent":             assignee,
+			"agent":             agent,
 			"task_id":           taskID,
 			"linear_key":        seedLinearKey(seed),
 			"title":             title,
 			"line":              "In progress: " + title,
 			"priority":          seed.Priority,
-			"assignee_is_agent": isAgent(assignee),
+			"assignee_is_agent": isAgent(agent),
 		},
 	}
 }
@@ -227,9 +227,9 @@ func (c *Connector) shouldDispatch(env webhookEnvelope, iss gqlIssue) bool {
 	if !stateChanged(env.UpdatedFrom) {
 		return false
 	}
-	// Must be assigned to an agent (not a human/user).
-	assignee := issueAssignee(iss)
-	return isAgent(assignee)
+	// Dispatch when the issue's project has a configured route (owner-chosen
+	// agent per project) OR it's directly assigned to an agent.
+	return c.hasRoute(iss) || isAgent(issueAssignee(iss))
 }
 
 // stateChanged reports whether updatedFrom carries a prior state (the transition
@@ -275,6 +275,9 @@ func (c *Connector) seedFromIssue(iss gqlIssue) db.LinearMirrorSeed {
 	}
 	if a := issueAssignee(iss); a != "" {
 		seed.Assignee = strptr(a)
+	}
+	if pid := issueProjectID(iss); pid != "" {
+		seed.LinearProjectID = strptr(pid)
 	}
 	if iss.Cycle != nil && iss.Cycle.ID != "" {
 		seed.CycleID = strptr(iss.Cycle.ID)
@@ -324,6 +327,45 @@ func issueAssignee(iss gqlIssue) string {
 		name = iss.Assignee.Name
 	}
 	return strings.ToLower(strings.TrimSpace(name))
+}
+
+func issueProjectID(iss gqlIssue) string {
+	if iss.Project != nil && iss.Project.ID != "" {
+		return iss.Project.ID
+	}
+	return strings.TrimSpace(iss.ProjectID)
+}
+
+// linearRouting reads the owner-configured project→agent map (setting
+// "linear_routing", JSON {linearProjectId: agentName}). Empty when unset.
+func (c *Connector) linearRouting() map[string]string {
+	raw := strings.TrimSpace(c.db.GetSetting("linear_routing"))
+	if raw == "" {
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil
+	}
+	return m
+}
+
+// routedAgent resolves the dispatch target: the agent configured for the issue's
+// Linear project (owner-chosen, one per project), falling back to the issue's
+// own assignee when that project has no routing entry.
+func (c *Connector) routedAgent(seed db.LinearMirrorSeed) string {
+	if seed.LinearProjectID != nil {
+		if a := c.linearRouting()[*seed.LinearProjectID]; a != "" {
+			return strings.ToLower(strings.TrimSpace(a))
+		}
+	}
+	return seedAssignee(seed)
+}
+
+// hasRoute reports whether the issue's project has a configured routing target.
+func (c *Connector) hasRoute(iss gqlIssue) bool {
+	pid := issueProjectID(iss)
+	return pid != "" && c.linearRouting()[pid] != ""
 }
 
 func issueKey(iss gqlIssue, teamKey string) string {

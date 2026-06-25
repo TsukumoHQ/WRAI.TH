@@ -17,23 +17,24 @@ import (
 // connector resolves the relay row by linear_issue_id before writing so the
 // stable relay task id is preserved across updates.
 type LinearMirrorSeed struct {
-	Project       string
-	LinearIssueID string // Linear issue UUID — the mirror key
-	LinearKey     *string
-	Title         string
-	Description   string
-	Priority      string
-	Status        string // coarse relay status mapped from the Linear state type
-	ExternalURL   *string
-	Points        *int
-	Labels        string // json array; defaults to "[]"
-	LinearState   *string
-	Assignee      *string
-	CycleID       *string
-	CycleName     *string
-	CycleStart    *string
-	CycleEnd      *string
-	ParentTaskID  *string // relay task id of the parent issue's mirror row
+	Project         string
+	LinearIssueID   string // Linear issue UUID — the mirror key
+	LinearKey       *string
+	Title           string
+	Description     string
+	Priority        string
+	Status          string // coarse relay status mapped from the Linear state type
+	ExternalURL     *string
+	Points          *int
+	Labels          string // json array; defaults to "[]"
+	LinearState     *string
+	Assignee        *string
+	LinearProjectID *string // Linear project UUID — drives project→agent routing (in-memory; not persisted)
+	CycleID         *string
+	CycleName       *string
+	CycleStart      *string
+	CycleEnd        *string
+	ParentTaskID    *string // relay task id of the parent issue's mirror row
 }
 
 // GetTaskByLinearIssueID returns the mirror row for a Linear issue id, or

@@ -55,9 +55,9 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		// an agent assignee (first sight in-progress counts: boot-time pickup).
 		if c.onEvent != nil &&
 			iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
-			isAgent(issueAssignee(iss)) &&
+			(c.hasRoute(iss) || isAgent(issueAssignee(iss))) &&
 			(prior == nil || prior.Status != "in-progress") {
-			c.onEvent(dispatchEvent(c.project, taskID, iss.Title, seed))
+			c.onEvent(c.dispatchEvent(taskID, iss.Title, seed))
 		}
 	}
 
