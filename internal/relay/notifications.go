@@ -386,6 +386,18 @@ func (n *Notifier) resolveTargets(project, target string, payload map[string]any
 			return nil
 		}
 		return []string{*a.ReportsTo}
+	case "assignee":
+		// the task's own assignee, from the semantic payload
+		if a := strVal(payload["agent"]); a != "" {
+			return []string{a}
+		}
+		return nil
+	case "dispatcher", "dispatched_by":
+		// the agent that dispatched the task
+		if d := strVal(payload["dispatched_by"]); d != "" {
+			return []string{d}
+		}
+		return nil
 	}
 	// Role match (cto / cxx / lead / etc.): any agent whose role equals target.
 	if role := matchByRole(n.db, project, target); len(role) > 0 {
@@ -591,6 +603,7 @@ func taskSemantic(task *models.Task, line string) map[string]any {
 	}
 	return map[string]any{
 		"agent":             assignee,
+		"dispatched_by":     task.DispatchedBy,
 		"task_id":           task.ID,
 		"linear_key":        nil,
 		"title":             task.Title,
