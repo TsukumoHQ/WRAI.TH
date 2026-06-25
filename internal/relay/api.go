@@ -73,6 +73,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetLatestMessages(w, req)
 	case path == "/user-response" && req.Method == http.MethodPost:
 		r.apiPostUserResponse(w, req)
+	case path == "/send" && req.Method == http.MethodPost:
+		r.apiPostSend(w, req)
 	// Memory endpoints
 	case path == "/memories" && req.Method == http.MethodGet:
 		r.apiGetMemories(w, req)
@@ -758,6 +760,49 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 	// Push notification to the target agent
 	r.Registry.Notify(body.Project, body.To, "user", "User response", msg.ID)
 
+	writeJSON(w, map[string]any{"ok": true, "message_id": msg.ID})
+}
+
+// apiPostSend is a generic loopback send (from/to/priority/content) used by the
+// host relay-send forwarder so dokan monitors can deliver messages without
+// reaching the loopback relay directly. Single recipient (the monitor→agent
+// case); broadcast/team can be added if needed.
+func (r *Relay) apiPostSend(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Project  string `json:"project"`
+		From     string `json:"from"`
+		To       string `json:"to"`
+		Priority string `json:"priority"`
+		Subject  string `json:"subject"`
+		Content  string `json:"content"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if body.To == "" || body.Content == "" {
+		http.Error(w, `{"error":"to and content are required"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "trovex-growth"
+	}
+	if body.From == "" {
+		body.From = "monitor"
+	}
+	if body.Priority == "" {
+		body.Priority = "P2"
+	}
+	subject := body.Subject
+	if subject == "" {
+		subject = body.Content
+	}
+	msg, err := r.DB.InsertMessageWithDeliveries(body.Project, body.From, body.To, "notification", subject, body.Content, "{}", body.Priority, 14400, nil, nil, []string{body.To})
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "send failed", err)
+		return
+	}
+	r.Registry.Notify(body.Project, body.To, body.From, subject, msg.ID)
 	writeJSON(w, map[string]any{"ok": true, "message_id": msg.ID})
 }
 

@@ -39,6 +39,9 @@ func main() {
 		case "mcp":
 			startStdioMCP()
 			return
+		case "forward":
+			cli.RunForwarder()
+			return
 		case "init", "update", "status", "agents", "inbox", "send", "thread", "stats", "conversations", "memories":
 			cli.Run(os.Args[1:])
 			return
