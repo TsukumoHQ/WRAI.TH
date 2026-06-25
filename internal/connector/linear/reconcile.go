@@ -37,6 +37,12 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		if iss.ID == "" {
 			continue
 		}
+		// Scope: only mirror/dispatch issues in a ROUTED project. Skips Linear's
+		// project-less team defaults (onboarding TSU-1..4) and any unrouted
+		// project — they were polluting the relay board as noise.
+		if !c.hasRoute(iss) {
+			continue
+		}
 		prior, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
 		seed := c.seedFromIssue(iss)
 		taskID, _, err := c.db.UpsertLinearMirror(seed)
