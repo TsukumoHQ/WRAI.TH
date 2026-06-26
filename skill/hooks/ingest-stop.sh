@@ -30,12 +30,14 @@ if [ -n "$TP" ] && [ -f "$TP" ]; then
   case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac
   if [ "$TOTAL" -gt "$OFFSET" ]; then
     BODY=$(tail -n +$((OFFSET + 1)) "$TP" 2>/dev/null | jq -s --arg s "$SID" --arg ts "$TS" '
-      [ .[] | select(.message.usage != null) | .message.usage ] as $u
+      [ .[] | select(.message.usage != null) ] as $m
+      | [ $m[].message.usage ] as $u
       | { session_id: $s, ts: $ts,
           input:          ([ $u[].input_tokens              // 0 ] | add // 0),
           output:         ([ $u[].output_tokens             // 0 ] | add // 0),
           cache_read:     ([ $u[].cache_read_input_tokens    // 0 ] | add // 0),
-          cache_creation: ([ $u[].cache_creation_input_tokens // 0 ] | add // 0) }' 2>/dev/null)
+          cache_creation: ([ $u[].cache_creation_input_tokens // 0 ] | add // 0),
+          model:          ([ $m[].message.model // empty ] | last // "") }' 2>/dev/null)
     if [ -n "$BODY" ]; then
       curl -fsS -m 2 -X POST "$RELAY_URL/api/ingest/tokens" "${AUTH[@]}" \
         -H "Content-Type: application/json" -d "$BODY" >/dev/null 2>&1 &
