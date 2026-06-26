@@ -793,13 +793,15 @@ func (n *Notifier) seedDefaults() {
 			Opts:    `{"interval_hours":8,"priority":"P3"}`,
 		},
 		{
-			Name:    "Budget exceeded → human (P0)",
+			// Technical signal → cto (owner rule: tech→cto). A real cost-emergency
+			// is escalated to the owner by the cto, not fired at them directly.
+			Name:    "Budget exceeded → cto (P1)",
 			Enabled: true,
 			Event:   "event:budget-exceeded",
 			Match:   `{}`,
 			Action:  "message",
-			Target:  "human",
-			Opts:    `{"priority":"P0","template":"💸 {line}"}`,
+			Target:  "cto",
+			Opts:    `{"priority":"P1","template":"💸 {line}"}`,
 		},
 	}
 	for i := range defaults {
