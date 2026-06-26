@@ -45,6 +45,9 @@ type Task struct {
 	BlockedPeriods string  `json:"blocked_periods"` // json array of {start,end}
 	InReviewAt     *string `json:"in_review_at,omitempty"`
 	DoneAt         *string `json:"done_at,omitempty"`
+	// LastActivityAt bumps on transition/comment/progress-note — the stale-scanner
+	// measures idle from here, not from dispatch.
+	LastActivityAt *string `json:"last_activity_at,omitempty"`
 
 	Subtasks []Task `json:"subtasks,omitempty"`
 }

@@ -115,11 +115,11 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 		`INSERT INTO tasks
 		   (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at,
 		    source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee,
-		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, blocked_periods)
-		 VALUES (?, '', 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')`,
+		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, last_activity_at, blocked_periods)
+		 VALUES (?, '', 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')`,
 		id, s.Title, s.Description, s.Priority, s.Status, s.Project, now,
 		s.LinearIssueID, s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState, s.Assignee,
-		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd, s.ParentTaskID, s.LinearProjectID,
+		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd, s.ParentTaskID, s.LinearProjectID, now,
 	)
 	if err != nil {
 		return "", false, fmt.Errorf("insert linear mirror: %w", err)

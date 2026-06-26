@@ -449,6 +449,10 @@ func migrate(conn *sql.DB) error {
 		"blocked_periods": "TEXT NOT NULL DEFAULT '[]'", // json array of {start,end} (blocked_at[])
 		"in_review_at":    "TEXT",
 		"done_at":         "TEXT",
+		// last_activity_at bumps on any agent activity (transition / comment /
+		// progress note) so the stale-scanner measures idle-since-activity, not
+		// idle-since-dispatch — a heads-down lead on a multi-hour build isn't stale.
+		"last_activity_at": "TEXT",
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
@@ -879,6 +883,12 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_events_undelivered ON events(delivered_at) WHERE delivered_at IS NULL`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_events_created ON events(id DESC)`)
+
+	// Backfill last_activity_at for rows that predate the column: seed it from the
+	// best existing timestamp so the stale-scanner has a baseline (idempotent —
+	// only fills NULLs).
+	_, _ = conn.Exec(`UPDATE tasks SET last_activity_at = COALESCE(started_at, accepted_at, dispatched_at)
+	                  WHERE last_activity_at IS NULL`)
 
 	// Lowercase all agent names for case-insensitive matching
 	migrateLowercaseAgentNames(conn)
