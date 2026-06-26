@@ -131,6 +131,13 @@ func (r *Relay) handleIngestSessionStart(w http.ResponseWriter, req *http.Reques
 		})
 	}
 
+	// Always tell the session what to do when a tool looks missing — the #1
+	// confusion under discovery mode ("tool 'create_project' not found").
+	toolsHint := "agent-relay tools: if a tool isn't found (e.g. \"tool 'create_project' not found\"), " +
+		"this relay uses progressive disclosure — invoke any tool by name via call_tool(tool, args) " +
+		"(use discover_tools(category) first to get its schema), or add ?tools=full to the relay MCP URL " +
+		"in .mcp.json and run /mcp to list every tool directly."
+
 	resp := map[string]any{"bound": found}
 	if found {
 		resp["agent"] = name
@@ -138,9 +145,11 @@ func (r *Relay) handleIngestSessionStart(w http.ResponseWriter, req *http.Reques
 		resp["additionalContext"] = fmt.Sprintf(
 			"You are the agent-relay agent %q in project %q (session re-bound after %s). "+
 				"Your identity persists across /clear via this worktree. "+
-				"Call get_inbox to see messages addressed to you, and set ?agent=%s on the relay MCP URL.",
-			name, project, sourceOrStartup(body.Source), name,
+				"Call get_inbox to see messages addressed to you, and set ?agent=%s on the relay MCP URL. %s",
+			name, project, sourceOrStartup(body.Source), name, toolsHint,
 		)
+	} else {
+		resp["additionalContext"] = toolsHint
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)

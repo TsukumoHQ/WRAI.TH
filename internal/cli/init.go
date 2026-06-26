@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type mcpConfig struct {
@@ -66,11 +67,16 @@ func runInit(args []string) {
 
 	mcpPath := filepath.Join(dir, ".mcp.json")
 
-	// Build the URL
-	url := fmt.Sprintf("http://%s:%s/mcp", host, port)
+	// Build the URL. tools=full exposes every tool on tools/list so list-driven
+	// clients (Claude Code) can call create_project et al. directly — the default
+	// (discovery) only lists discover_tools + call_tool, which surfaces as
+	// "tool 'create_project' not found" for direct callers. Power users wanting the
+	// ~10k-token-lighter init can switch the URL to ?tools=discovery.
+	params := []string{"tools=full"}
 	if project != "" {
-		url += "?project=" + project
+		params = append([]string{"project=" + project}, params...)
 	}
+	url := fmt.Sprintf("http://%s:%s/mcp?%s", host, port, strings.Join(params, "&"))
 
 	// Check if file already exists
 	if _, err := os.Stat(mcpPath); err == nil {

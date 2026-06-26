@@ -119,19 +119,14 @@ Rules:
 
 ## Activity Tracking
 
-The relay tracks real-time agent activity via Claude Code hooks. Copy hook scripts from `skill/hooks/` to `~/.claude/hooks/` and add to `~/.claude/settings.json`:
+The dashboard's live signals (last_seen, activity stream, per-turn tokens/cost, identity re-bind on `/clear`) are fed by Claude Code hooks. Install them with one command — it writes the scripts to `~/.claude/hooks/` AND wires `~/.claude/settings.json` (idempotent, backs up first):
 
-```json
-{
-  "hooks": {
-    "PreToolUse": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/ingest-pre-tool.sh", "timeout": 5 }] }],
-    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/ingest-post-tool.sh", "timeout": 5 }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/ingest-stop.sh", "timeout": 5 }] }],
-    "SubagentStart": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/ingest-subagent-start.sh", "timeout": 5 }] }],
-    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "~/.claude/hooks/ingest-subagent-stop.sh", "timeout": 5 }] }]
-  }
-}
+```bash
+agent-relay hooks install   # then restart the session (or /clear) so it reloads settings.json
+agent-relay hooks status    # per-event diagnostic: is each script on disk AND wired?
 ```
+
+Requires `jq` + `curl`; hooks POST to `${RELAY_URL:-http://localhost:8090}` (set `RELAY_URL`/`RELAY_API_KEY` if the relay runs elsewhere or auth is on). `install.sh` runs this for you and the auto-updater re-runs the wiring on each update. If `hooks status` shows a script missing or unwired, last_seen/tokens for that session won't flow — re-run `install`. (Mac/Linux today; Windows uses `install.ps1` until native PowerShell hooks land.)
 
 Activity types: typing (Write/Edit), reading (Read/Glob/Grep), terminal (Bash), browsing (WebSearch), thinking (Agent/Skill), waiting (10s idle), idle (30s).
 
@@ -141,7 +136,7 @@ Link session to agent: pass `session_id` from `whoami` in `register_agent`.
 
 ## Token Efficiency
 
-- **Worker agents should connect with `?tools=discovery`** (`http://localhost:8090/mcp?tools=discovery`): only 2 tools are exposed (~460 tokens of schemas instead of ~11,000). Call `discover_tools(category)` to fetch one category's schemas, then `call_tool(tool: "send_message", args: {...})` to invoke. Categories: session, messaging, conversations, tasks, boards, memory, profiles, agents, teams, projects.
+- **Tools exposure modes (`?tools=` on the MCP URL).** `?tools=full` lists every tool (~11k tokens) so a list-driven client (Claude Code) can call them directly by name — this is what `agent-relay init` writes. `?tools=discovery` (the relay's bare default) lists only `discover_tools` + `call_tool` (~460 tokens). **If a tool seems missing** (e.g. `tool 'create_project' not found`), you are in discovery mode: call `discover_tools(category)` then `call_tool(tool: "create_project", args: {...})` — every tool stays callable that way — **or** add `?tools=full` to the relay URL in `.mcp.json` and run `/mcp` to reload. Categories: session, messaging, conversations, tasks, boards, memory, profiles, agents, teams, projects. (Token-conscious worker loops can opt into `?tools=discovery` + `call_tool`.)
 - **`get_inbox`, `list_tasks`, `list_agents`, `list_memories` return compact markdown tables by default** (~half the tokens of JSON). Pass `format: "json"` when you need the structured shape.
 - Default connection (no `?tools=`) keeps full schemas for compatibility.
 
