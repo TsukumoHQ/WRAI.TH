@@ -27,6 +27,11 @@ type Handlers struct {
 	connMu    sync.RWMutex
 	connector connector.TaskConnector
 
+	// budgetAlerted dedupes the per-agent budget-exceeded alert to once an hour
+	// (TSU-53 slice-C), so a runaway agent pings once, not every flush.
+	budgetMu      sync.Mutex
+	budgetAlerted map[string]time.Time
+
 	// requireRegistered gates mutating tools behind a registered acting agent
 	// (RELAY_REQUIRE_REGISTERED). Set from config in relay.New before dispatch.
 	requireRegistered bool
@@ -54,9 +59,49 @@ func (h *Handlers) getConnector() connector.TaskConnector {
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
-	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256)}
+	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), budgetAlerted: map[string]time.Time{}}
 	go h.flushTokenUsage()
 	return h
+}
+
+// checkBudgets fires a budget-exceeded event for any agent in the just-flushed
+// batch that crossed its per-day token quota (TSU-53 slice-C: the relay ACTS on
+// the budget — alert, on top of the hard quota block). Deduped to once/hour per
+// agent. The event flows through the bus → rules → a ping (default rule targets
+// the human/owner). Best-effort: never blocks token recording.
+func (h *Handlers) checkBudgets(batch []db.TokenRecord) {
+	seen := map[string]bool{}
+	for _, r := range batch {
+		if r.Agent == "" {
+			continue
+		}
+		key := r.Project + "/" + r.Agent
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+
+		allowed, used, limit := h.db.CheckQuota(r.Project, r.Agent, "tokens")
+		if allowed || limit <= 0 {
+			continue
+		}
+		h.budgetMu.Lock()
+		recent := time.Since(h.budgetAlerted[key]) < time.Hour
+		if !recent {
+			h.budgetAlerted[key] = time.Now()
+		}
+		h.budgetMu.Unlock()
+		if recent {
+			continue
+		}
+		log.Printf("notifier: budget-exceeded %s used %d/%d tokens (24h)", key, used, limit)
+		h.events.EmitSemantic("event:budget-exceeded", r.Project, r.Agent, map[string]any{
+			"agent": r.Agent,
+			"used":  used,
+			"limit": limit,
+			"line":  fmt.Sprintf("Budget exceeded: %s used %d/%d tokens (24h)", r.Agent, used, limit),
+		})
+	}
 }
 
 // flushTokenUsage batches token usage records and inserts them every 5s or 50 records.
@@ -74,7 +119,9 @@ func (h *Handlers) flushTokenUsage() {
 		buf = buf[:0]
 		if err := h.db.InsertTokenUsageBatch(batch); err != nil {
 			log.Printf("token usage flush error: %v", err)
+			return
 		}
+		h.checkBudgets(batch)
 	}
 
 	for {

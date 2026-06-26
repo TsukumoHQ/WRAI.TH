@@ -792,6 +792,15 @@ func (n *Notifier) seedDefaults() {
 			Target:  "human",
 			Opts:    `{"interval_hours":8,"priority":"P3"}`,
 		},
+		{
+			Name:    "Budget exceeded → human (P0)",
+			Enabled: true,
+			Event:   "event:budget-exceeded",
+			Match:   `{}`,
+			Action:  "message",
+			Target:  "human",
+			Opts:    `{"priority":"P0","template":"💸 {line}"}`,
+		},
 	}
 	for i := range defaults {
 		r := defaults[i]

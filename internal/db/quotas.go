@@ -131,7 +131,9 @@ func (d *DB) GetQuotaUsage(project, agentName string) (*models.QuotaUsage, error
 func (d *DB) countTokenUsage24h(project, agent string) int64 {
 	cutoff := time.Now().UTC().Add(-24 * time.Hour).Format(memoryTimeFmt)
 	var count int64
-	_ = d.ro().QueryRow(`SELECT COALESCE(SUM(bytes), 0) FROM token_usage WHERE project = ? AND agent = ? AND created_at > ?`,
+	// Use the real per-turn token count when present, else the bytes/4 estimate
+	// (tokenSum) — a per-day TOKEN quota must measure tokens, not raw payload bytes.
+	_ = d.ro().QueryRow(`SELECT COALESCE(`+tokenSum+`, 0) FROM token_usage WHERE project = ? AND agent = ? AND created_at > ?`,
 		project, agent, cutoff).Scan(&count)
 	return count
 }
