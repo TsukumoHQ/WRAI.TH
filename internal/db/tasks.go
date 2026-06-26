@@ -63,7 +63,7 @@ var validTransitions = map[string][]string{
 
 const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, description, priority, status, result, blocked_reason, project, dispatched_at, accepted_at, started_at, completed_at, parent_task_id, ack_notified_at, ack_escalated_at, board_id, archived_at, " +
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
-	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id"
+	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -73,7 +73,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.AckNotifiedAt, &t.AckEscalatedAt, &t.BoardID, &t.ArchivedAt,
 		&t.Source, &t.LinearIssueID, &t.LinearKey, &t.ExternalURL, &t.Points, &t.Labels,
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
-		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID)
+		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt)
 	return t, err
 }
 
@@ -101,10 +101,10 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 	}
 
 	_, err := d.conn.Exec(
-		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native')`,
+		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?)`,
 		task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
-		task.Priority, task.Status, task.Project, task.DispatchedAt, task.ParentTaskID, task.BoardID,
+		task.Priority, task.Status, task.Project, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch task: %w", err)
@@ -293,6 +293,9 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return nil, fmt.Errorf("concurrent transition on task %s: status changed from %q before %q could apply", taskID, oldStatus, newStatus)
 	}
+	// A transition is activity — reset the stale clock.
+	_, _ = d.conn.Exec("UPDATE tasks SET last_activity_at = ? WHERE id = ? AND project = ?", now, taskID, project)
+	task.LastActivityAt = &now
 	return task, nil
 }
 
