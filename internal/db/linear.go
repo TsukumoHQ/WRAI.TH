@@ -107,6 +107,14 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 		if err != nil {
 			return "", false, fmt.Errorf("update linear mirror: %w", err)
 		}
+		// A Linear-driven status CHANGE is activity — the dispatch (Todo→In
+		// Progress) is the OPPOSITE of stale, but the mirror update alone left
+		// last_activity_at at created_at, so a freshly dispatched task read as
+		// instantly stale. Bump it on any status transition, mirroring the
+		// agent-side reset-on-activity (transitionTask).
+		if existing.Status != s.Status {
+			_, _ = d.conn.Exec("UPDATE tasks SET last_activity_at = ? WHERE id = ?", now, existing.ID)
+		}
 		return existing.ID, false, nil
 	}
 
