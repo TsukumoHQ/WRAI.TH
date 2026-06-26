@@ -695,10 +695,29 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	if err != nil || memories == nil {
 		memories = []models.Memory{}
 	}
+	// Decisions get a dedicated section below, so drop layer="decision" from the
+	// generic memory view — never let the memory budget crowd out settled calls.
+	kept := memories[:0]
+	for _, m := range memories {
+		if m.Layer != "decision" {
+			kept = append(kept, m)
+		}
+	}
+	memories = kept
 	projectedMems := projectMemories(memories, sessionMemoryBudget)
 	result["relevant_memories"] = projectedMems
 	if len(projectedMems) < len(memories) {
 		result["memories_omitted"] = len(memories) - len(projectedMems)
+	}
+
+	// Accepted decisions — the settled-calls set (TSU-51), ALWAYS surfaced so a
+	// new agent reads them before re-litigating. Bounded; full text via
+	// recall_decisions / get_memory(key).
+	if decs, derr := h.db.ListDecisions(project); derr == nil && len(decs) > 0 {
+		result["decisions"] = projectDecisions(decs, sessionDecisionMax)
+		if len(decs) > sessionDecisionMax {
+			result["decisions_omitted"] = len(decs) - sessionDecisionMax
+		}
 	}
 
 	// Vault/doc context is served externally (the doc-context host), not injected here.

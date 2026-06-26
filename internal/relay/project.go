@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"encoding/json"
 	"unicode/utf8"
 
+	"agent-relay/internal/db"
 	"agent-relay/internal/models"
 )
 
@@ -341,6 +343,42 @@ func memorySummaryBytes(s MemorySummary) int {
 // Constraints-layer memories bypass the budget (mirrors the P0-bypass rule):
 // a CTO constraint must always survive into the boot payload. The caller
 // (ListBootMemories) already orders constraints first, then updated_at DESC.
+// sessionDecisionMax bounds how many accepted decisions are injected at session
+// start. Decisions are one-liners, so the count keeps the section bounded
+// without a byte budget; the overflow count is surfaced and the rest are
+// reachable via recall_decisions.
+const sessionDecisionMax = 40
+
+// DecisionSummary is the compact session-context form of an accepted decision.
+type DecisionSummary struct {
+	Key       string `json:"key"`
+	Area      string `json:"area,omitempty"`
+	Decision  string `json:"decision"`
+	Rationale string `json:"rationale,omitempty"`
+}
+
+// projectDecisions decodes accepted decision memories into the compact boot form,
+// capped at max.
+func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
+	if max > 0 && len(decs) > max {
+		decs = decs[:max]
+	}
+	out := make([]DecisionSummary, 0, len(decs))
+	for _, m := range decs {
+		s := DecisionSummary{Key: m.Key}
+		var dv db.DecisionValue
+		if json.Unmarshal([]byte(m.Value), &dv) == nil && dv.Decision != "" {
+			s.Decision = dv.Decision
+			s.Area = dv.Area
+			s.Rationale = dv.Rationale
+		} else {
+			s.Decision = m.Value
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
 func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 	if len(mems) == 0 {
 		return []MemorySummary{}
