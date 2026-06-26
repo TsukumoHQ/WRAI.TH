@@ -123,9 +123,13 @@ func (d *DB) GetSkillByName(project, name string) (*models.Skill, error) {
 
 // FindProfilesBySkill returns profiles linked to a specific skill via the structured registry.
 func (d *DB) FindProfilesBySkill(project, skillName string) ([]models.Profile, error) {
+	// Column list MUST match scanProfile's destinations. It previously selected a
+	// richer 15-column set (context_pack, soul_keys, …) that scanProfile doesn't
+	// read, so every row failed to scan and was silently skipped — making the
+	// structured skill→profile routing dead-on-arrival the moment any profile_skills
+	// link existed. Select exactly profileColumns, aliased to p.
 	rows, err := d.ro().Query(
-		`SELECT p.id, p.slug, p.name, p.role, p.context_pack, p.soul_keys, p.skills, p.vault_paths,
-		 p.allowed_tools, p.pool_size, COALESCE(p.exit_prompt, ''), p.project, p.org_id, p.created_at, p.updated_at
+		`SELECT p.id, p.slug, p.name, p.role, p.skills, p.project, p.org_id, p.created_at, p.updated_at
 		 FROM profiles p
 		 JOIN profile_skills ps ON ps.profile_id = p.id
 		 JOIN skills s ON s.id = ps.skill_id
@@ -142,7 +146,9 @@ func (d *DB) FindProfilesBySkill(project, skillName string) ([]models.Profile, e
 	for rows.Next() {
 		p, err := scanProfile(rows)
 		if err != nil {
-			continue
+			// Surface scan errors instead of silently skipping — a swallowed
+			// mismatch here is exactly what killed routing before.
+			return nil, fmt.Errorf("scan profile by skill: %w", err)
 		}
 		profiles = append(profiles, p)
 	}
