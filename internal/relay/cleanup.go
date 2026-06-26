@@ -21,8 +21,11 @@ const (
 	ACKEscalateAge = 45 * time.Minute
 	// BackupInterval is how often a rotated DB snapshot is written.
 	BackupInterval = time.Hour
-	// BackupKeep is how many rotated snapshots to retain.
-	BackupKeep = 3
+	// BackupKeep is how many rotated snapshots to retain. 12 hourly snapshots =
+	// a ~12h recovery window — wide enough that an incident isn't rotated out
+	// before it's noticed (the data-loss restore leaned on a 07:53 snapshot that
+	// was the oldest of only 3, nearly gone). Disk: ~snapshot-size × 12.
+	BackupKeep = 12
 )
 
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
