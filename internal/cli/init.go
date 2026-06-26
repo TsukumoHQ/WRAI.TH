@@ -5,26 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 type mcpConfig struct {
 	MCPServers map[string]mcpServerEntry `json:"mcpServers"`
-}
-
-// ensureToolsFull appends ?tools=full (or &tools=full) to a relay MCP URL that
-// has no tools= mode, so list-driven clients see every tool. An explicit
-// tools=discovery is respected (returns unchanged). Returns the URL + whether it
-// changed.
-func ensureToolsFull(rawURL string) (string, bool) {
-	if strings.Contains(rawURL, "tools=") {
-		return rawURL, false
-	}
-	sep := "?"
-	if strings.Contains(rawURL, "?") {
-		sep = "&"
-	}
-	return rawURL + sep + "tools=full", true
 }
 
 type mcpServerEntry struct {
@@ -82,16 +66,15 @@ func runInit(args []string) {
 
 	mcpPath := filepath.Join(dir, ".mcp.json")
 
-	// Build the URL. tools=full exposes every tool on tools/list so list-driven
-	// clients (Claude Code) can call create_project et al. directly — the default
-	// (discovery) only lists discover_tools + call_tool, which surfaces as
-	// "tool 'create_project' not found" for direct callers. Power users wanting the
-	// ~10k-token-lighter init can switch the URL to ?tools=discovery.
-	params := []string{"tools=full"}
+	// Default URL = discovery mode (lean ~1.5k-token tools/list). The relay keeps
+	// the onboarding core (create_project, register_agent, whoami,
+	// get_session_context) visible even in discovery, so setup works directly
+	// without paying the ~11k-token full list. Power users can append
+	// ?tools=full to list every tool.
+	url := fmt.Sprintf("http://%s:%s/mcp", host, port)
 	if project != "" {
-		params = append([]string{"project=" + project}, params...)
+		url += "?project=" + project
 	}
-	url := fmt.Sprintf("http://%s:%s/mcp?%s", host, port, strings.Join(params, "&"))
 
 	// Check if file already exists
 	if _, err := os.Stat(mcpPath); err == nil {
@@ -101,19 +84,6 @@ func runInit(args []string) {
 			var cfg mcpConfig
 			if json.Unmarshal(existing, &cfg) == nil {
 				if entry, exists := cfg.MCPServers["agent-relay"]; exists {
-					// Already configured — upgrade the URL to ?tools=full if it's
-					// missing, so an existing project gets the fix (list-driven
-					// clients couldn't see create_project under the discovery
-					// default) without a manual edit. Idempotent otherwise.
-					if upgraded, changed := ensureToolsFull(entry.URL); changed {
-						entry.URL = upgraded
-						cfg.MCPServers["agent-relay"] = entry
-						writeConfig(mcpPath, cfg)
-						fmt.Printf("upgraded agent-relay URL in %s (added tools=full)\n", mcpPath)
-						fmt.Printf("  url: %s\n", upgraded)
-						fmt.Println("  → run /mcp in Claude Code to reload")
-						return
-					}
 					fmt.Printf("agent-relay already configured in %s\n", mcpPath)
 					fmt.Printf("  url: %s\n", entry.URL)
 					return

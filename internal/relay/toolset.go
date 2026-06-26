@@ -269,12 +269,30 @@ func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) 
 // toolsModeFilter hides the full toolset behind discover_tools/call_tool when
 // the connection asked for ?tools=discovery, and hides the discovery pair in
 // full mode. Call dispatch is unaffected — only tools/list is filtered.
+// coreDiscoveryTools stay on tools/list even in discovery mode: the onboarding
+// tools a list-driven client (Claude Code) must call BY NAME before it would
+// ever think to discover_tools — without them, `create_project` 404s with
+// "tool not found". Adding ~5 schemas keeps the init payload ~1.5k tokens (vs
+// ~430 bare / ~11k full), so the token economy is preserved while project setup
+// works out of the box. Everything else still flows through discover/call_tool.
+var coreDiscoveryTools = map[string]bool{
+	"create_project":      true,
+	"delete_project":      true,
+	"register_agent":      true,
+	"whoami":              true,
+	"get_session_context": true,
+}
+
 func toolsModeFilter(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
 	discovery := ToolsModeFromContext(ctx) == ToolsModeDiscovery
 	filtered := make([]mcp.Tool, 0, len(tools))
 	for _, t := range tools {
 		isDiscoveryTool := t.Name == discoveryToolName || t.Name == callToolName
-		if isDiscoveryTool == discovery {
+		keep := isDiscoveryTool == discovery
+		if discovery && coreDiscoveryTools[t.Name] {
+			keep = true // surface the onboarding core even in discovery mode
+		}
+		if keep {
 			filtered = append(filtered, t)
 		}
 	}

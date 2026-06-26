@@ -83,11 +83,29 @@ func TestToolsModeFilter(t *testing.T) {
 		t.Errorf("full mode: %d tools, want %d (discovery pair hidden)", len(full), len(all)-2)
 	}
 
-	// Discovery is the default: a bare context resolves to discovery.
+	// Discovery is the default: a bare context resolves to discovery. It exposes
+	// the discovery pair PLUS the onboarding core (so create_project works
+	// directly without paying the full list). Count = 2 + core tools present.
 	discCtx := context.Background()
 	disc := toolsModeFilter(discCtx, all)
-	if len(disc) != 2 {
-		t.Errorf("discovery mode: %d tools, want 2", len(disc))
+	wantDisc := 2
+	got := map[string]bool{}
+	for _, t := range disc {
+		got[t.Name] = true
+	}
+	for name := range coreDiscoveryTools {
+		for _, t := range all {
+			if t.Name == name {
+				wantDisc++
+				break
+			}
+		}
+	}
+	if len(disc) != wantDisc {
+		t.Errorf("discovery mode: %d tools, want %d (discovery pair + core)", len(disc), wantDisc)
+	}
+	if !got["discover_tools"] || !got["call_tool"] || !got["create_project"] {
+		t.Errorf("discovery must expose discover_tools + call_tool + create_project; got %v", got)
 	}
 }
 
