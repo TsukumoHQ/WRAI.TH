@@ -156,6 +156,21 @@ If the relay appears at multiple levels, Claude Code deduplicates by server name
 
 <br>
 
+## &#x1FA9D; Activity Hooks -- last_seen, activity stream, identity, tokens
+
+The dashboard's live signals (last_seen, the activity stream, per-turn token/cost, and identity re-bind across `/clear`) are fed by **Claude Code hooks**. They are NOT automatic -- a session only reports if its `~/.claude/settings.json` wires them. One command installs the scripts and the wiring:
+
+```bash
+agent-relay hooks install   # writes ~/.claude/hooks/*.sh + merges settings.json (backs it up first)
+agent-relay hooks status    # shows, per event, whether the script is on disk AND wired
+```
+
+`install` is idempotent (safe to re-run) and self-contained (scripts are embedded in the binary -- no network). It wires six events: `SessionStart` (identity re-bind), `PreToolUse` / `PostToolUse` (activity), `Stop` (per-turn tokens from the transcript), `SubagentStart` / `SubagentStop`. **Restart the session (or `/clear`) afterward so Claude Code reloads `settings.json`.**
+
+Requirements: `jq` and `curl` on `PATH`. Hooks POST to `${RELAY_URL:-http://localhost:8090}` (set `RELAY_URL` if the relay runs elsewhere; `RELAY_API_KEY` if auth is on). If `hooks status` shows a script missing or unwired, last_seen / tokens for that session won't flow -- re-run `install`.
+
+<br>
+
 ## &#x1F680; First Project Setup
 
 One tool does everything. In Claude Code, call:

@@ -39,6 +39,9 @@ func main() {
 		case "mcp":
 			startStdioMCP()
 			return
+		case "hooks":
+			cli.RunHooks(hookScripts, os.Args[2:])
+			return
 		case "init", "update", "status", "agents", "inbox", "send", "thread", "stats", "conversations", "memories":
 			cli.Run(os.Args[1:])
 			return
