@@ -393,7 +393,17 @@ func refreshSkillAndHooks(version string) {
 			hookOK++
 		}
 	}
-	fmt.Printf("skill %d/2, hooks %d/%d\n", skillOK, hookOK, len(hooks))
+
+	// Re-wire settings.json so an update REPAIRS the hook wiring, not just the
+	// scripts — a downloaded script that isn't referenced in settings.json never
+	// fires (the partial-state bug that left last_seen/tokens dead). Idempotent;
+	// skipped on Windows (bash hooks, .ps1 is a follow-up).
+	wired := 0
+	if runtime.GOOS != "windows" {
+		settingsPath := filepath.Join(home, ".claude", "settings.json")
+		wired, _ = mergeHookSettings(hooksDir, settingsPath)
+	}
+	fmt.Printf("skill %d/2, hooks %d/%d (wired %d new)\n", skillOK, hookOK, len(hooks), wired)
 }
 
 // verifyChecksum compares the SHA-256 of file against the entry for name in a

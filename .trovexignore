@@ -9,6 +9,9 @@ CLAUDE.md
 AGENTS.md
 LICENSE*
 .claude/*
+# Shipped skill docs: install.sh + the auto-updater download these from the repo
+# into ~/.claude/commands/ + ~/.claude/hooks/ — they MUST stay real files on disk.
+skill/**
 #
 # Blog articles stay publishable source files (they ship as web pages):
 **/blog/**

@@ -85,6 +85,23 @@ func hooksInstall(scripts embed.FS, hooksDir, settingsPath string) {
 	fmt.Printf("✓ wrote %d hook scripts → %s\n", wrote, hooksDir)
 
 	// 2. Merge the hook wiring into settings.json (backup first, idempotent).
+	wired, err := mergeHookSettings(hooksDir, settingsPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "wire settings: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("✓ wired %d new hook event(s) into %s\n", wired, settingsPath)
+	fmt.Println("  events: PreToolUse, PostToolUse, Stop, SubagentStart, SubagentStop, SessionStart")
+	fmt.Println("  hooks POST to ${RELAY_URL:-http://localhost:8090}; need `jq` + `curl` on PATH.")
+	fmt.Println("  Restart the Claude Code session (or /clear) so it reloads settings.json.")
+}
+
+// mergeHookSettings idempotently wires the on-disk hook scripts into the Claude
+// Code settings.json (backup first). Skips an event whose script isn't on disk
+// and an event already pointing at the script. Returns the count newly wired.
+// Shared by `hooks install` and the auto-updater's refresh so a `update` repairs
+// the wiring, not just the scripts.
+func mergeHookSettings(hooksDir, settingsPath string) (int, error) {
 	settings := map[string]any{}
 	if raw, err := os.ReadFile(settingsPath); err == nil {
 		_ = os.WriteFile(settingsPath+".bak", raw, 0o644) // best-effort backup
@@ -101,7 +118,7 @@ func hooksInstall(scripts embed.FS, hooksDir, settingsPath string) {
 	for _, he := range hookEvents {
 		cmd := filepath.Join(hooksDir, he.script)
 		if _, err := os.Stat(cmd); err != nil {
-			continue // script not on disk (e.g. not in this build) → don't wire a dead command
+			continue
 		}
 		arr, _ := hooks[he.event].([]any)
 		if hookAlreadyWired(arr, cmd) {
@@ -117,17 +134,12 @@ func hooksInstall(scripts embed.FS, hooksDir, settingsPath string) {
 
 	out, err := json.MarshalIndent(settings, "", "    ")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "encode settings: %v\n", err)
-		os.Exit(1)
+		return 0, err
 	}
 	if err := os.WriteFile(settingsPath, append(out, '\n'), 0o644); err != nil {
-		fmt.Fprintf(os.Stderr, "write %s: %v\n", settingsPath, err)
-		os.Exit(1)
+		return 0, err
 	}
-	fmt.Printf("✓ wired %d new hook event(s) into %s\n", wired, settingsPath)
-	fmt.Println("  events: PreToolUse, PostToolUse, Stop, SubagentStart, SubagentStop, SessionStart")
-	fmt.Println("  hooks POST to ${RELAY_URL:-http://localhost:8090}; need `jq` + `curl` on PATH.")
-	fmt.Println("  Restart the Claude Code session (or /clear) so it reloads settings.json.")
+	return wired, nil
 }
 
 // hookAlreadyWired reports whether an event's hook array already runs cmd.
