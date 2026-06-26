@@ -171,9 +171,15 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	// blocked closes the open blocked window in the auto-stamped trail.
 	leavingBlocked := task.Status == "blocked" && newStatus != "blocked"
 
+	// oldStatus is the value we validated against; every UPDATE below carries a
+	// compare-and-swap guard (AND status = oldStatus) so the write only lands if
+	// the row hasn't changed since GetTask read it.
+	oldStatus := task.Status
+
 	// Build update. Every transition auto-stamps its temporal trail with zero
 	// manual input.
 	task.Status = newStatus
+	var res sql.Result
 	switch newStatus {
 	case "pending":
 		task.AssignedTo = nil
@@ -187,9 +193,9 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.InReviewAt = nil
 		task.DoneAt = nil
 		task.BlockedPeriods = "[]"
-		_, err = d.conn.Exec(
-			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, completed_at = NULL, result = NULL, blocked_reason = NULL, claimed_by = NULL, claimed_at = NULL, in_review_at = NULL, done_at = NULL, blocked_periods = '[]' WHERE id = ? AND project = ?",
-			newStatus, taskID, project,
+		res, err = d.conn.Exec(
+			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, completed_at = NULL, result = NULL, blocked_reason = NULL, claimed_by = NULL, claimed_at = NULL, in_review_at = NULL, done_at = NULL, blocked_periods = '[]' WHERE id = ? AND project = ? AND status = ?",
+			newStatus, taskID, project, oldStatus,
 		)
 	case "accepted":
 		// claim → claimed_at + claimed_by (also sets assigned_to + accepted_at)
@@ -197,9 +203,9 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.AcceptedAt = &now
 		task.ClaimedBy = &agentName
 		task.ClaimedAt = &now
-		_, err = d.conn.Exec(
-			"UPDATE tasks SET status = ?, assigned_to = ?, accepted_at = ?, claimed_by = ?, claimed_at = ? WHERE id = ? AND project = ?",
-			newStatus, agentName, now, agentName, now, taskID, project,
+		res, err = d.conn.Exec(
+			"UPDATE tasks SET status = ?, assigned_to = ?, accepted_at = ?, claimed_by = ?, claimed_at = ? WHERE id = ? AND project = ? AND status = ?",
+			newStatus, agentName, now, agentName, now, taskID, project, oldStatus,
 		)
 	case "in-progress":
 		// start → started_at (and close any open blocked window on resume)
@@ -207,14 +213,14 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.StartedAt = &now
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ?, blocked_periods = ? WHERE id = ? AND project = ?",
-				newStatus, agentName, now, task.BlockedPeriods, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, agentName, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ? WHERE id = ? AND project = ?",
-				newStatus, agentName, now, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, agentName, now, taskID, project, oldStatus,
 			)
 		}
 	case "in-review":
@@ -225,14 +231,14 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		}
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ?, blocked_periods = ? WHERE id = ? AND project = ?",
-				newStatus, agentName, now, task.BlockedPeriods, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, agentName, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ? WHERE id = ? AND project = ?",
-				newStatus, agentName, now, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, agentName, now, taskID, project, oldStatus,
 			)
 		}
 	case "done":
@@ -243,42 +249,49 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.Result = result
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, result = ?, completed_at = ?, done_at = ?, blocked_periods = ? WHERE id = ? AND project = ?",
-				newStatus, result, now, now, task.BlockedPeriods, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, result = ?, completed_at = ?, done_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, result, now, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, result = ?, completed_at = ?, done_at = ? WHERE id = ? AND project = ?",
-				newStatus, result, now, now, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, result = ?, completed_at = ?, done_at = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, result, now, now, taskID, project, oldStatus,
 			)
 		}
 	case "blocked":
 		// block → append {start: now} to blocked_periods
 		task.BlockedReason = blockedReason
 		task.BlockedPeriods = openBlockedPeriod(task.BlockedPeriods, now)
-		_, err = d.conn.Exec(
-			"UPDATE tasks SET status = ?, blocked_reason = ?, blocked_periods = ? WHERE id = ? AND project = ?",
-			newStatus, blockedReason, task.BlockedPeriods, taskID, project,
+		res, err = d.conn.Exec(
+			"UPDATE tasks SET status = ?, blocked_reason = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
+			newStatus, blockedReason, task.BlockedPeriods, taskID, project, oldStatus,
 		)
 	case "cancelled":
 		task.CompletedAt = &now
 		task.BlockedReason = blockedReason // reuse as cancellation reason
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, blocked_reason = ?, completed_at = ?, blocked_periods = ? WHERE id = ? AND project = ?",
-				newStatus, blockedReason, now, task.BlockedPeriods, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, blocked_reason = ?, completed_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, blockedReason, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			_, err = d.conn.Exec(
-				"UPDATE tasks SET status = ?, blocked_reason = ?, completed_at = ? WHERE id = ? AND project = ?",
-				newStatus, blockedReason, now, taskID, project,
+			res, err = d.conn.Exec(
+				"UPDATE tasks SET status = ?, blocked_reason = ?, completed_at = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, blockedReason, now, taskID, project, oldStatus,
 			)
 		}
 	}
 	if err != nil {
 		return nil, fmt.Errorf("update task status: %w", err)
+	}
+	// CAS check: 0 rows affected means the row changed (or vanished) between the
+	// read and the write — a concurrent transition won. Report the conflict
+	// instead of returning a task the caller never actually transitioned. This is
+	// what stops two agents double-claiming the same task.
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return nil, fmt.Errorf("concurrent transition on task %s: status changed from %q before %q could apply", taskID, oldStatus, newStatus)
 	}
 	return task, nil
 }
