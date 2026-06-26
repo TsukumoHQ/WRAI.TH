@@ -9,6 +9,51 @@ import (
 	"agent-relay/internal/db"
 )
 
+// apiListQuotas returns the per-agent quotas for a project. Path: GET /api/quotas
+func (r *Relay) apiListQuotas(w http.ResponseWriter, req *http.Request) {
+	project := req.URL.Query().Get("project")
+	if project == "" {
+		project = "default"
+	}
+	data, err := r.DB.ListAgentQuotas(project)
+	if err != nil {
+		http.Error(w, `{"error":"failed to list quotas"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, data)
+}
+
+// apiSetQuota sets (upserts) an agent's quota. Path: POST /api/quotas
+// {project, agent, max_tokens_per_day, max_messages_per_hour, max_tasks_per_hour, max_spawns_per_hour}
+// 0 on a field = unlimited for that dimension. The per-day token quota drives
+// both the hard block and the budget-exceeded alert (TSU-53 slice-C).
+func (r *Relay) apiSetQuota(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Project          string `json:"project"`
+		Agent            string `json:"agent"`
+		MaxTokensPerDay  int64  `json:"max_tokens_per_day"`
+		MaxMessagesPerHr int64  `json:"max_messages_per_hour"`
+		MaxTasksPerHr    int64  `json:"max_tasks_per_hour"`
+		MaxSpawnsPerHr   int64  `json:"max_spawns_per_hour"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	if strings.TrimSpace(body.Agent) == "" {
+		http.Error(w, `{"error":"agent is required"}`, http.StatusBadRequest)
+		return
+	}
+	if err := r.DB.SetAgentQuota(body.Project, body.Agent, body.MaxTokensPerDay, body.MaxMessagesPerHr, body.MaxTasksPerHr, body.MaxSpawnsPerHr); err != nil {
+		http.Error(w, `{"error":"failed to set quota"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"set": true, "agent": body.Agent, "max_tokens_per_day": body.MaxTokensPerDay})
+}
+
 // apiGetAgentHealth returns the per-agent health snapshot (TSU-53 slice-B).
 // Path: GET /api/agents/health
 func (r *Relay) apiGetAgentHealth(w http.ResponseWriter, req *http.Request) {

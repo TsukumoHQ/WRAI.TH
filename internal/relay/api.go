@@ -167,6 +167,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetTokenTimeSeries(w, req)
 	case path == "/cost" && req.Method == http.MethodGet:
 		r.apiGetCostByAgent(w, req)
+	case path == "/quotas" && req.Method == http.MethodGet:
+		r.apiListQuotas(w, req)
+	case path == "/quotas" && req.Method == http.MethodPost:
+		r.apiSetQuota(w, req)
 	// Agentic analytics (stats panel)
 	case path == "/stats" && req.Method == http.MethodGet:
 		r.apiGetAgentStats(w, req)
