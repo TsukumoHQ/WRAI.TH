@@ -76,6 +76,40 @@ func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest)
 	return h.resultJSONTracked(project, agent, "get_memory", result)
 }
 
+// HandleRemember records an ADR-style decision (TSU-51). Decisions are project
+// memories (layer="decision"); the accepted set is surfaced at session start so
+// agents stop re-litigating settled calls.
+func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	decision := req.GetString("decision", "")
+	if decision == "" {
+		return mcp.NewToolResultError("decision is required (the settled rule, one line)"), nil
+	}
+	rationale := req.GetString("rationale", "")
+	area := req.GetString("area", "")
+	tags := req.GetStringSlice("tags", nil)
+	supersedes := req.GetString("supersedes", "")
+
+	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to remember decision: %v", err)), nil
+	}
+	h.events.Emit(MCPEvent{Type: "memory", Action: "decision", Agent: agent, Project: project, Label: mem.Key})
+	return h.resultJSONTracked(project, agent, "remember", map[string]any{"decision": mem})
+}
+
+// HandleRecallDecisions returns the project's accepted (non-superseded) decisions.
+func (h *Handlers) HandleRecallDecisions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	decs, err := h.db.ListDecisions(project)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to recall decisions: %v", err)), nil
+	}
+	return h.resultJSONTracked(project, agent, "recall_decisions", map[string]any{"decisions": decs, "count": len(decs)})
+}
+
 func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)

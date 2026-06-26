@@ -84,6 +84,8 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: listMemoriesTool(), Handler: h.HandleListMemories}, "memory"},
 		{server.ServerTool{Tool: deleteMemoryTool(), Handler: h.HandleDeleteMemory}, "memory"},
 		{server.ServerTool{Tool: resolveConflictTool(), Handler: h.HandleResolveConflict}, "memory"},
+		{server.ServerTool{Tool: rememberTool(), Handler: h.HandleRemember}, "memory"},
+		{server.ServerTool{Tool: recallDecisionsTool(), Handler: h.HandleRecallDecisions}, "memory"},
 
 		{server.ServerTool{Tool: registerProfileTool(), Handler: h.HandleRegisterProfile}, "profiles"},
 		{server.ServerTool{Tool: getProfileTool(), Handler: h.HandleGetProfile}, "profiles"},
@@ -139,6 +141,7 @@ var mutatingTools = map[string]bool{
 	"batch_complete_tasks": true, "batch_dispatch_tasks": true,
 	"create_board": true, "archive_board": true, "delete_board": true,
 	"set_memory": true, "delete_memory": true, "resolve_conflict": true,
+	"remember":         true,
 	"register_profile": true,
 	"deactivate_agent": true, "delete_agent": true, "sleep_agent": true,
 	"create_org": true, "create_team": true, "add_team_member": true,
