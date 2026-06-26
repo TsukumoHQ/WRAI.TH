@@ -30,6 +30,7 @@ type ingestTokensReq struct {
 	Output        int    `json:"output"`
 	CacheRead     int    `json:"cache_read"`
 	CacheCreation int    `json:"cache_creation"`
+	Model         string `json:"model,omitempty"` // model tier the turn ran on (for $ cost)
 	TS            string `json:"ts,omitempty"`
 }
 
@@ -93,6 +94,7 @@ func (r *Relay) handleIngestTokens(w http.ResponseWriter, req *http.Request) {
 			Output:        body.Output,
 			CacheRead:     body.CacheRead,
 			CacheCreation: body.CacheCreation,
+			Model:         body.Model,
 			CreatedAt:     body.TS,
 		})
 	}

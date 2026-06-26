@@ -593,6 +593,9 @@ func migrate(conn *sql.DB) error {
 		"output_tokens":         "INTEGER NOT NULL DEFAULT 0",
 		"cache_read_tokens":     "INTEGER NOT NULL DEFAULT 0",
 		"cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
+		// model tier the turn ran on (e.g. "claude-opus-4-8") — drives per-tier $
+		// cost. Empty when the hook didn't report it → costed at the default tier.
+		"model": "TEXT NOT NULL DEFAULT ''",
 	})
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_project_time ON token_usage(project, created_at)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_agent_time ON token_usage(project, agent, created_at)`)

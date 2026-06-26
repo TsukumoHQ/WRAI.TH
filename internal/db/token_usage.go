@@ -18,6 +18,7 @@ type TokenRecord struct {
 	Output        int
 	CacheRead     int
 	CacheCreation int
+	Model         string
 	CreatedAt     string
 }
 
@@ -48,14 +49,14 @@ func (d *DB) InsertTokenUsageBatch(records []TokenRecord) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	stmt, err := tx.Prepare("INSERT INTO token_usage (project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+	stmt, err := tx.Prepare("INSERT INTO token_usage (project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
 	defer func() { _ = stmt.Close() }()
 
 	for _, r := range records {
-		if _, err := stmt.Exec(r.Project, r.Agent, r.Tool, r.Bytes, r.Input, r.Output, r.CacheRead, r.CacheCreation, r.CreatedAt); err != nil {
+		if _, err := stmt.Exec(r.Project, r.Agent, r.Tool, r.Bytes, r.Input, r.Output, r.CacheRead, r.CacheCreation, r.Model, r.CreatedAt); err != nil {
 			return fmt.Errorf("insert token usage: %w", err)
 		}
 	}

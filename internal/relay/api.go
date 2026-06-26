@@ -161,6 +161,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetTokenUsageByAgent(w, req)
 	case path == "/token-usage/timeseries" && req.Method == http.MethodGet:
 		r.apiGetTokenTimeSeries(w, req)
+	case path == "/cost" && req.Method == http.MethodGet:
+		r.apiGetCostByAgent(w, req)
 	// Agentic analytics (stats panel)
 	case path == "/stats" && req.Method == http.MethodGet:
 		r.apiGetAgentStats(w, req)
@@ -1775,6 +1777,24 @@ func (r *Relay) apiGetTokenUsageByProject(w http.ResponseWriter, req *http.Reque
 	}
 	if data == nil {
 		data = []db.TokenUsageSummary{}
+	}
+	writeJSON(w, data)
+}
+
+// apiGetCostByAgent returns the per-agent $ rollup (TSU-53). Path: /cost
+func (r *Relay) apiGetCostByAgent(w http.ResponseWriter, req *http.Request) {
+	project := req.URL.Query().Get("project")
+	if project == "" {
+		project = "default"
+	}
+	since := db.PeriodToSince(req.URL.Query().Get("period"))
+	data, err := r.DB.GetCostByAgent(project, since)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to get cost by agent", err)
+		return
+	}
+	if data == nil {
+		data = []db.AgentCost{}
 	}
 	writeJSON(w, data)
 }
