@@ -14,7 +14,7 @@
 .PARAMETER Uninstall
     Remove relay, service, and skill
 .EXAMPLE
-    irm https://raw.githubusercontent.com/Synergix-lab/WRAI.TH/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/TsukumoHQ/WRAI.TH/main/install.ps1 | iex
     .\install.ps1 -Port 9000 -SkipProjects
     .\install.ps1 -Uninstall
 #>
@@ -27,7 +27,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$Repo = "Synergix-lab/WRAI.TH"
+$Repo = "TsukumoHQ/WRAI.TH"
 $BinaryName = "agent-relay.exe"
 $TaskName = "AgentRelay"
 $InstallDir = Join-Path $env:LOCALAPPDATA "AgentRelay"

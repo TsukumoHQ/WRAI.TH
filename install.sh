@@ -3,11 +3,11 @@ set -euo pipefail
 
 # Claude Agentic Relay — Cross-platform installer (macOS + Linux)
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Synergix-lab/WRAI.TH/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/TsukumoHQ/WRAI.TH/main/install.sh | bash
 #   curl -fsSL ... | bash -s -- --port 9000 --skip-projects --no-service
 #   ./install.sh --uninstall
 
-REPO="Synergix-lab/WRAI.TH"
+REPO="TsukumoHQ/WRAI.TH"
 BINARY_NAME="agent-relay"
 SERVICE_LABEL="com.agent-relay"
 DEFAULT_PORT=8090
@@ -967,7 +967,7 @@ EOF
 $relay_marker
 ## Agent Relay
 
-This project uses [Agent Relay](https://github.com/Synergix-lab/WRAI.TH) for multi-agent coordination.
+This project uses [Agent Relay](https://github.com/TsukumoHQ/WRAI.TH) for multi-agent coordination.
 
 - Use \`/relay\` to check inbox, send messages, dispatch tasks, and run autonomous work loops
 - Use \`/relay create_project\` to set up the full colony (teams, goals, profiles, sprint tasks)

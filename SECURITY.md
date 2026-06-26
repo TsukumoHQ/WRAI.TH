@@ -13,7 +13,7 @@
 
 Use one of these channels:
 
-1. **GitHub Security Advisories** (preferred) — use the "Report a vulnerability" button on the [Security tab](https://github.com/Synergix-lab/WRAI.TH/security/advisories/new)
+1. **GitHub Security Advisories** (preferred) — use the "Report a vulnerability" button on the [Security tab](https://github.com/TsukumoHQ/WRAI.TH/security/advisories/new)
 2. **Email** — security@wrai.th
 
 Please include:

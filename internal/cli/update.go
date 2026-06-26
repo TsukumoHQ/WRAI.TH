@@ -25,7 +25,7 @@ type githubRelease struct {
 }
 
 const (
-	repo         = "Synergix-lab/WRAI.TH"
+	repo         = "TsukumoHQ/WRAI.TH"
 	releaseAPI   = "https://api.github.com/repos/" + repo + "/releases/latest"
 	serviceLabel = "com.agent-relay"
 	binaryName   = "agent-relay"

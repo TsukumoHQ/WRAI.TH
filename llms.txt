@@ -14,8 +14,8 @@
 - MCP server: works with any MCP client; local-first (Go, SQLite FTS5).
 
 ## Links
-- [Repository](https://github.com/Synergix-lab/WRAI.TH): source (AGPL-3.0).
-- [Releases](https://github.com/Synergix-lab/WRAI.TH/releases): install the CLI.
+- [Repository](https://github.com/TsukumoHQ/WRAI.TH): source (AGPL-3.0).
+- [Releases](https://github.com/TsukumoHQ/WRAI.TH/releases): install the CLI.
 - [Discord](https://discord.gg/QPq7qfbEk8): community.
 
 ## Part of the suite (built by tsukumo)

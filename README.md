@@ -8,7 +8,7 @@ Stop babysitting one chat. Run a *fleet* -- agents that remember across sessions
 
 <br>
 
-[![Release](https://img.shields.io/badge/v1.0.0-Stable-2ecc71?style=for-the-badge)](https://github.com/Synergix-lab/WRAI.TH/releases/tag/v1.0.0)
+[![Release](https://img.shields.io/badge/v1.0.0-Stable-2ecc71?style=for-the-badge)](https://github.com/TsukumoHQ/WRAI.TH/releases/tag/v1.0.0)
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![MCP](https://img.shields.io/badge/MCP-Protocol-8A2BE2?style=for-the-badge)](https://modelcontextprotocol.io)
 [![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org)
@@ -56,10 +56,10 @@ And you're never flying blind: the **mission-control dashboard** ([below](#-the-
 Don't read the rest of this page. Open **Claude Code** inside the repo you want to manage, paste this, and let it wire everything up:
 
 ```text
-Set up wrai.th (https://github.com/Synergix-lab/WRAI.TH) in this repo, end to end:
+Set up wrai.th (https://github.com/TsukumoHQ/WRAI.TH) in this repo, end to end:
 
 1. Install it — run:
-   curl -fsSL https://raw.githubusercontent.com/Synergix-lab/WRAI.TH/main/install.sh | bash
+   curl -fsSL https://raw.githubusercontent.com/TsukumoHQ/WRAI.TH/main/install.sh | bash
    (builds the binary, starts the relay on localhost:8090, installs the /relay skill)
 2. Register the MCP server for this project — run `agent-relay init` in the repo root,
    then tell me to run /mcp so the agent-relay tools load.
@@ -79,7 +79,7 @@ A couple of minutes later: relay running, your codebase analyzed, and a crew of 
 ## &#x1F4E6; Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Synergix-lab/WRAI.TH/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/TsukumoHQ/WRAI.TH/main/install.sh | bash
 ```
 
 The installer checks dependencies, builds from source (Go + GCC) or falls back to prebuilt, sets up auto-start, installs the `/relay` skill, and configures your projects. Existing `.mcp.json` files are merged (never overwritten) with a `.bak` backup.
@@ -88,7 +88,7 @@ The installer checks dependencies, builds from source (Go + GCC) or falls back t
 <summary><b>Build from source</b></summary>
 
 ```bash
-git clone https://github.com/Synergix-lab/WRAI.TH.git && cd WRAI.TH
+git clone https://github.com/TsukumoHQ/WRAI.TH.git && cd WRAI.TH
 CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 ./agent-relay serve
 ```
@@ -185,7 +185,7 @@ create_project({ name: "my-app", cwd: "/path/to/repo", interactive: true })
 
 ## &#x2728; How It Works
 
-Most of the 58 MCP tools weren't designed by a human. Multiple teams of agents at [synergix-lab](https://github.com/synergix-lab) ran Q&A sessions directly on the wrai.th codebase -- identifying what they needed to work better as a team. Conversations, conflict-aware memory, nested tasks, team permissions, context budget pruning -- all requested by agents who hit friction and asked for features themselves. The relay is shaped by its own users.
+Most of the 58 MCP tools weren't designed by a human. Multiple teams of agents at [TsukumoHQ](https://github.com/TsukumoHQ) ran Q&A sessions directly on the wrai.th codebase -- identifying what they needed to work better as a team. Conversations, conflict-aware memory, nested tasks, team permissions, context budget pruning -- all requested by agents who hit friction and asked for features themselves. The relay is shaped by its own users.
 
 <table>
 <tr>
@@ -932,12 +932,12 @@ Pairs with **trovex** (one canonical doc per query, fewer tokens) and **yoru** (
 
 Opinionated tooling built for a specific workflow. Moves fast.
 
-Something breaks? [Open an issue](https://github.com/Synergix-lab/WRAI.TH/issues). Want to contribute? [Open a PR](https://github.com/Synergix-lab/WRAI.TH/pulls).
+Something breaks? [Open an issue](https://github.com/TsukumoHQ/WRAI.TH/issues). Want to contribute? [Open a PR](https://github.com/TsukumoHQ/WRAI.TH/pulls).
 
 **Stack:** Go 1.25+, SQLite FTS5 (`github.com/mattn/go-sqlite3`, CGO), `mcp-go`, Vanilla JS ES modules (v2 dashboard SPA + legacy canvas)
 
 ```bash
-git clone https://github.com/Synergix-lab/WRAI.TH.git
+git clone https://github.com/TsukumoHQ/WRAI.TH.git
 cd WRAI.TH
 CGO_ENABLED=1 go build -tags fts5 -o agent-relay .
 ./agent-relay serve
@@ -963,10 +963,10 @@ Built and run in production by [tsukumo](https://tsukumo.ch), a developer studio
 
 <div align="center">
 
-Built at [synergix-lab](https://github.com/synergix-lab) · AGPL-3.0 License
+Built at [TsukumoHQ](https://github.com/TsukumoHQ) · AGPL-3.0 License
 
 Built by the team behind [tsukumo](https://tsukumo.ch/?utm_source=wraith&utm_medium=oss-suite&utm_campaign=consulting&utm_content=footer) -- consulting for teams running AI agent fleets.
 
-<!-- [![Star History Chart](https://api.star-history.com/svg?repos=synergix-lab/agent-relay&type=Date)](https://star-history.com/#synergix-lab/agent-relay&Date) -->
+<!-- [![Star History Chart](https://api.star-history.com/svg?repos=TsukumoHQ/WRAI.TH&type=Date)](https://star-history.com/#TsukumoHQ/WRAI.TH&Date) -->
 
 </div>

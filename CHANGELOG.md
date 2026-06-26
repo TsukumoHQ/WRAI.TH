@@ -141,10 +141,10 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 Initial public release — MCP relay server with SQLite persistence, canvas UI, pixel art galaxy/colony views, vault indexing, CI/CD with cross-platform binary builds.
 
-[0.7.0]: https://github.com/Synergix-lab/WRAI.TH/compare/v0.5.0...v0.7.0
-[0.5.0]: https://github.com/Synergix-lab/WRAI.TH/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/Synergix-lab/WRAI.TH/compare/v0.3.0...v0.4.0
-[0.3.0]: https://github.com/Synergix-lab/WRAI.TH/compare/v0.2.1...v0.3.0
-[0.2.1]: https://github.com/Synergix-lab/WRAI.TH/compare/v0.2.0...v0.2.1
-[0.2.0]: https://github.com/Synergix-lab/WRAI.TH/compare/v0.1.1...v0.2.0
-[0.1.1]: https://github.com/Synergix-lab/WRAI.TH/releases/tag/v0.1.1
+[0.7.0]: https://github.com/TsukumoHQ/WRAI.TH/compare/v0.5.0...v0.7.0
+[0.5.0]: https://github.com/TsukumoHQ/WRAI.TH/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/TsukumoHQ/WRAI.TH/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/TsukumoHQ/WRAI.TH/compare/v0.2.1...v0.3.0
+[0.2.1]: https://github.com/TsukumoHQ/WRAI.TH/compare/v0.2.0...v0.2.1
+[0.2.0]: https://github.com/TsukumoHQ/WRAI.TH/compare/v0.1.1...v0.2.0
+[0.1.1]: https://github.com/TsukumoHQ/WRAI.TH/releases/tag/v0.1.1

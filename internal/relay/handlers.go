@@ -701,7 +701,7 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 		result["memories_omitted"] = len(memories) - len(projectedMems)
 	}
 
-	// Vault/doc context is served externally (ctx.prod.synergix.ch), not injected here.
+	// Vault/doc context is served externally (the doc-context host), not injected here.
 
 	return result
 }
