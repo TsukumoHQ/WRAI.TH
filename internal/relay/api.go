@@ -186,6 +186,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiLinearWebhook(w, req)
 	case path == "/linear/teams" && req.Method == http.MethodGet:
 		r.apiLinearTeams(w, req)
+	// GitHub inbound webhook (TSU-52 slice-D): HMAC-verified, emits into the
+	// event outbox. Reachable on loopback via a host relay (smee/poller).
+	case path == "/webhooks/github" && req.Method == http.MethodPost:
+		r.apiGitHubWebhook(w, req)
 	case path == "/agents/avatar" && req.Method == http.MethodPut:
 		r.apiSetAgentAvatar(w, req)
 	default:
