@@ -55,6 +55,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetOrgTree(w, req)
 	case path == "/agents/all" && req.Method == http.MethodGet:
 		r.apiGetAllAgents(w)
+	case path == "/agents/health" && req.Method == http.MethodGet:
+		r.apiGetAgentHealth(w, req)
 	case path == "/conversations/all" && req.Method == http.MethodGet:
 		r.apiGetAllConversations(w)
 	case path == "/conversations" && req.Method == http.MethodGet:

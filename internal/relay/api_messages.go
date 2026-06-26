@@ -5,7 +5,27 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"agent-relay/internal/db"
 )
+
+// apiGetAgentHealth returns the per-agent health snapshot (TSU-53 slice-B).
+// Path: GET /api/agents/health
+func (r *Relay) apiGetAgentHealth(w http.ResponseWriter, req *http.Request) {
+	project := req.URL.Query().Get("project")
+	if project == "" {
+		project = "default"
+	}
+	data, err := r.DB.GetAgentHealth(project)
+	if err != nil {
+		http.Error(w, `{"error":"failed to get agent health"}`, http.StatusInternalServerError)
+		return
+	}
+	if data == nil {
+		data = []db.AgentHealth{}
+	}
+	writeJSON(w, data)
+}
 
 // apiPostMessage is the plain-REST send endpoint (owner directive: dokan scripts
 // notify the relay over REST, never the /mcp JSON-RPC call_tool dispatcher). It
