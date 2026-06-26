@@ -584,6 +584,17 @@ EOF
 install_hooks() {
   step 3 "Installing activity tracking hooks"
 
+  # Preferred path: the binary owns hook setup — embedded scripts + a pure-Go,
+  # idempotent settings.json merge (no python3 dependency, no partial state).
+  # Single source of truth: the same `agent-relay hooks install` users re-run
+  # later (and `hooks status` to diagnose). Fall back to the manual path below
+  # only if the freshly-installed binary can't run.
+  local _bin="${BIN_DIR}/${BINARY_NAME}"
+  if [[ -x "$_bin" ]] && "$_bin" hooks install; then
+    return
+  fi
+  warn "Binary 'hooks install' unavailable — falling back to manual hook setup"
+
   local hooks_dir="$HOME/.claude/hooks"
   local settings_file="$HOME/.claude/settings.json"
   mkdir -p "$hooks_dir"
