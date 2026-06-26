@@ -67,6 +67,38 @@ export function initStats(root, ctx) {
     renderTimeState();
     renderPerAgent();
     renderBlocked();
+    renderCostHealth();
+  }
+
+  /* ---------------- per-agent cost + health (TSU-53 slice-D) ---------------- */
+  // Fetches /api/cost (7d $) + /api/agents/health (status + 24h tokens), joins by
+  // agent. Health dot: working=accent, idle=amber, dead=muted. Cost is the
+  // bytes/4 floor until the Stop-hook feeds real per-turn tokens.
+  async function renderCostHealth() {
+    const el = root.querySelector('#cardCostHealth');
+    if (!el) return;
+    const project = sel();
+    const j = (u) => fetch(u).then((r) => (r.ok ? r.json() : [])).catch(() => []);
+    const [cost, health] = await Promise.all([
+      j(`/api/cost?project=${encodeURIComponent(project)}&period=7d`),
+      j(`/api/agents/health?project=${encodeURIComponent(project)}`),
+    ]);
+    const by = {};
+    (health || []).forEach((h) => { by[h.agent] = { status: h.status, tokens: h.tokens_24h || 0, usd: 0 }; });
+    (cost || []).forEach((c) => { const v = (by[c.agent] = by[c.agent] || { status: 'idle', tokens: c.tokens || 0 }); v.usd = c.usd || 0; });
+    const rows = Object.keys(by).map((a) => ({ agent: a, ...by[a] })).sort((x, y) => (y.usd - x.usd) || (y.tokens - x.tokens));
+    const total = rows.reduce((a, r) => a + (r.usd || 0), 0);
+    const dot = (s) => ({ working: 'var(--accent)', idle: 'var(--amber)', dead: 'var(--text-muted)' }[s] || 'var(--slate)');
+    const tok = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n || 0));
+    el.innerHTML = `<div class="card-head"><span class="card-label">cost &amp; health · 7d</span><span class="card-meta">$${total.toFixed(2)} · ${rows.length} agent${rows.length === 1 ? '' : 's'}</span></div>`;
+    if (!rows.length) { el.innerHTML += '<div class="empty">No agent activity yet</div>'; return; }
+    el.innerHTML += '<div class="bars">' + rows.slice(0, 16).map((r) => `
+      <div class="bar-row">
+        <span class="avatar sm" style="background:${colorFor(r.agent)}">${esc(initialFor(r.agent))}</span>
+        <span title="${esc(r.status || 'idle')}" style="display:inline-block;width:8px;height:8px;border-radius:50%;flex:none;background:${dot(r.status)}"></span>
+        <span class="bar-name" title="${esc(r.agent)}">${esc(r.agent)}</span>
+        <span class="bar-val">$${(r.usd || 0).toFixed(2)} · ${tok(r.tokens)} tok</span>
+      </div>`).join('') + '</div>';
   }
   const tile = (label, num, sub) =>
     `<article class="card kpi"><span class="kpi-label">${label}</span><span class="kpi-num">${esc(num)}</span><span class="kpi-sub">${esc(sub)}</span></article>`;
@@ -199,8 +231,8 @@ export function initStats(root, ctx) {
       <tbody>${rows.map((r) => `<tr>${r.map((c) => `<td>${esc(c == null ? '' : c)}</td>`).join('')}</tr>`).join('')}</tbody></table>`;
   }
   function setAll(html) {
-    ['cardThroughput', 'cardBurndown', 'cardTimeState', 'cardPerAgent', 'cardBlocked']
-      .forEach((id) => { root.querySelector('#' + id).innerHTML = html; });
+    ['cardThroughput', 'cardBurndown', 'cardTimeState', 'cardPerAgent', 'cardBlocked', 'cardCostHealth']
+      .forEach((id) => { const e = root.querySelector('#' + id); if (e) e.innerHTML = html; });
   }
   function skeleton() {
     kpiEl.innerHTML = '<article class="card kpi" data-skel><span class="kpi-label">loading</span><span class="kpi-num">—</span></article>'.repeat(4);
