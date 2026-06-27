@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -129,12 +130,26 @@ func (r *Relay) ListenAndServe(addr string) error {
 	// REST API
 	mux.HandleFunc("/api/", r.ServeAPI)
 
-	// Embedded static files
-	staticFS, err := fs.Sub(web.StaticFiles, "static")
-	if err != nil {
-		log.Fatalf("failed to create sub FS: %v", err)
+	// Static UI. A RELAY_UI_DIR override serves the UI from disk so UI changes
+	// deploy with a file copy — no rebuild, no relay restart (and thus no MCP-pipe
+	// drop). Falls back to the embedded build when unset/invalid.
+	var uiHandler http.Handler
+	if dir := os.Getenv("RELAY_UI_DIR"); dir != "" {
+		if st, serr := os.Stat(dir); serr == nil && st.IsDir() {
+			log.Printf("serving UI from disk override RELAY_UI_DIR=%s", dir)
+			uiHandler = http.FileServer(http.Dir(dir))
+		} else {
+			log.Printf("RELAY_UI_DIR=%s is not a directory — falling back to embedded UI", dir)
+		}
 	}
-	mux.Handle("/", http.FileServerFS(staticFS))
+	if uiHandler == nil {
+		staticFS, err := fs.Sub(web.StaticFiles, "static")
+		if err != nil {
+			log.Fatalf("failed to create sub FS: %v", err)
+		}
+		uiHandler = http.FileServerFS(staticFS)
+	}
+	mux.Handle("/", uiHandler)
 
 	handler := r.buildMiddlewareChain(mux)
 	r.httpServer = &http.Server{Addr: addr, Handler: handler}
