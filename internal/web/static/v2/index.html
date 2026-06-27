@@ -224,10 +224,19 @@
         </article>
       </section>
 
-      <!-- ============ TEAM · MESSAGE CINEMA ============ -->
+      <!-- ============ TEAM · FLEET CONSOLE (+ SHOW MODE) ============ -->
       <section class="page page-team" data-page="team" hidden>
+        <div class="team-modebar">
+          <div class="seg" id="teamModeSeg" role="tablist" aria-label="Fleet view mode">
+            <button class="seg-btn" data-mode="console" role="tab" aria-selected="true">Console</button>
+            <button class="seg-btn" data-mode="show" role="tab" aria-selected="false">Show mode</button>
+          </div>
+        </div>
         <div class="cinema">
-          <div class="stage" id="stage" aria-label="Agent constellation">
+          <!-- Console: dense, legible fleet grid (default) -->
+          <div class="fleet" id="fleetGrid" aria-label="Fleet console"></div>
+          <!-- Show mode: the agent constellation (cinema) -->
+          <div class="stage" id="stage" aria-label="Agent constellation" hidden>
             <svg class="stage-wires" id="stageWires" aria-hidden="true" preserveAspectRatio="none">
               <defs>
                 <filter id="cometGlow" x="-60%" y="-60%" width="220%" height="220%">
@@ -242,9 +251,11 @@
             <div class="stage-captions" id="stageCaptions" aria-hidden="true"></div>
             <div class="stage-empty" id="stageEmpty" hidden></div>
           </div>
-          <aside class="transcript" id="transcript" aria-label="Live transcript">
+          <!-- Persistent, searchable message feed (shared by both modes) -->
+          <aside class="transcript" id="transcript" aria-label="Live messages">
             <div class="card-head">
-              <span class="card-label">transcript</span>
+              <span class="card-label">messages</span>
+              <input type="search" class="msg-search" id="msgSearch" placeholder="filtrer…" aria-label="Filter messages" />
               <span class="card-meta" id="transcriptMeta">live</span>
             </div>
             <div class="transcript-body" id="transcriptBody"></div>
