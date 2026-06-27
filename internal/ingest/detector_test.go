@@ -13,13 +13,13 @@ import (
 func TestDetector_TickEmitsNonBlocking(t *testing.T) {
 	// Unbuffered + no reader: a blocking send here would hang tick forever.
 	out := make(chan AgentEvent)
-	d := newDetector(out, nil)
+	d := newDetector(out, nil, nil)
 
 	// Session old enough to trigger an idle event on the next tick.
 	d.RecordEvent(AgentEvent{
 		SessionID: "s1",
 		Type:      EventToolEnd,
-		Timestamp: time.Now().Add(-idleThreshold - time.Second),
+		Timestamp: time.Now().Add(-DefaultThresholds.Idle - time.Second),
 	})
 
 	done := make(chan struct{})
@@ -50,7 +50,7 @@ func TestDetector_ResolvesAgent(t *testing.T) {
 			return "", "", false // unbound on first event
 		}
 		return "proj", "wraith-dev", true
-	})
+	}, nil)
 
 	// First event: resolver returns not-found → session stays untagged.
 	d.RecordEvent(AgentEvent{SessionID: "s1", Type: EventToolStart, Tool: "Edit", Timestamp: time.Now()})
@@ -78,11 +78,11 @@ func TestDetector_ResolvesAgent(t *testing.T) {
 // reader when one is present (buffered sink).
 func TestDetector_TickDeliversWhenDrained(t *testing.T) {
 	out := make(chan AgentEvent, 4)
-	d := newDetector(out, nil)
+	d := newDetector(out, nil, nil)
 	d.RecordEvent(AgentEvent{
 		SessionID: "s1",
 		Type:      EventToolEnd,
-		Timestamp: time.Now().Add(-idleThreshold - time.Second),
+		Timestamp: time.Now().Add(-DefaultThresholds.Idle - time.Second),
 	})
 	d.tick(time.Now())
 	select {

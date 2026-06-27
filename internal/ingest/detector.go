@@ -7,12 +7,28 @@ import (
 )
 
 const (
-	waitingThreshold = 10 * time.Second
-	idleThreshold    = 30 * time.Second
-	exitThreshold    = 5 * time.Minute
-	tickInterval     = 2 * time.Second
-	minDisplayTime   = 1500 * time.Millisecond // activity visible for at least 1.5s
+	tickInterval   = 2 * time.Second
+	minDisplayTime = 1500 * time.Millisecond // activity visible for at least 1.5s
 )
+
+// Thresholds are the activity-lifecycle timeouts. They are read live (per tick)
+// from a provider so an operator can tune them at runtime with no restart.
+type Thresholds struct {
+	Waiting time.Duration // tool_end → "waiting" (turn looks finished)
+	Idle    time.Duration // no events → "idle"
+	Exit    time.Duration // no events → session dropped from the board
+}
+
+// DefaultThresholds: idle bumped 30s → 120s (30s flipped agents to idle during
+// normal think/read pauses). Tunable at runtime via the thresholds provider.
+var DefaultThresholds = Thresholds{
+	Waiting: 10 * time.Second,
+	Idle:    120 * time.Second,
+	Exit:    5 * time.Minute,
+}
+
+// ThresholdProvider returns the current thresholds; nil fields fall back to defaults.
+type ThresholdProvider func() Thresholds
 
 type SessionState struct {
 	SessionID string    `json:"session_id"`
@@ -50,17 +66,38 @@ type Detector struct {
 	sessions    map[string]*sessionEntry
 	out         chan<- AgentEvent
 	resolve     AgentResolver
+	thresholds  ThresholdProvider
 	subMu       sync.RWMutex
 	subscribers map[chan []SessionState]struct{}
 }
 
-func newDetector(out chan<- AgentEvent, resolve AgentResolver) *Detector {
+func newDetector(out chan<- AgentEvent, resolve AgentResolver, thresholds ThresholdProvider) *Detector {
 	return &Detector{
 		sessions:    make(map[string]*sessionEntry),
 		out:         out,
 		resolve:     resolve,
+		thresholds:  thresholds,
 		subscribers: make(map[chan []SessionState]struct{}),
 	}
+}
+
+// currentThresholds reads the live thresholds, filling any zero field from the
+// defaults so a partial/absent config can never produce a 0-duration timeout.
+func (d *Detector) currentThresholds() Thresholds {
+	t := DefaultThresholds
+	if d.thresholds != nil {
+		c := d.thresholds()
+		if c.Waiting > 0 {
+			t.Waiting = c.Waiting
+		}
+		if c.Idle > 0 {
+			t.Idle = c.Idle
+		}
+		if c.Exit > 0 {
+			t.Exit = c.Exit
+		}
+	}
+	return t
 }
 
 // Subscribe returns a channel that receives session state snapshots on every change.
@@ -198,6 +235,7 @@ func (d *Detector) tick(now time.Time) {
 	// every RecordEvent/GetSessions. broadcast() stays under the lock because it
 	// reads d.sessions via getSessionsLocked.
 	var pending []AgentEvent
+	th := d.currentThresholds()
 	d.mu.Lock()
 	for sid, s := range d.sessions {
 		elapsed := now.Sub(s.lastEvent)
@@ -210,7 +248,7 @@ func (d *Detector) tick(now time.Time) {
 			s.pendingType = ""
 		}
 
-		if elapsed > exitThreshold {
+		if elapsed > th.Exit {
 			if s.state != "exited" {
 				s.state = "exited"
 				s.activity = ActivityIdle
@@ -225,7 +263,7 @@ func (d *Detector) tick(now time.Time) {
 			continue
 		}
 
-		if elapsed > idleThreshold && !s.idleSent {
+		if elapsed > th.Idle && !s.idleSent {
 			s.idleSent = true
 			s.state = "idle"
 			s.activity = ActivityIdle
@@ -238,7 +276,7 @@ func (d *Detector) tick(now time.Time) {
 			continue
 		}
 
-		if elapsed > waitingThreshold && s.lastType == EventToolEnd && !s.waitSent {
+		if elapsed > th.Waiting && s.lastType == EventToolEnd && !s.waitSent {
 			s.waitSent = true
 			s.state = "waiting"
 			s.activity = ActivityWaiting

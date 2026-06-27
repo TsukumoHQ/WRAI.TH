@@ -11,6 +11,9 @@ type Config struct {
 	// activity with the stable agent identity (not the rotating session_id), so
 	// the UI joins activity to agents by name. Optional; nil → activity untagged.
 	AgentResolver AgentResolver
+	// Thresholds returns the live activity-lifecycle timeouts (read per tick) so
+	// they can be tuned at runtime. Optional; nil → DefaultThresholds.
+	Thresholds ThresholdProvider
 }
 
 func (c *Config) defaults() {
@@ -39,7 +42,7 @@ func New(cfg Config) (*Ingester, error) {
 	// file-drop watcher is gone. Nothing consumes Events in production; the
 	// detector's tick sends to it non-blockingly and drops when unread.
 	events := make(chan AgentEvent, cfg.EventBufferSize)
-	detector := newDetector(events, cfg.AgentResolver)
+	detector := newDetector(events, cfg.AgentResolver, cfg.Thresholds)
 
 	go detector.run(ctx)
 

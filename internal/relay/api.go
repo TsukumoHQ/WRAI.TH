@@ -92,6 +92,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetActivity(w)
 	case path == "/activity/stream" && req.Method == http.MethodGet:
 		r.apiStreamActivity(w, req)
+	case path == "/activity-config" && req.Method == http.MethodGet:
+		r.apiGetActivityConfig(w)
+	case path == "/activity-config" && req.Method == http.MethodPost:
+		r.apiSetActivityConfig(w, req)
 	case path == "/events/stream" && req.Method == http.MethodGet:
 		r.apiStreamEvents(w, req)
 	case path == "/events/recent" && req.Method == http.MethodGet:
@@ -490,6 +494,12 @@ func (r *Relay) apiGetAgents(w http.ResponseWriter, req *http.Request) {
 		}
 		aa.Online = online
 		applyActivity(&aa, project, a.Name, a.SessionID, actByAgent, actMap)
+		// A live detector session means the agent is working now — online even if
+		// last_seen is stale (last_seen only bumps on relay tool calls, not on the
+		// activity hooks an agent fires while heads-down in local work).
+		if aa.Activity != "" {
+			aa.Online = true
+		}
 		result = append(result, aa)
 	}
 
@@ -588,6 +598,9 @@ func (r *Relay) apiGetAllAgents(w http.ResponseWriter) {
 			Teams:        teamsByAgent[a.Project+":"+a.Name],
 		}
 		applyActivity(&aa, a.Project, a.Name, a.SessionID, actByAgent, actMap)
+		if aa.Activity != "" {
+			aa.Online = true
+		}
 		result = append(result, aa)
 	}
 
@@ -943,6 +956,46 @@ func (r *Relay) apiResolveMemoryConflict(w http.ResponseWriter, req *http.Reques
 		return
 	}
 	writeJSON(w, map[string]any{"resolved": true, "memory": mem})
+}
+
+// apiGetActivityConfig returns the live activity-lifecycle thresholds (seconds).
+// Empty = using the built-in default for that field.
+func (r *Relay) apiGetActivityConfig(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"idle_seconds":    r.DB.GetSetting("activity_idle_seconds"),
+		"waiting_seconds": r.DB.GetSetting("activity_waiting_seconds"),
+		"exit_seconds":    r.DB.GetSetting("activity_exit_seconds"),
+		"defaults":        map[string]int{"idle": 120, "waiting": 10, "exit": 300},
+	})
+}
+
+// apiSetActivityConfig tunes the activity thresholds at runtime — the detector
+// reads them live each tick, so changes apply with no restart. Only the provided
+// fields change; a value <= 0 clears the override (reverts to default).
+func (r *Relay) apiSetActivityConfig(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		IdleSeconds    *int `json:"idle_seconds"`
+		WaitingSeconds *int `json:"waiting_seconds"`
+		ExitSeconds    *int `json:"exit_seconds"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	set := func(key string, v *int) {
+		if v == nil {
+			return
+		}
+		if *v <= 0 {
+			r.DB.SetSetting(key, "")
+		} else {
+			r.DB.SetSetting(key, strconv.Itoa(*v))
+		}
+	}
+	set("activity_idle_seconds", body.IdleSeconds)
+	set("activity_waiting_seconds", body.WaitingSeconds)
+	set("activity_exit_seconds", body.ExitSeconds)
+	r.apiGetActivityConfig(w)
 }
 
 func (r *Relay) apiGetActivity(w http.ResponseWriter) {
