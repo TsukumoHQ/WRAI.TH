@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,16 @@ import (
 )
 
 var Version = "dev"
+
+// settingSeconds parses a settings value as a positive number of seconds, or
+// returns 0 (→ the detector falls back to its default for that threshold).
+func settingSeconds(v string) time.Duration {
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return time.Duration(n) * time.Second
+}
 
 func main() {
 	if len(os.Args) > 1 {
@@ -81,6 +92,13 @@ func startStdioMCP() {
 			project, name, found, _ := database.GetAgentBySessionID(sessionID)
 			return project, name, found
 		},
+		Thresholds: func() ingest.Thresholds {
+			return ingest.Thresholds{
+				Waiting: settingSeconds(database.GetSetting("activity_waiting_seconds")),
+				Idle:    settingSeconds(database.GetSetting("activity_idle_seconds")),
+				Exit:    settingSeconds(database.GetSetting("activity_exit_seconds")),
+			}
+		},
 	})
 	if err != nil {
 		log.Fatalf("failed to init ingester: %v", err)
@@ -125,6 +143,13 @@ func startServer() {
 		AgentResolver: func(sessionID string) (string, string, bool) {
 			project, name, found, _ := database.GetAgentBySessionID(sessionID)
 			return project, name, found
+		},
+		Thresholds: func() ingest.Thresholds {
+			return ingest.Thresholds{
+				Waiting: settingSeconds(database.GetSetting("activity_waiting_seconds")),
+				Idle:    settingSeconds(database.GetSetting("activity_idle_seconds")),
+				Exit:    settingSeconds(database.GetSetting("activity_exit_seconds")),
+			}
 		},
 	})
 	if err != nil {

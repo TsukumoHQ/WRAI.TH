@@ -251,8 +251,13 @@ func (d *DB) GetAgentBySessionID(sessionID string) (project, name string, found 
 	if sessionID == "" {
 		return "", "", false, nil
 	}
+	// status != 'deleted' (not '= active'): an agent working hard locally only
+	// bumps last_seen on relay tool calls, so the 30-min sweep can mark it
+	// 'inactive' mid-work. Resolving only 'active' rows then dropped its live
+	// activity → the board showed it offline while it was clearly busy. Resolve
+	// any non-deleted agent; liveness is decided by the live session, not status.
 	row := d.ro().QueryRow(
-		"SELECT project, name FROM agents WHERE session_id = ? AND status = 'active' LIMIT 1",
+		"SELECT project, name FROM agents WHERE session_id = ? AND status != 'deleted' LIMIT 1",
 		sessionID,
 	)
 	switch e := row.Scan(&project, &name); {
@@ -290,7 +295,7 @@ func (d *DB) RebindSessionByCwd(cwd, sessionID string) (project, name string, fo
 		return "", "", false, nil
 	}
 	row := d.ro().QueryRow(
-		"SELECT project, name FROM agents WHERE cwd = ? AND status = 'active' LIMIT 1",
+		"SELECT project, name FROM agents WHERE cwd = ? AND status != 'deleted' LIMIT 1",
 		cwd,
 	)
 	switch e := row.Scan(&project, &name); {
