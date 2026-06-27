@@ -7,6 +7,10 @@ import (
 type Config struct {
 	EventBufferSize int
 	SessionProvider SessionProvider
+	// AgentResolver maps a live session_id → owning agent. Lets the detector tag
+	// activity with the stable agent identity (not the rotating session_id), so
+	// the UI joins activity to agents by name. Optional; nil → activity untagged.
+	AgentResolver AgentResolver
 }
 
 func (c *Config) defaults() {
@@ -35,7 +39,7 @@ func New(cfg Config) (*Ingester, error) {
 	// file-drop watcher is gone. Nothing consumes Events in production; the
 	// detector's tick sends to it non-blockingly and drops when unread.
 	events := make(chan AgentEvent, cfg.EventBufferSize)
-	detector := newDetector(events)
+	detector := newDetector(events, cfg.AgentResolver)
 
 	go detector.run(ctx)
 

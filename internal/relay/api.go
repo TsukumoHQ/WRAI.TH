@@ -463,6 +463,7 @@ func (r *Relay) apiGetAgents(w http.ResponseWriter, req *http.Request) {
 		})
 	}
 
+	actByAgent := r.activityByAgent()
 	actMap := r.activityBySessionID()
 	now := time.Now().UTC()
 	result := make([]apiAgent, 0, len(agents))
@@ -488,16 +489,29 @@ func (r *Relay) apiGetAgents(w http.ResponseWriter, req *http.Request) {
 			online = now.Sub(t) < 5*time.Minute
 		}
 		aa.Online = online
-		if a.SessionID != nil {
-			if s, ok := actMap[*a.SessionID]; ok {
-				aa.Activity = string(s.Activity)
-				aa.ActivityTool = s.Tool
-			}
-		}
+		applyActivity(&aa, project, a.Name, a.SessionID, actByAgent, actMap)
 		result = append(result, aa)
 	}
 
 	writeJSON(w, result)
+}
+
+// applyActivity attaches live activity to an agent row. It joins by agent name
+// first (robust to session_id rotation and a stale agents.session_id column),
+// then falls back to the session_id-keyed map for a just-registered session the
+// detector hasn't resolved to an owner yet.
+func applyActivity(aa *apiAgent, project, name string, sessionID *string, byAgent, bySession map[string]ingest.SessionState) {
+	if s, ok := byAgent[project+"\x00"+name]; ok {
+		aa.Activity = string(s.Activity)
+		aa.ActivityTool = s.Tool
+		return
+	}
+	if sessionID != nil {
+		if s, ok := bySession[*sessionID]; ok {
+			aa.Activity = string(s.Activity)
+			aa.ActivityTool = s.Tool
+		}
+	}
 }
 
 func (r *Relay) activityBySessionID() map[string]ingest.SessionState {
@@ -505,6 +519,24 @@ func (r *Relay) activityBySessionID() map[string]ingest.SessionState {
 	if r.Ingester != nil {
 		for _, s := range r.Ingester.GetSessions() {
 			m[s.SessionID] = s
+		}
+	}
+	return m
+}
+
+// activityByAgent maps "project\x00agent" → live session state, for the sessions
+// the detector resolved to an owning agent. Joining on the agent name is robust
+// to session_id rotation (/clear) and to a stale agents.session_id column — the
+// session_id-keyed join silently missed for every agent but the just-registered
+// one. Keyed by project+name to avoid collisions across projects.
+func (r *Relay) activityByAgent() map[string]ingest.SessionState {
+	m := make(map[string]ingest.SessionState)
+	if r.Ingester != nil {
+		for _, s := range r.Ingester.GetSessions() {
+			if s.Agent == "" {
+				continue
+			}
+			m[s.Project+"\x00"+s.Agent] = s
 		}
 	}
 	return m
@@ -530,6 +562,7 @@ func (r *Relay) apiGetAllAgents(w http.ResponseWriter) {
 		})
 	}
 
+	actByAgent := r.activityByAgent()
 	actMap := r.activityBySessionID()
 	now := time.Now().UTC()
 	result := make([]apiAgent, 0, len(agents))
@@ -554,12 +587,7 @@ func (r *Relay) apiGetAllAgents(w http.ResponseWriter) {
 			AvatarURL:    a.AvatarURL,
 			Teams:        teamsByAgent[a.Project+":"+a.Name],
 		}
-		if a.SessionID != nil {
-			if s, ok := actMap[*a.SessionID]; ok {
-				aa.Activity = string(s.Activity)
-				aa.ActivityTool = s.Tool
-			}
-		}
+		applyActivity(&aa, a.Project, a.Name, a.SessionID, actByAgent, actMap)
 		result = append(result, aa)
 	}
 
@@ -971,10 +999,18 @@ type sseAgent struct {
 }
 
 func (r *Relay) buildSSEPayload(sessions []ingest.SessionState) ssePayload {
-	// Build session lookup
+	// Lookup live activity by owning agent (project+name). The detector resolves
+	// each session to its agent, so joining on the stable identity survives
+	// session_id rotation (/clear) and a stale agents.session_id column — the old
+	// session_id join missed for every agent but a just-registered one. Keep a
+	// session_id map as a fallback for sessions not yet resolved to an owner.
+	sessByAgent := make(map[string]ingest.SessionState)
 	sessMap := make(map[string]ingest.SessionState)
 	for _, s := range sessions {
 		sessMap[s.SessionID] = s
+		if s.Agent != "" {
+			sessByAgent[s.Project+"\x00"+s.Agent] = s
+		}
 	}
 
 	agents, _ := r.DB.ListAllAgents()
@@ -990,27 +1026,29 @@ func (r *Relay) buildSSEPayload(sessions []ingest.SessionState) ssePayload {
 			SessionID: a.SessionID,
 		}
 
-		// Enrich with SSE activity if session linked
-		if a.SessionID != nil {
-			if s, ok := sessMap[*a.SessionID]; ok {
-				sa.Activity = string(s.Activity)
-				if s.Activity != ingest.ActivityIdle && s.Activity != ingest.ActivityWaiting && s.Activity != ingest.ActivityThinking {
-					sa.ActivityTool = s.Tool
-				}
+		// Enrich with live activity — agent-name join first, session_id fallback.
+		s, ok := sessByAgent[a.Project+"\x00"+a.Name]
+		if !ok && a.SessionID != nil {
+			s, ok = sessMap[*a.SessionID]
+		}
+		if ok {
+			sa.Activity = string(s.Activity)
+			if s.Activity != ingest.ActivityIdle && s.Activity != ingest.ActivityWaiting && s.Activity != ingest.ActivityThinking {
+				sa.ActivityTool = s.Tool
+			}
 
-				// Derive status from activity
-				switch {
-				case a.Status == "sleeping":
-					// sleeping stays sleeping
-				case a.Status == "deleted":
-					// deleted stays deleted
-				case s.Activity != ingest.ActivityIdle && s.State != "idle" && s.State != "exited":
-					sa.Status = "busy"
-				case now.Sub(s.LastEvent) < 5*time.Minute:
-					sa.Status = "active"
-				default:
-					sa.Status = "inactive"
-				}
+			// Derive status from activity
+			switch {
+			case a.Status == "sleeping":
+				// sleeping stays sleeping
+			case a.Status == "deleted":
+				// deleted stays deleted
+			case s.Activity != ingest.ActivityIdle && s.State != "idle" && s.State != "exited":
+				sa.Status = "busy"
+			case now.Sub(s.LastEvent) < 5*time.Minute:
+				sa.Status = "active"
+			default:
+				sa.Status = "inactive"
 			}
 		}
 

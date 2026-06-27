@@ -237,3 +237,27 @@ export function connectStream(project, onEvent, onState) {
   open();
   return () => { closed = true; if (timer) clearTimeout(timer); if (es) es.close(); };
 }
+
+// SSE for the live activity board. The relay pushes a full snapshot
+// {sessions, agents} on every state change (and once on connect). onSnapshot
+// receives the parsed payload; reconnects with exponential backoff like
+// connectStream. Returns a close fn.
+export function connectActivity(onSnapshot) {
+  let es = null, closed = false, delay = 1000, timer = null;
+  function open() {
+    if (closed) return;
+    es = new EventSource('/api/activity/stream');
+    es.onopen = () => { delay = 1000; };
+    es.onmessage = (e) => {
+      try { onSnapshot(JSON.parse(e.data)); } catch (_) { /* ignore */ }
+    };
+    es.onerror = () => {
+      es.close();
+      if (closed) return;
+      timer = setTimeout(open, delay);
+      delay = Math.min(delay * 2, 15000);
+    };
+  }
+  open();
+  return () => { closed = true; if (timer) clearTimeout(timer); if (es) es.close(); };
+}

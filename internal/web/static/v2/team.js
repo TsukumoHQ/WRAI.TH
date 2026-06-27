@@ -6,7 +6,7 @@
 // hour). The glow here is the ONE permitted indulgence — everything else stays
 // flat. prefers-reduced-motion → comets become instant arrival pings.
 import {
-  colorFor, initialFor, fmtAgo, prefersReducedMotion, isoSince,
+  colorFor, initialFor, fmtAgo, prefersReducedMotion, isoSince, connectActivity,
 } from './api.js';
 
 const NS = 'http://www.w3.org/2000/svg';
@@ -45,6 +45,8 @@ export function initTeam(root, ctx) {
   let token = 0;
   let ro = null;
   let heatSweep = null;
+  let closeActivity = null;        // live-activity SSE close fn
+  const liveState = new Map();     // name → 'active' | 'online' | 'idle' (live)
 
   const reduce = () => prefersReducedMotion();
 
@@ -99,13 +101,18 @@ export function initTeam(root, ctx) {
   // reports_to, whose targets are often inactive execs). Each team becomes a
   // tinted zone + section label, its members arranged on a ring inside it, so the
   // teams read at a glance. Agents with no team land in an "unassigned" cluster.
-  const TEAM_COLOR = { engineering: '#22c55e', growth: '#6e6bf2', leads: '#38bdf8', unassigned: '#64748b' };
+  const TEAM_COLOR = { engineering: '#22c55e', growth: '#6e6bf2', comex: '#fbbf24', distribution: '#f472b6', leads: '#38bdf8', unassigned: '#64748b' };
   // an agent's primary team: first non-"leads" team (leads is a cross-cutting hat).
   function primaryTeam(a) {
     const ts = a.teams || [];
     const t = ts.find((x) => x.slug !== 'leads') || ts[0];
     return t ? t.slug : 'unassigned';
   }
+  // Team cards laid out as a balanced masonry: each card's HEIGHT is proportional
+  // to its member count (label band + member rows), and cards drop into the
+  // shortest column. A 2-member team is a short card, a 7-member team a tall one —
+  // so the board fills evenly instead of leaving a half-empty oversized box when
+  // the team count doesn't divide the grid. All maths in normalized 0..1 space.
   function computeLayout() {
     pos.clear();
     hubsMeta = [];
@@ -124,38 +131,58 @@ export function initTeam(root, ctx) {
         (x.slug === 'unassigned' ? 1 : 0) - (y.slug === 'unassigned' ? 1 : 0)
         || y.members.length - x.members.length);
 
-    // Bounded grid of team cards — never overlapping, scales to N teams. Members
-    // pack in a mini-grid inside each card (all maths in normalized 0..1 space).
     const N = list.length;
     const cols = Math.min(3, N);
-    const rows = Math.ceil(N / cols);
-    const PADX = 0.02, PADY = 0.025, GAP = 0.014;
-    const cw = (1 - PADX * 2 - GAP * (cols - 1)) / cols;
-    const ch = (1 - PADY * 2 - GAP * (rows - 1)) / rows;
+    const PADX = 0.02, PADY = 0.025, GAPX = 0.014, GAPY = 0.02;
+    const LABEL_BAND = 0.9;                 // header height, in member-row units
+    const cw = (1 - PADX * 2 - GAPX * (cols - 1)) / cols;
 
-    list.forEach((g, gi) => {
-      const c = gi % cols, r = Math.floor(gi / cols);
-      const x0 = PADX + c * (cw + GAP);
-      const y0 = PADY + r * (ch + GAP);
-      const m = g.members;
-      const n = m.length;
-      const mcols = n <= 1 ? 1 : n <= 2 ? 2 : 3;
+    // Per-team card geometry. Small teams use 2 member-columns (wider node spacing
+    // → long labels don't collide); 5+ members use 3.
+    const cards = list.map((g) => {
+      const n = g.members.length;
+      const mcols = n <= 1 ? 1 : n <= 4 ? 2 : 3;
       const mrows = Math.ceil(n / mcols);
-      const gx = cw / (mcols + 1);
-      const top = y0 + ch * 0.22;            // reserve the top of the card for the label
-      const usable = ch * 0.70;
-      const gy = usable / (mrows + 1);
-      m.forEach((name, i) => {
-        const cc = i % mcols, rr = Math.floor(i / mcols);
-        pos.set(name, { nx: x0 + gx * (cc + 1), ny: top + gy * (rr + 1) });
-      });
-      hubsMeta.push({
-        slug: g.slug, x0, y0, cw, ch,
-        color: TEAM_COLOR[g.slug] || colorFor(g.slug),
-        label: g.slug === 'unassigned' ? 'UNASSIGNED' : g.slug.toUpperCase(),
-        count: n,
-      });
+      return { ...g, n, mcols, mrows, units: LABEL_BAND + mrows };
     });
+
+    // Masonry: drop each card into the currently-shortest column.
+    const colUnits = new Array(cols).fill(0);
+    const colCards = Array.from({ length: cols }, () => []);
+    for (const c of cards) {
+      let ci = 0;
+      for (let i = 1; i < cols; i++) if (colUnits[i] < colUnits[ci]) ci = i;
+      colCards[ci].push(c);
+      colUnits[ci] += c.units;
+    }
+
+    // Scale one unit-row so the tallest column (incl. inter-card gaps) fits the band.
+    const maxCards = Math.max(...colCards.map((cc) => cc.length), 1);
+    const maxUnits = Math.max(...colUnits, 1);
+    const uh = (1 - PADY * 2 - GAPY * (maxCards - 1)) / maxUnits;
+
+    for (let ci = 0; ci < cols; ci++) {
+      const x0 = PADX + ci * (cw + GAPX);
+      let y = PADY;
+      for (const c of colCards[ci]) {
+        const ch = c.units * uh;
+        const top = y + LABEL_BAND * uh;     // member band starts below the label
+        const memH = ch - LABEL_BAND * uh;
+        const gx = cw / (c.mcols + 1);
+        const gy = memH / (c.mrows + 1);
+        c.members.forEach((name, i) => {
+          const cc = i % c.mcols, rr = Math.floor(i / c.mcols);
+          pos.set(name, { nx: x0 + gx * (cc + 1), ny: top + gy * (rr + 1) });
+        });
+        hubsMeta.push({
+          slug: c.slug, x0, y0: y, cw, ch,
+          color: TEAM_COLOR[c.slug] || colorFor(c.slug),
+          label: c.slug === 'unassigned' ? 'UNASSIGNED' : c.slug.toUpperCase(),
+          count: c.n,
+        });
+        y += ch + GAPY;
+      }
+    }
   }
   // Leaders / executives first, then by heat-ish role, then name.
   function rank(a, b) {
@@ -244,7 +271,7 @@ export function initTeam(root, ctx) {
     ctx.openSheet(el);
   }
   function nodeHTML(a) {
-    const state = a.online ? (a.activity && a.activity !== 'idle' ? 'active' : 'online') : 'idle';
+    const state = liveState.get(a.name) || baseState(a);
     const role = a.profile_slug || shortRole(a.role);
     // one dot per team the agent belongs to → shows multi-team membership at a glance.
     const teams = (a.teams || []);
@@ -300,6 +327,39 @@ export function initTeam(root, ctx) {
       const n = counts.get(name) || 0;
       el.style.setProperty('--heat', (n / max).toFixed(3));
       el.dataset.heat = n;
+    }
+  }
+
+  /* --------------------- live activity (state dots) --------------- */
+  // The node's resting state from the load-time agent record (last_seen + last
+  // known activity). The live SSE snapshot overrides this when a session is hot.
+  function baseState(a) {
+    return a && a.online ? (a.activity && a.activity !== 'idle' ? 'active' : 'online') : 'idle';
+  }
+  // Map a detector session state → the node's visual state. active/thinking = at
+  // work (blue, fast breathe); waiting = present between turns (green); idle or
+  // exited = idle (dim).
+  function nodeStateFor(s) {
+    if (s.state === 'idle' || s.state === 'exited' || s.activity === 'idle') return 'idle';
+    if (s.state === 'waiting' || s.activity === 'waiting') return 'online';
+    return 'active';
+  }
+  // Apply a live snapshot ({sessions, agents}) from /api/activity/stream. Joins
+  // on the resolved agent name (stable across /clear, unlike session_id) and
+  // updates each node's data-state live. Agents absent from the snapshot fall
+  // back to their load-time resting state.
+  function applyActivitySnapshot(snap) {
+    const sessions = (snap && Array.isArray(snap.sessions)) ? snap.sessions : [];
+    const proj = ctx.selection;
+    liveState.clear();
+    for (const s of sessions) {
+      if (!s.agent || !nameSet.has(s.agent)) continue;
+      if (proj !== 'all' && s.project && s.project !== proj) continue;
+      liveState.set(s.agent, nodeStateFor(s));
+    }
+    const byName = new Map(agents.map((a) => [a.name, a]));
+    for (const [name, el] of nodeEl) {
+      el.dataset.state = liveState.get(name) || baseState(byName.get(name));
     }
   }
 
@@ -519,6 +579,11 @@ export function initTeam(root, ctx) {
     ro.observe(stage);
   }
   heatSweep = setInterval(() => { if (!root.hidden) { refreshHeat(); renderTranscript(); } }, 60000);
+  // Live state dots: one long-lived SSE subscription; snapshots are filtered to
+  // the current selection inside the handler, so project switches need no
+  // reconnect. (Re-assign guards against a double-init re-subscribing.)
+  if (closeActivity) closeActivity();
+  closeActivity = connectActivity(applyActivitySnapshot);
 
   return {
     activate() {
