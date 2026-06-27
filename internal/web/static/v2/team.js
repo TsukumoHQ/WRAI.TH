@@ -280,13 +280,13 @@ export function initTeam(root, ctx) {
     ctx.openSheet(el);
   }
   function nodeHTML(a) {
-    const state = stateFor(a.name, a);
+    const state = disp(a).act;
     const role = a.profile_slug || shortRole(a.role);
     // one dot per team the agent belongs to → shows multi-team membership at a glance.
     const teams = (a.teams || []);
     const dots = teams.map((t) =>
       `<span class="an-team" style="background:${TEAM_COLOR[t.slug] || colorFor(t.slug)}" title="${esc(t.name || t.slug)}"></span>`).join('');
-    return `<div class="agent-node" data-name="${esc(a.name)}" data-state="${state}" style="--c:${colorFor(a.name)}" tabindex="0" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}${teams.length ? ' · teams: ' + esc(teams.map((t) => t.slug).join(', ')) : ''}">
+    return `<div class="agent-node" data-name="${esc(a.name)}" data-act="${state}" style="--c:${colorFor(a.name)}" tabindex="0" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}${teams.length ? ' · teams: ' + esc(teams.map((t) => t.slug).join(', ')) : ''}">
       <span class="an-orbit" aria-hidden="true"></span>
       <span class="an-heat" aria-hidden="true"></span>
       <span class="an-avatar">${a.avatar_url ? `<img class="an-img" src="${esc(a.avatar_url)}" alt="" loading="lazy" onerror="this.remove()">` : esc(initialFor(a.name))}<span class="an-status" aria-hidden="true"></span></span>
@@ -340,34 +340,52 @@ export function initTeam(root, ctx) {
   }
 
   /* --------------------- live activity (state dots) --------------- */
-  // The node's resting state from the load-time agent record (last_seen + last
-  // known activity). The live SSE snapshot overrides this when a session is hot.
-  function baseState(a) {
-    return a && a.online ? (a.activity && a.activity !== 'idle' ? 'active' : 'online') : 'idle';
+  // Activity vocabulary — 1:1 with what the relay tracks (internal/ingest/mapper.go):
+  // the 7 live activities + the two lifecycle states (sleeping, offline). Each gets
+  // an inline-SVG icon (no emoji, per house rules); color is driven by CSS [data-act].
+  const ACT = {
+    terminal: { label: 'terminal', icon: 'M4 17l6-5-6-5M13 19h7' },
+    typing:   { label: 'editing',  icon: 'M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z' },
+    reading:  { label: 'reading',  icon: 'M11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14zM21 21l-4.35-4.35' },
+    browsing: { label: 'web',      icon: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M3 12h18M12 3c2.6 2.7 2.6 15.3 0 18M12 3c-2.6 2.7-2.6 15.3 0 18' },
+    thinking: { label: 'thinking', icon: 'M12 2l2.1 6.2L20.5 10l-6.4 1.8L12 18l-2.1-6.2L3.5 10l6.4-1.8z' },
+    waiting:  { label: 'waiting',  icon: 'M9 5v14M15 5v14' },
+    idle:     { label: 'idle',     icon: 'M5 12h14' },
+    sleeping: { label: 'sleeping', icon: 'M20.5 13a8 8 0 1 1-9.5-9.5 6.2 6.2 0 0 0 9.5 9.5z' },
+    offline:  { label: 'offline',  icon: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18M5.6 5.6l12.8 12.8' },
+  };
+  function actIcon(key) {
+    const d = (ACT[key] || ACT.idle).icon;
+    return `<svg class="fl-ic" viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${d}"/></svg>`;
   }
-  // Map a detector session state → the node's visual state. active/thinking = at
-  // work (blue, fast breathe); waiting = present between turns (green); idle or
-  // exited = idle (dim).
-  function nodeStateFor(s) {
-    if (s.state === 'idle' || s.state === 'exited' || s.activity === 'idle') return 'idle';
-    if (s.state === 'waiting' || s.activity === 'waiting') return 'online';
-    return 'active';
+  const WORKING = new Set(['terminal', 'typing', 'reading', 'browsing', 'thinking']);
+  // Resolve an agent → {act, label}. Priority: live session (hot) → DB lifecycle
+  // (sleeping / inactive→offline) → last-known resolved activity → idle. The tool
+  // name (Bash, Grep…) is shown when present, else the activity word.
+  function disp(a) {
+    const live = a && liveInfo.get(a.name);
+    if (live && live.state !== 'idle' && live.state !== 'exited') {
+      const act = live.state === 'waiting' ? 'waiting' : (ACT[live.act] ? live.act : 'thinking');
+      return { act, label: live.tool || ACT[act].label };
+    }
+    if (a && a.status === 'sleeping') return { act: 'sleeping', label: 'sleeping' };
+    if (!a || a.status === 'inactive' || !a.online) return { act: 'offline', label: 'offline' };
+    if (a.activity && a.activity !== 'idle' && ACT[a.activity]) {
+      return { act: a.activity, label: a.activity_tool || ACT[a.activity].label };
+    }
+    return { act: 'idle', label: 'idle' };
   }
-  // Short human label for what an agent is doing right now: the live tool when
-  // working, else the activity word, else the coarse state.
-  function liveLabel(s) {
-    if (s.tool) return s.tool;
-    if (s.activity && s.activity !== 'idle') return s.activity;
-    return s.state || 'idle';
+  // Repaint a console row's activity (icon + label + data-act for color).
+  function paintRow(row, a) {
+    const d = disp(a);
+    row.dataset.act = d.act;
+    const lab = row.querySelector('.fl-act');
+    if (lab) lab.innerHTML = actIcon(d.act) + `<span class="fl-actlabel">${esc(d.label)}</span>`;
   }
-  const stateFor = (name, a) => (liveInfo.get(name) || {}).state || baseState(a);
-  const restLabel = (a) => (a && a.online ? (a.activity && a.activity !== 'idle' ? a.activity : 'online') : 'offline');
-  const labelFor = (name, a) => (liveInfo.get(name) || {}).label || restLabel(a);
 
-  // Apply a live snapshot ({sessions, agents}) from /api/activity/stream. Joins
-  // on the resolved agent name (stable across /clear, unlike session_id) and
-  // updates the live state + tool label for both views. Agents absent from the
-  // snapshot fall back to their load-time resting state.
+  // Apply a live snapshot ({sessions}) from /api/activity/stream. Joins on the
+  // resolved agent name (stable across /clear, unlike session_id) and repaints
+  // both views. Agents absent from the snapshot fall back to DB lifecycle/idle.
   function applyActivitySnapshot(snap) {
     const sessions = (snap && Array.isArray(snap.sessions)) ? snap.sessions : [];
     const proj = ctx.selection;
@@ -375,18 +393,11 @@ export function initTeam(root, ctx) {
     for (const s of sessions) {
       if (!s.agent || !nameSet.has(s.agent)) continue;
       if (proj !== 'all' && s.project && s.project !== proj) continue;
-      liveInfo.set(s.agent, { state: nodeStateFor(s), label: liveLabel(s) });
+      liveInfo.set(s.agent, { act: s.activity, tool: s.tool, state: s.state });
     }
     const byName = new Map(agents.map((a) => [a.name, a]));
-    for (const [name, el] of nodeEl) {
-      el.dataset.state = stateFor(name, byName.get(name));
-    }
-    for (const [name, row] of fleetRowEl) {
-      const a = byName.get(name);
-      row.dataset.state = stateFor(name, a);
-      const lab = row.querySelector('.fl-act');
-      if (lab) lab.textContent = labelFor(name, a);
-    }
+    for (const [name, el] of nodeEl) el.dataset.act = disp(byName.get(name)).act;
+    for (const [name, row] of fleetRowEl) paintRow(row, byName.get(name));
   }
 
   /* --------------------- fleet console (default view) ------------- */
@@ -417,11 +428,12 @@ export function initTeam(root, ctx) {
       const label = g.slug === 'unassigned' ? 'UNASSIGNED' : g.slug.toUpperCase();
       const rows = g.members.map((a) => {
         const role = a.profile_slug || shortRole(a.role);
-        return `<button class="fl-row" type="button" data-name="${esc(a.name)}" data-state="${stateFor(a.name, a)}" style="--c:${colorFor(a.name)}" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}">
+        const d = disp(a);
+        return `<button class="fl-row" type="button" data-name="${esc(a.name)}" data-act="${d.act}" style="--c:${colorFor(a.name)}" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''} · ${esc(d.label)}">
           <span class="fl-dot" aria-hidden="true"></span>
           <span class="fl-name">${esc(a.name)}</span>
           ${role ? `<span class="fl-role">${esc(role)}</span>` : ''}
-          <span class="fl-act">${esc(labelFor(a.name, a))}</span>
+          <span class="fl-act">${actIcon(d.act)}<span class="fl-actlabel">${esc(d.label)}</span></span>
         </button>`;
       }).join('');
       return `<section class="fl-group" style="--zc:${color}">
