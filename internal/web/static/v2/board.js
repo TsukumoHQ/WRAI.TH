@@ -148,8 +148,13 @@ export function initBoard(root, ctx) {
   // Staleness: a card sitting in an active state past STALE_MS since it last moved.
   function staleness(t) {
     if (!isActiveStatus(t.status)) return null;
-    const since = Date.parse(t.in_review_at || t.started_at || t.claimed_at || t.accepted_at || 0);
-    if (!since) return null;
+    // Only the real activity timestamps — NOT `|| 0`, which makes Date.parse fall
+    // back to a valid date (2000-01-01) and report ~9674d "stale" on every task
+    // that has no relay activity row (e.g. Linear-mirrored tasks).
+    const ts = t.in_review_at || t.started_at || t.claimed_at || t.accepted_at;
+    if (!ts) return null;
+    const since = Date.parse(ts);
+    if (!since || Number.isNaN(since)) return null;
     const age = Date.now() - since;
     return age > STALE_MS ? age : null;
   }
