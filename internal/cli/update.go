@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -33,18 +34,32 @@ const (
 
 func runUpdate(args []string) {
 	force := false
+	// noRestart stages the new binary (atomic swap) WITHOUT restarting the
+	// service. The new binary applies on the next launch. This is the safe
+	// default for an auto-update fired mid-session by a release-watcher: it
+	// must never kill a live process (see installBinary / TSU-74).
+	noRestart := envFlag("AGENT_RELAY_NO_SELF_RESTART")
 	for _, a := range args {
 		if a == "--force" || a == "-f" {
 			force = true
 		}
+		if a == "--no-restart" || a == "--stage" {
+			noRestart = true
+		}
 		if a == "--help" || a == "-h" {
-			fmt.Print(`usage: agent-relay update [--force]
+			fmt.Print(`usage: agent-relay update [--force] [--no-restart]
 
-Check for updates and install the latest version.
+Check for updates and install the latest version. The binary is replaced
+atomically (rename, never in-place truncate), so a process already running the
+old binary — e.g. a live ` + "`agent-relay mcp`" + ` stdio pipe Claude Code spawned —
+keeps running uninterrupted; the new binary applies on its next launch.
 
 flags:
-  -f, --force   Update even if already on latest version
-  -h, --help    Show this help
+  -f, --force        Update even if already on latest version
+      --no-restart   Stage only: swap the binary but do NOT restart the service
+                     (alias: --stage). Also set via AGENT_RELAY_NO_SELF_RESTART.
+                     Use this for auto-update fired while an interactive MCP is live.
+  -h, --help         Show this help
 `)
 			return
 		}
@@ -110,8 +125,10 @@ flags:
 	// ingest hooks stale on the user's machine.
 	refreshSkillAndHooks(latestVersion)
 
-	// 6. Restart service
-	restartService()
+	// 6. Restart service (skipped in staged mode — the swap already happened
+	// atomically, so the new binary applies on the next launch with no live
+	// process killed).
+	restartService(noRestart)
 
 	// 7. Verify
 	fmt.Print("\n  verifying... ")
@@ -513,21 +530,71 @@ func writeExtracted(dst string, src io.Reader) error {
 	return err
 }
 
+// installBinary atomically replaces dst with the new binary at src.
+//
+// It writes a sibling temp file then rename(2)s it over dst. Rename swaps the
+// directory entry to a NEW inode; any process already executing the old binary
+// (critically, a live `agent-relay mcp` stdio pipe Claude Code spawned) keeps
+// running the old, now-unlinked inode and is never touched — the new binary
+// applies only on its next launch. The previous implementation used
+// `install -m 755` which truncates and rewrites the existing inode in place;
+// that corrupts a running executable's text segment → SIGBUS → the live MCP
+// pipe dies fleet-wide. That was the owner-reported TSU-74 footgun.
 func installBinary(src, dst string) bool {
-	// Try direct copy first
-	cmd := exec.Command("install", "-m", "755", src, dst)
-	if err := cmd.Run(); err != nil {
-		// Try with sudo
-		cmd = exec.Command("sudo", "install", "-m", "755", src, dst)
-		if err := cmd.Run(); err != nil {
-			fmt.Fprintf(os.Stderr, "  error: could not install binary to %s: %v\n", dst, err)
-			return false
-		}
+	if err := atomicReplace(src, dst); err == nil {
+		return true
 	}
-	return true
+	// Permission fallback (e.g. root-owned /usr/local/bin): stage a sibling temp
+	// via sudo, then rename it over dst with `mv -f`. mv on the same filesystem
+	// is a rename — same inode-swap guarantee, never an in-place truncate.
+	staged := dst + ".new"
+	if err := exec.Command("sudo", "install", "-m", "755", src, staged).Run(); err == nil {
+		if err := exec.Command("sudo", "mv", "-f", staged, dst).Run(); err == nil {
+			return true
+		}
+		_ = exec.Command("sudo", "rm", "-f", staged).Run()
+	}
+	fmt.Fprintf(os.Stderr, "  error: could not install binary to %s\n", dst)
+	return false
 }
 
-func restartService() {
+// atomicReplace copies src to a sibling temp file in dst's directory, then
+// renames it over dst. Both files must live on the same filesystem for rename(2)
+// to be atomic — using dst's own directory guarantees that. Returns an error
+// (rather than crashing) so installBinary can fall back to the sudo path.
+func atomicReplace(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = in.Close() }()
+
+	tmp, err := os.CreateTemp(filepath.Dir(dst), ".agent-relay-stage-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup if we bail before the rename; a no-op once renamed.
+	defer func() { _ = os.Remove(tmpName) }()
+
+	if _, err := io.Copy(tmp, in); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o755); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, dst)
+}
+
+func restartService(noRestart bool) {
+	if noRestart {
+		fmt.Println("  staged — not restarting (new binary applies on next launch)")
+		return
+	}
 	fmt.Print("  restarting service... ")
 
 	switch runtime.GOOS {
@@ -540,8 +607,12 @@ func restartService() {
 		uid := os.Getuid()
 		// Stop
 		_ = exec.Command("launchctl", "bootout", fmt.Sprintf("gui/%d", uid), plist).Run()
-		// Small delay for clean shutdown
-		time.Sleep(500 * time.Millisecond)
+		// bootout is asynchronous: it returns before the old process has released
+		// the listen socket. A fixed sleep races it — if the port is still held
+		// when we bootstrap, the new process hits EADDRINUSE and log.Fatalf's,
+		// leaving NO relay running (fleet-wide outage until a manual restart).
+		// Wait for the port to actually free before starting the replacement.
+		waitPortFree(servePort(), 5*time.Second)
 		// Start
 		if err := exec.Command("launchctl", "bootstrap", fmt.Sprintf("gui/%d", uid), plist).Run(); err != nil {
 			_ = exec.Command("launchctl", "load", plist).Run()
@@ -559,5 +630,40 @@ func restartService() {
 
 	default:
 		fmt.Println("unsupported platform — restart manually")
+	}
+}
+
+// envFlag reports whether an env var is set to a truthy value (anything but
+// empty / "0" / "false").
+func envFlag(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "", "0", "false", "no":
+		return false
+	}
+	return true
+}
+
+// servePort returns the port the relay serves on (PORT env, else the 8090
+// default — same resolution as startServer in main.go).
+func servePort() string {
+	if p := strings.TrimSpace(os.Getenv("PORT")); p != "" {
+		return p
+	}
+	return "8090"
+}
+
+// waitPortFree blocks until nothing is listening on 127.0.0.1:port, or timeout
+// elapses (best-effort — returns either way). A refused dial means the old
+// listener has released the socket and a replacement can bind safely.
+func waitPortFree(port string, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	addr := net.JoinHostPort("127.0.0.1", port)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err != nil {
+			return // refused/unreachable = port is free
+		}
+		_ = conn.Close()
+		time.Sleep(150 * time.Millisecond)
 	}
 }
