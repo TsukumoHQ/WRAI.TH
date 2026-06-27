@@ -46,7 +46,14 @@ export function initTeam(root, ctx) {
   let ro = null;
   let heatSweep = null;
   let closeActivity = null;        // live-activity SSE close fn
-  const liveState = new Map();     // name → 'active' | 'online' | 'idle' (live)
+  const liveInfo = new Map();      // name → {state, label} from the live activity stream
+  // Fleet console (default view) + constellation kept behind a "Show mode" toggle.
+  const fleetEl = root.querySelector('#fleetGrid');
+  const modeSeg = root.querySelector('#teamModeSeg');
+  const msgSearch = root.querySelector('#msgSearch');
+  const fleetRowEl = new Map();    // name → console row element
+  let mode = (() => { try { return localStorage.getItem('team-mode') || 'console'; } catch (_) { return 'console'; } })();
+  let msgFilter = '';
 
   const reduce = () => prefersReducedMotion();
 
@@ -64,8 +71,10 @@ export function initTeam(root, ctx) {
     loadedFor = project;
     computeLayout();
     renderNodes();
+    renderConsole();
     measure();
     placeNodes();
+    applyMode();
 
     // Seed recent flow (transcript + heat) — no animation for history.
     heat.clear();
@@ -271,7 +280,7 @@ export function initTeam(root, ctx) {
     ctx.openSheet(el);
   }
   function nodeHTML(a) {
-    const state = liveState.get(a.name) || baseState(a);
+    const state = stateFor(a.name, a);
     const role = a.profile_slug || shortRole(a.role);
     // one dot per team the agent belongs to → shows multi-team membership at a glance.
     const teams = (a.teams || []);
@@ -344,23 +353,110 @@ export function initTeam(root, ctx) {
     if (s.state === 'waiting' || s.activity === 'waiting') return 'online';
     return 'active';
   }
+  // Short human label for what an agent is doing right now: the live tool when
+  // working, else the activity word, else the coarse state.
+  function liveLabel(s) {
+    if (s.tool) return s.tool;
+    if (s.activity && s.activity !== 'idle') return s.activity;
+    return s.state || 'idle';
+  }
+  const stateFor = (name, a) => (liveInfo.get(name) || {}).state || baseState(a);
+  const restLabel = (a) => (a && a.online ? (a.activity && a.activity !== 'idle' ? a.activity : 'online') : 'offline');
+  const labelFor = (name, a) => (liveInfo.get(name) || {}).label || restLabel(a);
+
   // Apply a live snapshot ({sessions, agents}) from /api/activity/stream. Joins
   // on the resolved agent name (stable across /clear, unlike session_id) and
-  // updates each node's data-state live. Agents absent from the snapshot fall
-  // back to their load-time resting state.
+  // updates the live state + tool label for both views. Agents absent from the
+  // snapshot fall back to their load-time resting state.
   function applyActivitySnapshot(snap) {
     const sessions = (snap && Array.isArray(snap.sessions)) ? snap.sessions : [];
     const proj = ctx.selection;
-    liveState.clear();
+    liveInfo.clear();
     for (const s of sessions) {
       if (!s.agent || !nameSet.has(s.agent)) continue;
       if (proj !== 'all' && s.project && s.project !== proj) continue;
-      liveState.set(s.agent, nodeStateFor(s));
+      liveInfo.set(s.agent, { state: nodeStateFor(s), label: liveLabel(s) });
     }
     const byName = new Map(agents.map((a) => [a.name, a]));
     for (const [name, el] of nodeEl) {
-      el.dataset.state = liveState.get(name) || baseState(byName.get(name));
+      el.dataset.state = stateFor(name, byName.get(name));
     }
+    for (const [name, row] of fleetRowEl) {
+      const a = byName.get(name);
+      row.dataset.state = stateFor(name, a);
+      const lab = row.querySelector('.fl-act');
+      if (lab) lab.textContent = labelFor(name, a);
+    }
+  }
+
+  /* --------------------- fleet console (default view) ------------- */
+  // Agents grouped by team, unassigned last then larger teams first.
+  function teamGroups() {
+    const groups = new Map();
+    for (const a of agents) {
+      const s = primaryTeam(a);
+      if (!groups.has(s)) groups.set(s, []);
+      groups.get(s).push(a);
+    }
+    return [...groups.entries()]
+      .map(([slug, members]) => ({ slug, members: members.slice().sort(rank) }))
+      .sort((x, y) =>
+        (x.slug === 'unassigned' ? 1 : 0) - (y.slug === 'unassigned' ? 1 : 0)
+        || y.members.length - x.members.length);
+  }
+  // Dense, legible grid: every name + role + current activity always visible.
+  function renderConsole() {
+    fleetRowEl.clear();
+    if (!fleetEl) return;
+    if (!agents.length) {
+      fleetEl.innerHTML = '<div class="empty"><span class="se-title">no agents here yet</span><span class="se-sub">this project has no registered agents</span></div>';
+      return;
+    }
+    fleetEl.innerHTML = teamGroups().map((g) => {
+      const color = TEAM_COLOR[g.slug] || colorFor(g.slug);
+      const label = g.slug === 'unassigned' ? 'UNASSIGNED' : g.slug.toUpperCase();
+      const rows = g.members.map((a) => {
+        const role = a.profile_slug || shortRole(a.role);
+        return `<button class="fl-row" type="button" data-name="${esc(a.name)}" data-state="${stateFor(a.name, a)}" style="--c:${colorFor(a.name)}" aria-label="${esc(a.name)}${role ? ' · ' + esc(role) : ''}">
+          <span class="fl-dot" aria-hidden="true"></span>
+          <span class="fl-name">${esc(a.name)}</span>
+          ${role ? `<span class="fl-role">${esc(role)}</span>` : ''}
+          <span class="fl-act">${esc(labelFor(a.name, a))}</span>
+        </button>`;
+      }).join('');
+      return `<section class="fl-group" style="--zc:${color}">
+        <header class="fl-ghead"><span class="fl-gname">${esc(label)}</span><span class="fl-gcount">${g.members.length}</span></header>
+        <div class="fl-rows">${rows}</div>
+      </section>`;
+    }).join('');
+    fleetEl.querySelectorAll('.fl-row').forEach((el) => {
+      fleetRowEl.set(el.dataset.name, el);
+      el.addEventListener('click', () => openAgentSheet(el.dataset.name));
+    });
+  }
+
+  // Toggle Console ↔ Show mode (constellation). Persisted across sessions.
+  function applyMode() {
+    const showCinema = mode === 'show';
+    if (stage) stage.hidden = !showCinema;
+    if (fleetEl) fleetEl.hidden = showCinema;
+    if (modeSeg) {
+      modeSeg.querySelectorAll('.seg-btn').forEach((b) => {
+        const on = b.dataset.mode === mode;
+        b.classList.toggle('active', on);
+        b.setAttribute('aria-selected', on ? 'true' : 'false');
+      });
+    }
+    try { localStorage.setItem('team-mode', mode); } catch (_) { /* private mode */ }
+    if (showCinema) requestAnimationFrame(() => { measure(); placeNodes(); refreshHeat(); });
+  }
+
+  // Filter the message feed by a free-text query (from / to / subject / body).
+  function applyMsgFilter() {
+    const q = msgFilter.toLowerCase();
+    transcriptBody.querySelectorAll('.tr-row').forEach((row) => {
+      row.style.display = (!q || row.textContent.toLowerCase().includes(q)) ? '' : 'none';
+    });
   }
 
   /* --------------------------- pulses ----------------------------- */
@@ -518,6 +614,7 @@ export function initTeam(root, ctx) {
         </div>
       </div>`;
     }).join('');
+    if (msgFilter) applyMsgFilter();
   }
 
   // Click / keyboard toggles a row open to reveal the full message.
@@ -574,6 +671,19 @@ export function initTeam(root, ctx) {
   // which reloads when loadedFor no longer matches the selection.
   ctx.onSelection(() => { loadedFor = null; });
 
+  if (modeSeg) {
+    modeSeg.addEventListener('click', (e) => {
+      const btn = e.target.closest('.seg-btn');
+      if (!btn) return;
+      mode = btn.dataset.mode === 'show' ? 'show' : 'console';
+      renderConsole();
+      applyMode();
+    });
+  }
+  if (msgSearch) {
+    msgSearch.addEventListener('input', () => { msgFilter = msgSearch.value.trim(); applyMsgFilter(); });
+  }
+
   if (window.ResizeObserver) {
     ro = new ResizeObserver(() => { if (!root.hidden && agents.length) { measure(); placeNodes(); } });
     ro.observe(stage);
@@ -588,8 +698,9 @@ export function initTeam(root, ctx) {
   return {
     activate() {
       if (loadedFor !== ctx.selection) { load(); return; }
-      // already loaded — the stage now has a real size, so re-measure & place.
-      requestAnimationFrame(() => { measure(); placeNodes(); refreshHeat(); });
+      // already loaded — re-apply the mode (re-measures the stage in show mode,
+      // which only now has a real size).
+      applyMode();
     },
   };
 }

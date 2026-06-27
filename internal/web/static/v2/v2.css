@@ -866,10 +866,46 @@ button { font-family: inherit; }
 .tr-body { font-size: 12px; line-height: 1.55; color: var(--text); white-space: pre-wrap; word-break: break-word;
   max-height: 320px; overflow-y: auto; scrollbar-width: thin; font-family: ui-monospace, "SF Mono", Menlo, monospace; }
 
+/* ---------- fleet console (default team view) ---------- */
+.team-modebar { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+.seg { display: inline-flex; gap: 2px; padding: 2px; background: var(--bg-card); border: 1px solid var(--border); border-radius: 9px; }
+.seg-btn { font-family: inherit; font-size: 11.5px; letter-spacing: .3px; color: var(--text-dim); background: transparent; border: 0; border-radius: 7px; padding: 5px 13px; cursor: pointer; transition: color .15s, background .15s; }
+.seg-btn:hover { color: var(--text-muted); }
+.seg-btn.active { color: var(--text); background: var(--bg-elev); box-shadow: inset 0 0 0 1px var(--border); }
+.seg-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-dim); }
+
+.fleet {
+  min-height: 560px; height: calc(100dvh - 264px); overflow-y: auto;
+  scrollbar-width: thin; scrollbar-color: var(--border) transparent;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(248px, 1fr)); gap: 12px; align-content: start;
+}
+.fl-group { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 10px 9px; height: max-content; }
+.fl-ghead { display: flex; align-items: baseline; gap: 8px; margin: 0 0 8px; padding-left: 9px; border-left: 2px solid var(--zc); }
+.fl-gname { font-size: 10.5px; font-weight: 700; letter-spacing: 1.2px; color: var(--text); }
+.fl-gcount { font-size: 10px; color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.fl-rows { display: flex; flex-direction: column; gap: 1px; }
+.fl-row { display: grid; grid-template-columns: 12px auto minmax(0, 1fr) auto; align-items: center; gap: 9px; width: 100%; text-align: left; background: transparent; border: 0; border-radius: 7px; padding: 7px 8px; cursor: pointer; font-family: inherit; transition: background .12s; }
+.fl-row:hover { background: var(--bg-elev); }
+.fl-row:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--accent-dim); }
+.fl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-dim); }
+.fl-name { font-size: 12.5px; font-weight: 500; color: var(--text); white-space: nowrap; }
+.fl-role { font-size: 10px; color: var(--text-dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fl-act { font-size: 10.5px; font-family: var(--mono); color: var(--text-dim); white-space: nowrap; justify-self: end; }
+.fl-row[data-state="active"] .fl-dot { background: var(--blue); box-shadow: 0 0 6px rgba(96,165,250,.5); animation: breathe 2s ease-in-out infinite; }
+.fl-row[data-state="active"] .fl-act { color: var(--blue); }
+.fl-row[data-state="online"] .fl-dot { background: var(--accent); }
+.fl-row[data-state="online"] .fl-act { color: var(--text-muted); }
+.fl-row[data-state="idle"] .fl-dot { background: var(--text-dim); }
+
+.msg-search { font-family: inherit; font-size: 11px; color: var(--text); background: var(--bg-elev); border: 1px solid var(--border); border-radius: 6px; padding: 3px 8px; width: 96px; transition: border-color .15s, width .15s; }
+.msg-search:focus { outline: none; border-color: var(--accent-dim); width: 140px; }
+.msg-search::placeholder { color: var(--text-dim); }
+
 /* ---------- phase 3 responsive ---------- */
 @media (max-width: 1080px) {
   .cinema { grid-template-columns: 1fr; }
   .stage { height: 460px; min-height: 420px; }
+  .fleet { height: auto; min-height: 0; }
   .transcript { max-height: 360px; }
   .proj-card.is-mirror { grid-column: span 1; }
   .home-hero { align-items: flex-start; }
