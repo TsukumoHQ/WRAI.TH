@@ -5,7 +5,77 @@ import (
 	"testing"
 
 	"agent-relay/internal/db"
+	"agent-relay/internal/ingest"
 )
+
+// withIngester attaches a real ingester whose AgentResolver is wired to the test
+// DB — mirroring the production wiring in main.go — so activity events resolve to
+// their owning agent.
+func withIngester(t *testing.T, r *Relay) {
+	t.Helper()
+	ing, err := ingest.New(ingest.Config{
+		AgentResolver: func(sid string) (string, string, bool) {
+			p, n, f, _ := r.DB.GetAgentBySessionID(sid)
+			return p, n, f
+		},
+	})
+	if err != nil {
+		t.Fatalf("ingest.New: %v", err)
+	}
+	t.Cleanup(ing.Stop)
+	r.Ingester = ing
+}
+
+// findAgent returns the agent row with the given name from a /api/agents array.
+func findAgent(arr []any, name string) map[string]any {
+	for _, e := range arr {
+		if m, ok := e.(map[string]any); ok && m["name"] == name {
+			return m
+		}
+	}
+	return nil
+}
+
+// TestActivityJoinsByAgentNameSurvivesSessionRotation is the regression guard for
+// the dead state-stream bug: /api/agents joined live activity on the agent's
+// stored session_id, which goes stale on /clear — so the board showed every agent
+// as idle. The join now keys on the resolved agent name, which survives rotation.
+func TestActivityJoinsByAgentNameSurvivesSessionRotation(t *testing.T) {
+	r := testRelay(t)
+	withIngester(t, r)
+
+	sid := "sess-A"
+	if _, _, err := r.DB.RegisterAgent("proj", "wraith-dev", "dev", "", nil, nil, false, &sid, "[]", 0, db.RegisterOptions{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// An activity event for the live session → detector resolves sess-A→wraith-dev.
+	if w := doAPI(r, "POST", "/ingest/activity", `{"session_id":"sess-A","type":"tool_start","tool":"Edit"}`); w.Code != http.StatusNoContent {
+		t.Fatalf("ingest activity: %d %s", w.Code, w.Body.String())
+	}
+
+	w := doAPI(r, "GET", "/agents?project=proj", "")
+	a := findAgent(decodeJSONArray(t, w), "wraith-dev")
+	if a == nil {
+		t.Fatal("wraith-dev not in /api/agents")
+	}
+	if a["activity"] != "typing" || a["activity_tool"] != "Edit" {
+		t.Fatalf("expected activity=typing tool=Edit, got activity=%v tool=%v", a["activity"], a["activity_tool"])
+	}
+
+	// Simulate /clear: the agent's stored session_id rotates to a new value the
+	// detector has never seen. The name-keyed join must still surface the activity
+	// (the old session_id join would now miss → idle).
+	newSid := "sess-B"
+	if _, _, err := r.DB.RegisterAgent("proj", "wraith-dev", "dev", "", nil, nil, false, &newSid, "[]", 0, db.RegisterOptions{}); err != nil {
+		t.Fatalf("re-register: %v", err)
+	}
+	w = doAPI(r, "GET", "/agents?project=proj", "")
+	a = findAgent(decodeJSONArray(t, w), "wraith-dev")
+	if a == nil || a["activity"] != "typing" {
+		t.Fatalf("activity lost after session rotation — name-join regression: got %v", a["activity"])
+	}
+}
 
 func TestIngestSessionStartRebindsByCwd(t *testing.T) {
 	r := testRelay(t)

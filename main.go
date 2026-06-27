@@ -77,6 +77,10 @@ func startStdioMCP() {
 		SessionProvider: func() map[string]bool {
 			return database.GetKnownSessionIDs()
 		},
+		AgentResolver: func(sessionID string) (string, string, bool) {
+			project, name, found, _ := database.GetAgentBySessionID(sessionID)
+			return project, name, found
+		},
 	})
 	if err != nil {
 		log.Fatalf("failed to init ingester: %v", err)
@@ -117,6 +121,10 @@ func startServer() {
 	ingester, err := ingest.New(ingest.Config{
 		SessionProvider: func() map[string]bool {
 			return database.GetKnownSessionIDs()
+		},
+		AgentResolver: func(sessionID string) (string, string, bool) {
+			project, name, found, _ := database.GetAgentBySessionID(sessionID)
+			return project, name, found
 		},
 	})
 	if err != nil {

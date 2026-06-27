@@ -16,6 +16,8 @@ const (
 
 type SessionState struct {
 	SessionID string    `json:"session_id"`
+	Agent     string    `json:"agent,omitempty"`   // owning agent, resolved from session→cwd binding
+	Project   string    `json:"project,omitempty"` // owning agent's project
 	Activity  Activity  `json:"activity"`
 	Tool      string    `json:"tool"`
 	File      string    `json:"file"`
@@ -30,6 +32,8 @@ type sessionEntry struct {
 	file         string
 	activity     Activity
 	state        string
+	agent        string // resolved owning agent (cached; empty until resolved)
+	project      string
 	idleSent     bool
 	waitSent     bool
 	displayUntil time.Time // activity stays visible until this time
@@ -37,18 +41,24 @@ type sessionEntry struct {
 	pendingAct   Activity
 }
 
+// AgentResolver maps a live Claude session_id to the agent that owns it (via the
+// session→cwd binding in the DB). Returns ok=false for unbound sessions.
+type AgentResolver func(sessionID string) (project, name string, ok bool)
+
 type Detector struct {
 	mu          sync.RWMutex
 	sessions    map[string]*sessionEntry
 	out         chan<- AgentEvent
+	resolve     AgentResolver
 	subMu       sync.RWMutex
 	subscribers map[chan []SessionState]struct{}
 }
 
-func newDetector(out chan<- AgentEvent) *Detector {
+func newDetector(out chan<- AgentEvent, resolve AgentResolver) *Detector {
 	return &Detector{
 		sessions:    make(map[string]*sessionEntry),
 		out:         out,
+		resolve:     resolve,
 		subscribers: make(map[chan []SessionState]struct{}),
 	}
 }
@@ -92,6 +102,8 @@ func (d *Detector) getSessionsLocked() []SessionState {
 	for sid, s := range d.sessions {
 		result = append(result, SessionState{
 			SessionID: sid,
+			Agent:     s.agent,
+			Project:   s.project,
 			Activity:  s.activity,
 			Tool:      s.tool,
 			File:      s.file,
@@ -110,6 +122,15 @@ func (d *Detector) RecordEvent(evt AgentEvent) {
 	if !ok {
 		s = &sessionEntry{}
 		d.sessions[evt.SessionID] = s
+	}
+
+	// Resolve the owning agent once per session (and retry while unresolved —
+	// the SessionStart rebind may land after the first activity event). Bounded
+	// to ~1 indexed read per session, never per event once bound.
+	if s.agent == "" && d.resolve != nil {
+		if proj, name, ok := d.resolve(evt.SessionID); ok {
+			s.project, s.agent = proj, name
+		}
 	}
 
 	s.lastEvent = evt.Timestamp
@@ -153,19 +174,7 @@ func (d *Detector) RecordEvent(evt AgentEvent) {
 func (d *Detector) GetSessions() []SessionState {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-
-	result := make([]SessionState, 0, len(d.sessions))
-	for sid, s := range d.sessions {
-		result = append(result, SessionState{
-			SessionID: sid,
-			Activity:  s.activity,
-			Tool:      s.tool,
-			File:      s.file,
-			LastEvent: s.lastEvent,
-			State:     s.state,
-		})
-	}
-	return result
+	return d.getSessionsLocked()
 }
 
 func (d *Detector) run(ctx context.Context) {
