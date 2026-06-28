@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -20,6 +22,12 @@ type graphqlClient struct {
 	apiKey string
 	url    string
 	http   *http.Client
+
+	// delegateUnsupported latches true the first time the Issue.delegate field
+	// is rejected by the schema, so the reconcile poll permanently falls back to
+	// the delegate-less query. A missing/renamed field must NEVER 400 the whole
+	// poll (that would be a fleet-wide dispatch outage).
+	delegateUnsupported atomic.Bool
 }
 
 func newGraphQLClient(apiKey string) *graphqlClient {
@@ -149,6 +157,16 @@ type gqlIssue struct {
 		Name        string `json:"name"`
 		DisplayName string `json:"displayName"`
 	} `json:"assignee"`
+	// Delegate is Linear's agent-delegation field: when a user assigns an issue
+	// to an agent, the human stays the assignee (primary owner) and the agent is
+	// set as the delegate. Routing prefers this over assignee. Only populated by
+	// the reconcile GraphQL query (and only when the schema supports the field);
+	// Issue webhooks don't carry it, so the webhook path falls back to assignee.
+	Delegate *struct {
+		ID          string `json:"id"`
+		Name        string `json:"name"`
+		DisplayName string `json:"displayName"`
+	} `json:"delegate"`
 	Parent *struct {
 		ID string `json:"id"`
 	} `json:"parent"`
@@ -180,6 +198,12 @@ func (i gqlIssue) parentLinearID() string {
 // so auto-dispatch covers issues that aren't in the active cycle. Flat issues
 // query (not nested through team→cycle) stays under the complexity budget even
 // with per-issue cycle/project expanded.
+//
+// Two variants share one node-field block: the default fetches Issue.delegate
+// (Linear's agent-delegation field) for delegate-based routing; the fallback
+// omits it. openTeamIssues uses the delegate variant and latches to the fallback
+// only if the schema rejects the field — so a missing field can never break the
+// poll. Keep the two `nodes {…}` blocks identical apart from the delegate line.
 const teamOpenIssuesQuery = `query TeamOpenIssues($key: String!, $after: String) {
   issues(
     filter: { team: { key: { eq: $key } }, state: { type: { nin: ["completed", "canceled"] } } }
@@ -197,6 +221,42 @@ const teamOpenIssuesQuery = `query TeamOpenIssues($key: String!, $after: String)
     }
   }
 }`
+
+// teamOpenIssuesQueryDelegate is teamOpenIssuesQuery + the delegate field.
+const teamOpenIssuesQueryDelegate = `query TeamOpenIssues($key: String!, $after: String) {
+  issues(
+    filter: { team: { key: { eq: $key } }, state: { type: { nin: ["completed", "canceled"] } } }
+    first: 50, after: $after
+  ) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id identifier number title description priority estimate url
+      state { id name type }
+      assignee { id name displayName }
+      delegate { id name displayName }
+      project { id name }
+      parent { id }
+      cycle { id name startsAt endsAt }
+      labels { nodes { name } }
+    }
+  }
+}`
+
+// isFieldError reports whether a GraphQL error looks like a schema/validation
+// rejection of a field (an HTTP 400 or a "cannot query field" message) — as
+// opposed to a transient network/5xx/rate-limit error. Only a field error
+// latches the delegate fallback; transient errors propagate and the poll retries
+// next interval (unchanged behavior), so a network blip can't permanently
+// disable delegate routing.
+func isFieldError(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "status 400") ||
+		strings.Contains(s, "cannot query field") ||
+		strings.Contains(s, "delegate")
+}
 
 // openTeamIssues returns every open (not completed/canceled) issue in the team,
 // paginated. Used by the reconcile poll so dispatch isn't limited to the active
@@ -218,8 +278,24 @@ func (c *graphqlClient) openTeamIssues(ctx context.Context, teamKey string) ([]g
 		if after != nil {
 			vars["after"] = *after
 		}
-		if err := c.do(ctx, teamOpenIssuesQuery, vars, &out); err != nil {
-			return nil, err
+		query := teamOpenIssuesQueryDelegate
+		if c.delegateUnsupported.Load() {
+			query = teamOpenIssuesQuery
+		}
+		if err := c.do(ctx, query, vars, &out); err != nil {
+			// Guard: a missing/renamed Issue.delegate field must never break the
+			// poll. On a field-shaped error from the delegate query, latch the
+			// fallback and retry this page with the delegate-less query. Any other
+			// (transient) error propagates unchanged.
+			if query == teamOpenIssuesQueryDelegate && isFieldError(err) {
+				c.delegateUnsupported.Store(true)
+				log.Printf("[linear] Issue.delegate unsupported (%v) — falling back to assignee-only routing", err)
+				if err := c.do(ctx, teamOpenIssuesQuery, vars, &out); err != nil {
+					return nil, err
+				}
+			} else {
+				return nil, err
+			}
 		}
 		issues = append(issues, out.Issues.Nodes...)
 		if !out.Issues.PageInfo.HasNextPage {

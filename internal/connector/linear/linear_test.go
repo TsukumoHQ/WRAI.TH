@@ -405,6 +405,95 @@ func TestReconcileDispatchUnroutedAgentAssignee(t *testing.T) {
 	}
 }
 
+// Delegate-preferred routing: Linear assigns agents via Issue.delegate while the
+// human stays the assignee. An issue with a HUMAN assignee + an AGENT delegate
+// must dispatch to the DELEGATE, not the human.
+func TestReconcileDispatchDelegatePreferred(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+
+	var dispatched []string
+	c.SetEventSink(func(e connector.TaskEvent) {
+		if e.Type == "task.dispatched" {
+			dispatched = append(dispatched, e.Agent)
+		}
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readQuery(r)
+		if strings.Contains(query, "TeamOpenIssues") {
+			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+				{"id":"i-deleg","identifier":"TSU-99","number":99,"title":"Delegated","priority":1,"url":"u1","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u-h","name":"loicmancino.work","displayName":"loicmancino.work"},"delegate":{"id":"u-a","name":"content-lead","displayName":"content-lead"},"project":{"id":"proj-growth","name":"growth"},"labels":{"nodes":[]}}
+			]}}`)
+			return
+		}
+		writeData(w, `{}`)
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("ReconcileCycle: %v", err)
+	}
+	if len(dispatched) != 1 || dispatched[0] != "content-lead" {
+		t.Errorf("dispatched = %v, want [content-lead] (delegate beats human assignee)", dispatched)
+	}
+}
+
+// Guard: if Linear's schema rejects the delegate field, the poll must latch a
+// fallback to the delegate-less query and keep working (dispatch on assignee) —
+// a missing field can NEVER 400 the whole poll (no fleet-wide dispatch outage).
+func TestReconcileDelegateFieldFallback(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+
+	var dispatched []string
+	c.SetEventSink(func(e connector.TaskEvent) {
+		if e.Type == "task.dispatched" {
+			dispatched = append(dispatched, e.Agent)
+		}
+	})
+
+	var delegateAttempts, fallbackAttempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readQuery(r)
+		switch {
+		case strings.Contains(query, "delegate"):
+			// Schema without the field — GraphQL field error.
+			delegateAttempts++
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"errors":[{"message":"Cannot query field \"delegate\" on type \"Issue\"."}]}`))
+		case strings.Contains(query, "TeamOpenIssues"):
+			// Fallback (delegate-less) query — agent assignee, dispatches fine.
+			fallbackAttempts++
+			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+				{"id":"i-fb","identifier":"TSU-100","number":100,"title":"Fallback","priority":1,"url":"u1","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"analytics-lead","displayName":"analytics-lead"},"project":{"id":"proj-growth","name":"growth"},"labels":{"nodes":[]}}
+			]}}`)
+		default:
+			writeData(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	n, err := c.ReconcileCycle(c.project)
+	if err != nil {
+		t.Fatalf("ReconcileCycle must survive a bad delegate field, got: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("upserted = %d, want 1 (fallback query succeeded)", n)
+	}
+	if delegateAttempts != 1 || fallbackAttempts != 1 {
+		t.Errorf("attempts: delegate=%d fallback=%d, want 1/1", delegateAttempts, fallbackAttempts)
+	}
+	if !c.gql.delegateUnsupported.Load() {
+		t.Error("delegateUnsupported should latch true after a field error")
+	}
+	if len(dispatched) != 1 || dispatched[0] != "analytics-lead" {
+		t.Errorf("dispatched = %v, want [analytics-lead] (assignee fallback)", dispatched)
+	}
+}
+
 // --- writer retry/backoff (stubbed GraphQL) ---
 
 func TestPushInReviewRetry(t *testing.T) {
