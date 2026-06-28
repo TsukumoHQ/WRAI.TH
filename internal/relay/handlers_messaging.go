@@ -221,7 +221,16 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 	formatted := make([]map[string]any, len(messages))
 	for i, m := range messages {
 		content := m.Content
-		if !fullContent && len(content) > 300 {
+		// Truncation safety net (TSU-73): a P0 is never truncated, and a message
+		// is delivered in full on its FIRST surfacing (delivery still 'queued', or
+		// legacy unread). Subsequent peeks of a longer message preview-truncate to
+		// save context — the full text is one full_content=true re-fetch away,
+		// because the inbox is now a non-destructive peek (the message stays unread
+		// until an explicit mark_read / ack_delivery).
+		firstRead := (m.DeliveryState != nil && *m.DeliveryState == "queued") ||
+			(m.DeliveryState == nil && m.ReadAt == nil)
+		isP0 := m.Priority == "P0"
+		if !fullContent && !isP0 && !firstRead && len(content) > 300 {
 			content = content[:300] + "..."
 		}
 		entry := map[string]any{
@@ -403,6 +412,14 @@ func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) 
 	count, err := h.db.MarkRead(ids, agent, project)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to mark read: %v", err)), nil
+	}
+
+	// mark_read is the explicit clear for the deliveries inbox: acknowledge each
+	// delivery so the message leaves the (non-destructive) unread view. Without
+	// this, mark_read only wrote message_reads and the deliveries-path inbox kept
+	// showing the message as unread forever (TSU-73). Best-effort per id.
+	for _, id := range ids {
+		_ = h.db.AcknowledgeDeliveryByMessage(id, agent, project)
 	}
 
 	return h.resultJSONTracked(project, agent, "mark_read", map[string]any{
