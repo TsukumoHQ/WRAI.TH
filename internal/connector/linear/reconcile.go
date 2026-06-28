@@ -37,10 +37,16 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		if iss.ID == "" {
 			continue
 		}
-		// Scope: only mirror/dispatch issues in a ROUTED project. Skips Linear's
-		// project-less team defaults (onboarding TSU-1..4) and any unrouted
-		// project — they were polluting the relay board as noise.
-		if !c.hasRoute(iss) {
+		// Scope: mirror/dispatch issues that are EITHER in a ROUTED project
+		// (owner-chosen agent per project) OR directly assigned to an agent
+		// (delegate-based routing — a project with many leads, each issue
+		// assigned to its own lead). This must stay symmetric with the dispatch
+		// condition below: an issue that would dispatch must not be pre-skipped
+		// here, or the poll path (the only path on a webhook-less localhost)
+		// silently drops it. Still skips Linear's project-less team defaults
+		// (onboarding TSU-1..4) and any unrouted, unassigned issue — those were
+		// polluting the relay board as noise.
+		if !c.hasRoute(iss) && !isAgent(issueAssignee(iss)) {
 			continue
 		}
 		prior, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)

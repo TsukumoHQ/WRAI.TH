@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"agent-relay/internal/config"
+	"agent-relay/internal/connector"
 	"agent-relay/internal/db"
 )
 
@@ -348,6 +349,59 @@ func TestReconcileCycle(t *testing.T) {
 	}
 	if c.lastReconcileAt.Load() == 0 {
 		t.Errorf("lastReconcileAt not stamped")
+	}
+}
+
+// Delegate-based routing: an issue in an UNROUTED project but directly assigned
+// to an agent must still be mirrored AND dispatched on the poll path (the only
+// path on a webhook-less localhost). A project-less, unassigned onboarding issue
+// must still be skipped as noise. Guards the scope-gate/dispatch-gate symmetry.
+func TestReconcileDispatchUnroutedAgentAssignee(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+
+	// No linear_routing entry for the growth project — routing is per-issue
+	// assignee (delegate), not a fixed project→agent map.
+	var dispatched []string
+	c.SetEventSink(func(e connector.TaskEvent) {
+		if e.Type == "task.dispatched" {
+			dispatched = append(dispatched, e.Agent)
+		}
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readQuery(r)
+		switch {
+		case strings.Contains(query, "TeamOpenIssues"):
+			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+				{"id":"i-growth","identifier":"TSU-97","number":97,"title":"GEO readout","priority":1,"url":"u1","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"analytics-lead","displayName":"analytics-lead"},"project":{"id":"proj-growth","name":"growth"},"labels":{"nodes":[]}},
+				{"id":"i-onboard","identifier":"TSU-1","number":1,"title":"Onboarding","priority":3,"url":"u2","state":{"id":"s2","name":"In Progress","type":"started"},"labels":{"nodes":[]}}
+			]}}`)
+		default:
+			writeData(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	n, err := c.ReconcileCycle(c.project)
+	if err != nil {
+		t.Fatalf("ReconcileCycle: %v", err)
+	}
+	// Only the agent-assigned issue is in scope; the project-less unassigned
+	// onboarding issue is skipped.
+	if n != 1 {
+		t.Fatalf("upserted = %d, want 1 (agent-assigned only)", n)
+	}
+	if task, _ := database.GetTaskByLinearIssueID(c.project, "i-growth"); task == nil {
+		t.Fatal("agent-assigned unrouted issue should be mirrored")
+	}
+	if task, _ := database.GetTaskByLinearIssueID(c.project, "i-onboard"); task != nil {
+		t.Error("project-less unassigned issue should be skipped as noise")
+	}
+	// Dispatch fired to the per-issue delegate, not a fixed project route.
+	if len(dispatched) != 1 || dispatched[0] != "analytics-lead" {
+		t.Errorf("dispatched = %v, want [analytics-lead]", dispatched)
 	}
 }
 
