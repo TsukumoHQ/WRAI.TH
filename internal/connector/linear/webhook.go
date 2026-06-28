@@ -185,15 +185,16 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 	// emit when the state actually changed in this update.
 	var events []connector.TaskEvent
 	if c.shouldDispatch(env, iss) {
-		events = append(events, c.dispatchEvent(taskID, iss.Title, seed))
+		events = append(events, c.dispatchEvent(taskID, iss.Title, c.dispatchTarget(iss), seed))
 	}
 	return events, nil
 }
 
 // dispatchEvent builds the semantic task.in_progress launch event. Shared by
-// the webhook path (Ingest) and the reconcile poll (transition detection).
-func (c *Connector) dispatchEvent(taskID, title string, seed db.LinearMirrorSeed) connector.TaskEvent {
-	agent := c.routedAgent(seed)
+// the webhook path (Ingest) and the reconcile poll (transition detection). The
+// dispatch target agent is resolved by the caller (c.dispatchTarget) — it has
+// the full issue, including the delegate field the seed doesn't carry.
+func (c *Connector) dispatchEvent(taskID, title, agent string, seed db.LinearMirrorSeed) connector.TaskEvent {
 	// Emit "task.dispatched", NOT "task.in_progress". Routing a Linear issue to an
 	// agent is semantically a DISPATCH ("here is assigned work, go claim it") —
 	// the same signal relay-native dispatch_task emits — so it must fire the same
@@ -235,9 +236,10 @@ func (c *Connector) shouldDispatch(env webhookEnvelope, iss gqlIssue) bool {
 	if !stateChanged(env.UpdatedFrom) {
 		return false
 	}
-	// Dispatch when the issue's project has a configured route (owner-chosen
-	// agent per project) OR it's directly assigned to an agent.
-	return c.hasRoute(iss) || isAgent(issueAssignee(iss))
+	// Dispatch when the resolved target is an agent: a configured project route,
+	// the issue's delegate (Linear's agent-delegation field), or a direct agent
+	// assignee. dispatchTarget folds all three in priority order.
+	return isAgent(c.dispatchTarget(iss))
 }
 
 // stateChanged reports whether updatedFrom carries a prior state (the transition
@@ -337,6 +339,20 @@ func issueAssignee(iss gqlIssue) string {
 	return strings.ToLower(strings.TrimSpace(name))
 }
 
+// issueDelegate returns the lowercased name of the issue's delegate (Linear's
+// agent-delegation field), or "" when none. Only the reconcile GraphQL query
+// populates this; Issue webhooks don't carry it.
+func issueDelegate(iss gqlIssue) string {
+	if iss.Delegate == nil {
+		return ""
+	}
+	name := iss.Delegate.DisplayName
+	if name == "" {
+		name = iss.Delegate.Name
+	}
+	return strings.ToLower(strings.TrimSpace(name))
+}
+
 func issueProjectID(iss gqlIssue) string {
 	if iss.Project != nil && iss.Project.ID != "" {
 		return iss.Project.ID
@@ -358,22 +374,23 @@ func (c *Connector) linearRouting() map[string]string {
 	return m
 }
 
-// routedAgent resolves the dispatch target: the agent configured for the issue's
-// Linear project (owner-chosen, one per project), falling back to the issue's
-// own assignee when that project has no routing entry.
-func (c *Connector) routedAgent(seed db.LinearMirrorSeed) string {
-	if seed.LinearProjectID != nil {
-		if a := c.linearRouting()[*seed.LinearProjectID]; a != "" {
+// dispatchTarget resolves the agent to dispatch an issue to, in priority order:
+//  1. the agent configured for the issue's Linear project (owner-chosen route,
+//     one fixed agent per project — wins for single-lane dev projects);
+//  2. the issue's delegate (Linear's agent-delegation field — the human stays
+//     assignee, the agent is the delegate; this is how multi-lead projects route
+//     each issue to its own lead without a fixed project route);
+//  3. the issue's assignee (when it's an agent directly).
+func (c *Connector) dispatchTarget(iss gqlIssue) string {
+	if pid := issueProjectID(iss); pid != "" {
+		if a := c.linearRouting()[pid]; a != "" {
 			return strings.ToLower(strings.TrimSpace(a))
 		}
 	}
-	return seedAssignee(seed)
-}
-
-// hasRoute reports whether the issue's project has a configured routing target.
-func (c *Connector) hasRoute(iss gqlIssue) bool {
-	pid := issueProjectID(iss)
-	return pid != "" && c.linearRouting()[pid] != ""
+	if d := issueDelegate(iss); d != "" {
+		return d
+	}
+	return issueAssignee(iss)
 }
 
 func issueKey(iss gqlIssue, teamKey string) string {
@@ -401,13 +418,6 @@ func marshalLabels(l labelList) string {
 func isAgent(name string) bool {
 	n := strings.ToLower(strings.TrimSpace(name))
 	return n != "" && n != "human" && n != "user"
-}
-
-func seedAssignee(s db.LinearMirrorSeed) string {
-	if s.Assignee != nil {
-		return *s.Assignee
-	}
-	return ""
 }
 
 func seedLinearKey(s db.LinearMirrorSeed) any {
