@@ -178,6 +178,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// Agentic analytics (stats panel)
 	case path == "/stats" && req.Method == http.MethodGet:
 		r.apiGetAgentStats(w, req)
+	// Ops/metrics snapshot for monitoring (TSU-141): agent count, msg rate, GC
+	// pressure, table growth, DB/snapshot health, Linear freshness.
+	case path == "/metrics" && req.Method == http.MethodGet:
+		r.apiGetMetrics(w, req)
 	// Notification rules (configurable event→action→target rules engine)
 	case path == "/notification-rules" && req.Method == http.MethodGet:
 		r.apiGetNotificationRules(w, req)
