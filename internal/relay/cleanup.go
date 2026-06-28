@@ -26,6 +26,23 @@ const (
 	// before it's noticed (the data-loss restore leaned on a 07:53 snapshot that
 	// was the oldest of only 3, nearly gone). Disk: ~snapshot-size × 12.
 	BackupKeep = 12
+
+	// Retention policy (TSU-127). Soft-expiry (ExpireMessages/ExpireDeliveries)
+	// only HIDES rows from inboxes; these windows govern HARD reclamation so the
+	// tables don't grow unbounded over long-running fleet operation:
+	//
+	//   messages/deliveries/message_reads — purged MessageRetention after a
+	//     message's TTL elapses (ttl_seconds=0 = never expires = never purged).
+	//   audit_log — kept AuditLogRetention (accountability record; far longer).
+	//   token_usage — 30d (PurgeOldTokenUsage).
+	//   events — bounded by PruneDeliveredEvents(keep).
+	//   activity — ephemeral, never persisted (in-memory ingest Detector + SSE).
+	//
+	// MessageRetention: a soft-expired message stays recoverable/inspectable for
+	// a week past its TTL before the row is reclaimed.
+	MessageRetention = 7 * 24 * time.Hour
+	// AuditLogRetention: 90 days of accountability trail before reclamation.
+	AuditLogRetention = 90 * 24 * time.Hour
 )
 
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
@@ -70,6 +87,18 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 					log.Printf("purge token usage error: %v", err)
 				} else if purged > 0 {
 					log.Printf("purged %d old token usage record(s)", purged)
+				}
+				// Hard-reclaim soft-expired messages (+ their deliveries/reads) and
+				// stale audit rows so the tables stay bounded (TSU-127).
+				if purged, err := database.PurgeExpiredMessages(MessageRetention); err != nil {
+					log.Printf("purge expired messages error: %v", err)
+				} else if purged > 0 {
+					log.Printf("purged %d expired message(s)", purged)
+				}
+				if purged, err := database.PurgeOldAuditLog(AuditLogRetention); err != nil {
+					log.Printf("purge audit log error: %v", err)
+				} else if purged > 0 {
+					log.Printf("purged %d old audit log record(s)", purged)
 				}
 				database.Optimize()
 

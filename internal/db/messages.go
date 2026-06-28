@@ -342,3 +342,36 @@ func (d *DB) ExpireMessages() (int, error) {
 	n, _ := result.RowsAffected()
 	return int(n), nil
 }
+
+// PurgeExpiredMessages hard-deletes messages that were soft-expired (TTL elapsed
+// via ExpireMessages) more than `grace` ago, together with their deliveries and
+// read receipts. Soft-expiry only hides a message from inboxes; without this the
+// messages/deliveries/message_reads tables grow unbounded over long-running
+// fleet operation. Messages with ttl_seconds=0 (never expire) are never purged.
+// Runs in one transaction on the single writer; returns the message count.
+func (d *DB) PurgeExpiredMessages(grace time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-grace).Format("2006-01-02T15:04:05.000000Z")
+	const sel = `SELECT id FROM messages WHERE expired_at IS NOT NULL AND datetime(expired_at) < datetime(?)`
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("purge messages begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Children first (sqlite FK cascade is off by default).
+	if _, err := tx.Exec(`DELETE FROM deliveries WHERE message_id IN (`+sel+`)`, cutoff); err != nil {
+		return 0, fmt.Errorf("purge deliveries: %w", err)
+	}
+	if _, err := tx.Exec(`DELETE FROM message_reads WHERE message_id IN (`+sel+`)`, cutoff); err != nil {
+		return 0, fmt.Errorf("purge message_reads: %w", err)
+	}
+	res, err := tx.Exec(`DELETE FROM messages WHERE expired_at IS NOT NULL AND datetime(expired_at) < datetime(?)`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge messages: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("purge messages commit: %w", err)
+	}
+	return res.RowsAffected()
+}

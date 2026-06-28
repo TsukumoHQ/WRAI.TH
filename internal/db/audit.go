@@ -2,6 +2,7 @@ package db
 
 import (
 	"agent-relay/internal/models"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,4 +64,17 @@ func (d *DB) ListAudit(project, resourceID string, limit int) ([]models.AuditEnt
 		out = append(out, e)
 	}
 	return out, rows.Err()
+}
+
+// PurgeOldAuditLog hard-deletes audit entries older than maxAge so the audit_log
+// table doesn't grow unbounded. The audit trail is the accountability record, so
+// it's retained far longer than messages (see AuditLogRetention). Returns the
+// number of rows deleted.
+func (d *DB) PurgeOldAuditLog(maxAge time.Duration) (int64, error) {
+	cutoff := time.Now().UTC().Add(-maxAge).Format(memoryTimeFmt)
+	res, err := d.conn.Exec(`DELETE FROM audit_log WHERE datetime(created_at) < datetime(?)`, cutoff)
+	if err != nil {
+		return 0, fmt.Errorf("purge audit log: %w", err)
+	}
+	return res.RowsAffected()
 }

@@ -320,6 +320,8 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_priority ON messages(priority)`)
+	// Drives the retention GC purge of soft-expired messages (PurgeExpiredMessages).
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_expired ON messages(expired_at) WHERE expired_at IS NOT NULL`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project)`)
 
 	// Remove old global UNIQUE constraint on agents.name (existing DBs only).
