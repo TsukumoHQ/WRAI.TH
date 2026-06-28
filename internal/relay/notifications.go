@@ -316,6 +316,15 @@ func (n *Notifier) buildPayload(rule models.NotificationRule, event string, sem 
 		line = strVal(sem["title"])
 	}
 	out["line"] = line
+	// Custom agent-authored events (event:*) carry an arbitrary structured
+	// payload (e.g. lead-ready → {email,tier,personId,...}). The fixed fields
+	// above would drop it, so a 'message' action delivered an empty body and the
+	// consumer got nothing usable (TSU-38). Pass the full event payload through so
+	// doMessage serializes it into the message content and webhook/slack
+	// consumers receive the structured data, not just the one-line summary.
+	if strings.HasPrefix(event, "event:") {
+		out["payload"] = sem
+	}
 	return out
 }
 
@@ -398,9 +407,17 @@ func (n *Notifier) doMessage(rule models.NotificationRule, project string, paylo
 	if subject == "" {
 		subject = rule.Event
 	}
-	// Content intentionally empty: the line IS the message (tiny payloads by
-	// design); duplicating it as body just doubles the inbox noise.
+	// Content intentionally empty for built-in events: the line IS the message
+	// (tiny payloads by design); duplicating it as body just doubles inbox noise.
+	// For custom event:* deliveries, serialize the structured payload into the
+	// body so the recipient's consumer can read its fields (TSU-38) — the line
+	// alone can't carry {email,tier,personId,...}.
 	content := ""
+	if p, ok := payload["payload"]; ok {
+		if b, err := json.Marshal(p); err == nil {
+			content = string(b)
+		}
+	}
 	ttl := opts.TTL
 	if ttl == 0 {
 		ttl = 14400
