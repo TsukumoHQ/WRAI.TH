@@ -353,6 +353,91 @@ func TestMarkRead(t *testing.T) {
 	}
 }
 
+// TestInboxNonDestructivePeek is the core TSU-73 guarantee: fetching the inbox
+// must NOT consume messages. Two consecutive unread peeks both return the
+// message; only an explicit mark_read clears it. Previously the fetch auto-
+// surfaced (queued→surfaced) and unread filtered queued-only, so the message
+// dropped out of the unread view after a single read → silent loss.
+func TestInboxNonDestructivePeek(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b"}))
+	_, _ = h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "hello",
+	}))
+
+	unreadCount := func() float64 {
+		res, _ := h.HandleGetInbox(ctx, call(map[string]any{
+			"format": "json", "project": "p1", "as": "bot-b", "unread_only": true,
+		}))
+		return parseJSON(t, res)["count"].(float64)
+	}
+
+	if c := unreadCount(); c != 1 {
+		t.Fatalf("first peek: expected 1 unread, got %v", c)
+	}
+	if c := unreadCount(); c != 1 {
+		t.Fatalf("second peek: message vanished after first fetch (read-on-fetch loss), got %v unread", c)
+	}
+
+	// Grab the id, then explicit mark_read must clear it from unread.
+	res, _ := h.HandleGetInbox(ctx, call(map[string]any{
+		"format": "json", "project": "p1", "as": "bot-b", "unread_only": true,
+	}))
+	id := parseJSON(t, res)["messages"].([]any)[0].(map[string]any)["id"].(string)
+	_, _ = h.HandleMarkRead(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-b", "message_ids": []any{id},
+	}))
+	if c := unreadCount(); c != 0 {
+		t.Fatalf("after mark_read: expected 0 unread, got %v", c)
+	}
+}
+
+// TestInboxTruncationP0AndFirstRead covers the TSU-73 truncation safety nets:
+// a long message is delivered in full on its FIRST surfacing (then preview-
+// truncated on later peeks), and a P0 is NEVER truncated.
+func TestInboxTruncationP0AndFirstRead(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b"}))
+	long := strings.Repeat("x", 500)
+
+	contentByPriority := func(prio string) string {
+		res, _ := h.HandleGetInbox(ctx, call(map[string]any{
+			"format": "json", "project": "p1", "as": "bot-b", "unread_only": true,
+		}))
+		for _, mm := range parseJSON(t, res)["messages"].([]any) {
+			m := mm.(map[string]any)
+			if m["priority"] == prio {
+				return m["content"].(string)
+			}
+		}
+		return ""
+	}
+
+	// Long P2: full on first surfacing, truncated (300 + "...") afterwards.
+	_, _ = h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "priority": "P2", "content": long,
+	}))
+	if c := contentByPriority("P2"); len(c) != 500 {
+		t.Fatalf("first read of long P2 should be full (500), got %d", len(c))
+	}
+	if c := contentByPriority("P2"); len(c) != 303 {
+		t.Fatalf("second read of long P2 should be truncated to 303, got %d", len(c))
+	}
+
+	// Long P0: never truncated, on first read or any later peek.
+	_, _ = h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "priority": "P0", "content": long,
+	}))
+	if c := contentByPriority("P0"); len(c) != 500 {
+		t.Fatalf("P0 first read should be full (500), got %d", len(c))
+	}
+	if c := contentByPriority("P0"); len(c) != 500 {
+		t.Fatalf("P0 must NEVER truncate, even after surfacing, got %d", len(c))
+	}
+}
+
 func TestMarkReadMissingIDs(t *testing.T) {
 	h := testHandlers(t)
 	res, _ := h.HandleMarkRead(ctx, call(map[string]any{

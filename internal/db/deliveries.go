@@ -53,7 +53,15 @@ func (d *DB) MarkDeliveriesSurfaced(ids []string) {
 }
 
 // GetInboxViaDeliveries returns messages for an agent using the deliveries table.
-// It marks returned deliveries as 'surfaced'.
+//
+// It is a NON-DESTRUCTIVE peek: it marks returned 'queued' deliveries as
+// 'surfaced' for analytics/first-read tracking, but surfacing no longer hides a
+// message from the next unread poll. "Unread" means NOT acknowledged (queued OR
+// surfaced); a message only leaves the unread view via an explicit mark_read /
+// ack_delivery. Previously unread filtered state='queued' and the fetch's
+// auto-surface flipped it out of unread after one read — so the single unread
+// view (truncated by the handler) was the only chance to see a message, and its
+// full content was silently lost (TSU-73).
 func (d *DB) GetInboxViaDeliveries(project, agentName string, unreadOnly bool, limit int, filters ...InboxFilter) ([]models.Message, error) {
 	if limit <= 0 {
 		limit = 50
@@ -70,14 +78,16 @@ func (d *DB) GetInboxViaDeliveries(project, agentName string, unreadOnly bool, l
 		FROM deliveries d
 		JOIN messages m ON d.message_id = m.id
 		WHERE d.project = ? AND d.to_agent = ?
-		  AND d.state IN ('queued', 'surfaced')
+		  AND d.state != 'expired'
 		  AND m.expired_at IS NULL
 		  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`
 	args := []any{project, agentName}
 
 	if unreadOnly {
-		query += " AND d.state = 'queued'"
+		// Unread = not yet acknowledged. A non-destructive peek: surfaced
+		// messages stay visible until an explicit mark_read / ack_delivery.
+		query += " AND d.state IN ('queued', 'surfaced')"
 	}
 	if f.MinPriority != "" {
 		query += " AND m.priority <= ?"
@@ -155,14 +165,15 @@ func (d *DB) FetchInboxDeliveries(project, agentName string, unreadOnly bool, li
 		FROM deliveries d
 		JOIN messages m ON d.message_id = m.id
 		WHERE d.project = ? AND d.to_agent = ?
-		  AND d.state IN ('queued', 'surfaced')
+		  AND d.state != 'expired'
 		  AND m.expired_at IS NULL
 		  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`
 	args := []any{project, agentName}
 
 	if unreadOnly {
-		query += " AND d.state = 'queued'"
+		// Unread = not yet acknowledged (see GetInboxViaDeliveries).
+		query += " AND d.state IN ('queued', 'surfaced')"
 	}
 	if f.MinPriority != "" {
 		query += " AND m.priority <= ?"
