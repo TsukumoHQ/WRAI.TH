@@ -321,6 +321,42 @@ func TestSendMessageMissingTo(t *testing.T) {
 	expectError(t, res)
 }
 
+// TestDMReplyPathGrant is the TSU-75 guarantee: receiving a DM opens a scoped
+// reply-path back to the sender, so an agent can always answer a message even
+// across the team auth-wall — and the grant does NOT open it to anyone else.
+func TestDMReplyPathGrant(t *testing.T) {
+	h := testHandlers(t)
+	// alice = executive → admin team (can message anyone; also makes hasTeams true
+	// so the permission check is enforced). bob/carol are plain agents.
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "alice", "is_executive": true}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bob"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "carol"}))
+
+	send := func(from, to string) *mcp.CallToolResult {
+		res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+			"project": "p1", "as": from, "to": to, "content": "hi",
+		}))
+		return res
+	}
+
+	// Auth-wall: bob cannot DM alice before she opens a channel.
+	if res := send("bob", "alice"); !res.IsError {
+		t.Fatal("expected bob→alice blocked before any contact")
+	}
+	// alice (admin) DMs bob — opens a scoped reply-path.
+	if res := send("alice", "bob"); res.IsError {
+		t.Fatalf("alice→bob should be allowed (admin): %s", expectError(t, res))
+	}
+	// bob can now reply to alice.
+	if res := send("bob", "alice"); res.IsError {
+		t.Fatalf("bob→alice should be allowed via reply-path: %s", expectError(t, res))
+	}
+	// Scoped: bob still cannot DM carol (carol never messaged bob).
+	if res := send("bob", "carol"); !res.IsError {
+		t.Fatal("expected bob→carol still blocked — reply-path must be scoped to the sender")
+	}
+}
+
 func TestMarkRead(t *testing.T) {
 	h := testHandlers(t)
 	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))

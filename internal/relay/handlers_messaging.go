@@ -79,7 +79,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 				return mcp.NewToolResultError(fmt.Sprintf("permission check failed: %v", err)), nil
 			}
 			if !allowed {
-				return mcp.NewToolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, or notify channel", to)), nil
+				return mcp.NewToolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
 			}
 		}
 	}

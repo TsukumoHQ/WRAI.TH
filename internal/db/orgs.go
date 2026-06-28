@@ -423,7 +423,39 @@ func (d *DB) CanMessage(project, sender, target string) (bool, error) {
 		return true, nil
 	}
 
+	// Reply-path grant (TSU-75): a message opens a scoped channel back to its
+	// author. If `target` has previously had a message delivered to `sender`,
+	// allow `sender` to message `target` — otherwise an agent literally cannot
+	// answer a DM from outside its team, and the auth-wall only surfaces AFTER
+	// it has composed the reply. The grant is scoped to that one sender: it does
+	// not open `sender` to anyone else.
+	var replyPath int
+	_ = d.ro().QueryRow(
+		`SELECT COUNT(*) FROM deliveries d
+		 JOIN messages m ON d.message_id = m.id
+		 WHERE d.project = ? AND d.to_agent = ? AND m.from_agent = ?`,
+		project, sender, target,
+	).Scan(&replyPath)
+	if replyPath > 0 {
+		return true, nil
+	}
+
 	return false, nil
+}
+
+// CanReplyTo reports whether `sender` has a scoped reply-path to `target` —
+// i.e. `target` has previously had a message delivered to `sender`. Exposed so
+// the send path can give a precise, pre-check-style reason when a send is
+// blocked. Mirrors the reply-path branch in CanMessage.
+func (d *DB) CanReplyTo(project, sender, target string) bool {
+	var n int
+	_ = d.ro().QueryRow(
+		`SELECT COUNT(*) FROM deliveries d
+		 JOIN messages m ON d.message_id = m.id
+		 WHERE d.project = ? AND d.to_agent = ? AND m.from_agent = ?`,
+		project, sender, target,
+	).Scan(&n)
+	return n > 0
 }
 
 // HasTeams returns true if any teams exist for the project (to skip permission check when no teams are configured).
