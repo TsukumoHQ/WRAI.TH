@@ -253,8 +253,8 @@ func TestDispatchDedupe(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(evts) != 1 || evts[0].Type != "task.in_progress" {
-		t.Fatalf("expected 1 task.in_progress event, got %#v", evts)
+	if len(evts) != 1 || evts[0].Type != "task.dispatched" {
+		t.Fatalf("expected 1 task.dispatched event, got %#v", evts)
 	}
 	if evts[0].Payload["assignee_is_agent"] != true {
 		t.Errorf("assignee_is_agent should be true")

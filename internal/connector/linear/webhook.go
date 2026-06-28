@@ -194,8 +194,16 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 // the webhook path (Ingest) and the reconcile poll (transition detection).
 func (c *Connector) dispatchEvent(taskID, title string, seed db.LinearMirrorSeed) connector.TaskEvent {
 	agent := c.routedAgent(seed)
+	// Emit "task.dispatched", NOT "task.in_progress". Routing a Linear issue to an
+	// agent is semantically a DISPATCH ("here is assigned work, go claim it") —
+	// the same signal relay-native dispatch_task emits — so it must fire the same
+	// agent-notification rule (auto-claim: task.dispatched + assignee_is_agent →
+	// message → assignee). Emitting "task.in_progress" only matched the (disabled)
+	// external-launcher webhook, so the routed agent was never notified and Linear
+	// dispatch silently never fired. "task.in_progress" is for an agent that has
+	// already started work (start_task), a different lifecycle moment.
 	return connector.TaskEvent{
-		Type:    "task.in_progress",
+		Type:    "task.dispatched",
 		Project: c.project,
 		Agent:   agent,
 		Payload: map[string]any{
@@ -203,7 +211,7 @@ func (c *Connector) dispatchEvent(taskID, title string, seed db.LinearMirrorSeed
 			"task_id":           taskID,
 			"linear_key":        seedLinearKey(seed),
 			"title":             title,
-			"line":              "In progress: " + title,
+			"line":              "Dispatched: " + title,
 			"priority":          seed.Priority,
 			"assignee_is_agent": isAgent(agent),
 		},
