@@ -1,0 +1,86 @@
+name: Announce release to Discord
+
+# ONE workflow, all 4 suite products. Self-configures brand from ${github.repository}.
+# Posts two embeds on a PUBLISHED version tag:
+#   - #release   (DISCORD_RELEASE_WEBHOOK)   -> curated <=3-highlight teaser + upgrade line
+#   - #changelog (DISCORD_CHANGELOG_WEBHOOK) -> full release notes
+# Tag push is the reliable trigger (GitHub `release` events don't fire Actions for
+# PAT-created releases). A publish-gate skips bare tags / drafts / prereleases so only
+# real published releases announce. workflow_dispatch backfills an existing tag.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to announce (e.g. v1.2.3)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post to Discord
+        env:
+          RELEASE_WEBHOOK: ${{ secrets.DISCORD_RELEASE_WEBHOOK }}
+          CHANGELOG_WEBHOOK: ${{ secrets.DISCORD_CHANGELOG_WEBHOOK }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_WEBHOOK:-}" ] && [ -z "${CHANGELOG_WEBHOOK:-}" ]; then
+            echo "No Discord webhooks configured — skipping." >&2; exit 0
+          fi
+
+          # --- publish-gate: only a published, non-prerelease GitHub Release announces ---
+          rel=$(gh api "repos/${REPO}/releases/tags/${TAG}" 2>/dev/null || true)
+          if [ -z "$rel" ] \
+             || [ "$(printf '%s' "$rel" | jq -r '.draft')" != "false" ] \
+             || [ "$(printf '%s' "$rel" | jq -r '.prerelease')" = "true" ]; then
+            echo "No published release for ${TAG} (bare tag / draft / prerelease) — skipping." >&2; exit 0
+          fi
+          body=$(printf '%s' "$rel" | jq -r '.body // ""')
+          [ -z "$body" ] && body="New release: ${TAG}"
+
+          url="https://github.com/${REPO}/releases/tag/${TAG}"
+          ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          # --- per-repo brand map (one script, all 4 products) ---
+          LOGO_BASE="https://bxdpevnqdnjcehewbiyg.supabase.co/storage/v1/object/public/media/assets/brand-kit"
+          case "$REPO" in
+            *trovex)  BRAND="trovex";  SLUG="trovex"; COLOR=1098629;  SITE="https://trovex.dev"; INSTALL="uv tool upgrade trovex" ;;
+            *dokan)   BRAND="dokan";   SLUG="dokan";  COLOR=440020;   SITE="https://github.com/${REPO}"; INSTALL="dokan update" ;;
+            *WRAI.TH) BRAND="wrai.th"; SLUG="wraith"; COLOR=7236594;  SITE="https://wrai.th"; INSTALL="agent-relay update" ;;
+            *yoru)    BRAND="yoru";    SLUG="yoru";   COLOR=16096779; SITE="https://yoru.sh"; INSTALL="yoru update" ;;
+            *)        BRAND="${REPO##*/}"; SLUG="${REPO##*/}"; COLOR=5793266; SITE="https://github.com/${REPO}"; INSTALL="see release notes" ;;
+          esac
+          LOGO="${LOGO_BASE}/${SLUG}/social-avatar/avatar-400.png"
+
+          post() { [ -z "${1:-}" ] && return 0; curl -fsS -H "Content-Type: application/json" -d "$2" "$1" >/dev/null; }
+
+          # --- #release teaser: ## Highlights bullets (<=3); else feat/perf/fix, drop noise ---
+          hl=$(printf '%s\n' "$body" | awk '/^##[[:space:]]*[Hh]ighlights/{g=1;next} /^##[[:space:]]/{g=0} g' \
+               | grep -E '^[[:space:]]*[-*][[:space:]]' | head -3 || true)
+          if [ -z "$hl" ]; then
+            hl=$(printf '%s\n' "$body" | grep -E '^[[:space:]]*[-*][[:space:]]' \
+                 | grep -viE 'chore|ci:|docs|test|build:|refactor|style' | head -3 || true)
+          fi
+          hl=$(printf '%s\n' "$hl" | sed -E 's/^[[:space:]]*[-*][[:space:]]+/• /; s/\*\*//g; s/—/-/g' | head -c 1000 || true)
+          [ -z "$hl" ] && hl="New release is out."
+          install=$(printf '```\n%s\n```' "$INSTALL")
+
+          announce=$(jq -n --arg b "$BRAND" --arg tag "$TAG" --arg url "$url" --arg desc "$hl" \
+            --arg install "$install" --arg ts "$ts" --arg logo "$LOGO" --arg site "$SITE" --arg repo "$REPO" --argjson color "$COLOR" \
+            '{username:$b, avatar_url:$logo, embeds:[{author:{name:$b,url:$site,icon_url:$logo}, title:("🚀  "+$tag+" released"), url:$url, description:$desc, color:$color, thumbnail:{url:$logo}, fields:[{name:"Update",value:$install,inline:false},{name:"Links",value:("[Release notes]("+$url+")  ·  ["+$b+"]("+$site+")  ·  full log → #changelog"),inline:false}], footer:{text:$repo,icon_url:$logo}, timestamp:$ts}]}')
+          post "$RELEASE_WEBHOOK" "$announce"
+
+          desc=$(printf '%s' "$body" | head -c 4000)
+          changelog=$(jq -n --arg b "$BRAND" --arg tag "$TAG" --arg url "$url" --arg desc "$desc" --arg ts "$ts" --arg logo "$LOGO" --arg repo "$REPO" --argjson color "$COLOR" \
+            '{username:($b+" · changelog"), avatar_url:$logo, embeds:[{author:{name:($b+" · changelog"),icon_url:$logo}, title:("📝  Changelog — "+$tag), url:$url, description:$desc, color:$color, footer:{text:($repo+" · full diff on GitHub"),icon_url:$logo}, timestamp:$ts}]}')
+          post "$CHANGELOG_WEBHOOK" "$changelog"
