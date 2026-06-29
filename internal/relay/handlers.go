@@ -55,6 +55,11 @@ func (h *Handlers) SetConnector(c connector.TaskConnector) {
 func (h *Handlers) getConnector() connector.TaskConnector {
 	h.connMu.RLock()
 	defer h.connMu.RUnlock()
+	if h.connector == nil {
+		// Unset (e.g. handlers constructed without relay.New wiring): a Noop is
+		// the correct native-mode default, and keeps callers branch-free.
+		return connector.Noop{}
+	}
 	return h.connector
 }
 
@@ -463,7 +468,7 @@ func (h *Handlers) findExistingClaims(project, selfAgent string, requested []str
 
 // --- Agent lifecycle ---
 
-func buildOnboardingPrompt(name, description, cwd string, interactive bool) string {
+func buildOnboardingPrompt(name, description, cwd string, interactive, linearMode bool) string {
 	var b strings.Builder
 
 	b.WriteString("# Colony Setup — " + name + "\n\n")
@@ -623,8 +628,17 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 
 	// Phase 6 — Set up the board
 	b.WriteString("## Phase 6 — Set up the board\n\n")
-	b.WriteString("### 6a. Backlog board\n\n")
-	b.WriteString("```\ncreate_board({ name: \"Backlog\", slug: \"backlog\", description: \"Main task board\", project: \"" + name + "\" })\n```\n\n")
+	if linearMode {
+		b.WriteString("**This relay runs in Linear-SSOT mode** (`RELAY_LINEAR_MODE`). Linear is the source of truth for work; the relay is a live two-way mirror. **Do NOT create a relay board** — the backlog lives in Linear.\n\n")
+		b.WriteString("How dispatch works:\n")
+		b.WriteString("- Issues are authored in Linear. The connector polls open team issues (~1 min) and mirrors them in.\n")
+		b.WriteString("- Moving a Linear issue into a *started* state dispatches it to the routed agent as a relay task.\n")
+		b.WriteString("- Routing is the relay's `linear_routing` map (`{linearProjectId: agent}`) — each Linear project lands in one lane. Confirm a route exists for this project's Linear project before Phase 8, or issues mirror in unrouted and never dispatch.\n")
+		b.WriteString("- Leads never touch Linear directly — they drive the mirrored task on the relay (`claim → start → review → done`); every transition writes back to the issue.\n\n")
+	} else {
+		b.WriteString("### 6a. Backlog board\n\n")
+		b.WriteString("```\ncreate_board({ name: \"Backlog\", slug: \"backlog\", description: \"Main task board\", project: \"" + name + "\" })\n```\n\n")
+	}
 
 	b.WriteString("---\n\n")
 
@@ -669,19 +683,32 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 	b.WriteString("## Phase 8 — Plan the first two sprints\n\n")
 	b.WriteString("Now that the colony is configured, plan the work.\n\n")
 	b.WriteString("Based on the codebase analysis and current state of the project:\n\n")
-	b.WriteString("### Sprint 1 (immediate priorities)\n")
-	b.WriteString("Create 3-6 tasks for the most impactful work to do right now:\n\n")
-	b.WriteString("```\ndispatch_task({\n  title: \"<task title>\",\n  description: \"<what to do and acceptance criteria>\",\n  profile: \"<profile-slug>\",\n  priority: \"<p0-p3>\",\n  board_id: \"<backlog board ID>\",\n  project: \"" + name + "\"\n})\n```\n\n")
-	b.WriteString("### Sprint 2 (next up)\n")
-	b.WriteString("Create 3-6 more tasks for the next wave of work. These can depend on Sprint 1 outputs.\n\n")
-	b.WriteString("Assign profiles based on the skills needed. Distribute work across teams — don't overload one profile.\n\n")
+	if linearMode {
+		b.WriteString("Tasks are authored in **Linear** (the SSOT), not dispatched on the relay. For each sprint item, create a Linear issue in your team, **set its Linear project so `linear_routing` lands it in the right lane**, and move it into a *started* state — that transition is what mirrors it into the relay and dispatches it to the routed agent.\n\n")
+		b.WriteString("### Sprint 1 (immediate priorities)\n")
+		b.WriteString("Author 3-6 issues for the most impactful work to do right now. Title + description (with acceptance criteria), routed project, priority.\n\n")
+		b.WriteString("### Sprint 2 (next up)\n")
+		b.WriteString("Author 3-6 more issues for the next wave. These can depend on Sprint 1 outputs.\n\n")
+		b.WriteString("Spread work across lanes by skill — don't overload one agent. Do NOT call `dispatch_task` here; in mirror mode it creates an orphan native task the lead won't see alongside Linear work.\n\n")
+	} else {
+		b.WriteString("### Sprint 1 (immediate priorities)\n")
+		b.WriteString("Create 3-6 tasks for the most impactful work to do right now:\n\n")
+		b.WriteString("```\ndispatch_task({\n  title: \"<task title>\",\n  description: \"<what to do and acceptance criteria>\",\n  profile: \"<profile-slug>\",\n  priority: \"<p0-p3>\",\n  board_id: \"<backlog board ID>\",\n  project: \"" + name + "\"\n})\n```\n\n")
+		b.WriteString("### Sprint 2 (next up)\n")
+		b.WriteString("Create 3-6 more tasks for the next wave of work. These can depend on Sprint 1 outputs.\n\n")
+		b.WriteString("Assign profiles based on the skills needed. Distribute work across teams — don't overload one profile.\n\n")
+	}
 
 	if interactive {
 		b.WriteString("**CHECKPOINT:** Present the sprint plan to the user before dispatching tasks. Wait for approval.\n\n")
 	}
 
 	b.WriteString("---\n\n")
-	b.WriteString("**The colony is ready.** Paste the spawn commands from Phase 7 in separate terminals to deploy your workers. They will pick up tasks from the board automatically.\n")
+	if linearMode {
+		b.WriteString("**The colony is ready.** Paste the spawn commands from Phase 7 in separate terminals to deploy your workers. They will pick up tasks dispatched from Linear (via the mirror) automatically.\n")
+	} else {
+		b.WriteString("**The colony is ready.** Paste the spawn commands from Phase 7 in separate terminals to deploy your workers. They will pick up tasks from the board automatically.\n")
+	}
 
 	return b.String()
 }

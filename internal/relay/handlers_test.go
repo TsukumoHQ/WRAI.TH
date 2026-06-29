@@ -1366,6 +1366,35 @@ func TestCreateProjectValidation(t *testing.T) {
 	}
 }
 
+func TestOnboardingPromptBoardBranch(t *testing.T) {
+	// Native mode (default): the relay owns the board — create_board + dispatch_task.
+	native := buildOnboardingPrompt("p", "", "", false, false)
+	if !strings.Contains(native, "create_board") {
+		t.Error("native onboarding must create a relay board")
+	}
+	if !strings.Contains(native, "dispatch_task({") {
+		t.Error("native onboarding must dispatch tasks on the relay board")
+	}
+	if strings.Contains(native, "Linear-SSOT mode") {
+		t.Error("native onboarding must not mention Linear-SSOT mode")
+	}
+
+	// Linear-SSOT mode: Linear owns the board — no relay board, no dispatch_task.
+	linear := buildOnboardingPrompt("p", "", "", false, true)
+	if !strings.Contains(linear, "Linear-SSOT mode") {
+		t.Error("Linear onboarding must announce Linear-SSOT mode")
+	}
+	if !strings.Contains(linear, "linear_routing") {
+		t.Error("Linear onboarding must point at the linear_routing map")
+	}
+	if strings.Contains(linear, "create_board") {
+		t.Error("Linear onboarding must NOT create a relay board")
+	}
+	if strings.Contains(linear, "dispatch_task({") {
+		t.Error("Linear onboarding must NOT emit a dispatch_task call (orphan native task)")
+	}
+}
+
 func TestClampLimit(t *testing.T) {
 	cases := []struct{ in, want int }{
 		{10, 10},      // normal — unchanged

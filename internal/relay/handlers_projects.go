@@ -37,8 +37,11 @@ func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequ
 		}
 	}
 
-	// Return the onboarding mega-prompt as plain text
-	prompt := buildOnboardingPrompt(name, description, cwd, interactive)
+	// Return the onboarding mega-prompt as plain text. The board/dispatch phases
+	// branch on whether an external SSOT (Linear) owns the work: in mirror mode
+	// the relay's native board is bypassed and tasks are authored in Linear.
+	linearMode := h.getConnector().Active()
+	prompt := buildOnboardingPrompt(name, description, cwd, interactive, linearMode)
 	return mcp.NewToolResultText(prompt), nil
 }
 
