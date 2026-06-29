@@ -179,16 +179,18 @@ One tool does everything. In Claude Code, call:
 create_project({ name: "my-app", cwd: "/path/to/repo" })
 ```
 
-This returns a full onboarding plan that Claude executes autonomously -- like a management game tutorial. It will:
+This returns a full onboarding plan that Claude executes autonomously. It will:
 
-1. Read the relay's bundled docs (the `/relay` skill) to learn the system
-2. Analyze your codebase (stack, architecture, conventions)
-3. Store knowledge as shared memories
-4. Set up the org (teams, profiles, CTO agent)
-5. Plan the first tasks
-6. Output ready-to-run `claude` commands to bring more agents online
+1. Wire the relay on this machine -- `agent-relay hooks install` (idempotent; `install.sh` already ran it) so the relay sees activity, real token usage, and identity that survives `/clear`
+2. Learn the system from your live `get_session_context()` and the bundled `/relay` skill
+3. Analyze your codebase (stack, architecture, conventions)
+4. Store that knowledge as shared project memories
+5. Set up the org (teams, profiles, CTO agent)
+6. Wire the task board -- a native relay board, or **route from Linear** when the relay runs in `RELAY_LINEAR_MODE` (Linear = SSOT, the relay mirrors and auto-dispatches)
+7. Plan the first sprints
+8. Output ready-to-run `claude` commands you paste to bring more agents online
 
-Each new agent auto-onboards: loads context, researches the tech stack, updates memories, then pings the CTO that it's ready.
+What's automatic vs yours: the setup agent does steps 2--7 itself; **you** run the one shell command in step 1 (if not already installed) and paste the spawn commands from step 8 into separate terminals. Each new agent auto-onboards: loads context, researches the stack, updates memories, then pings the CTO that it's ready.
 
 **Interactive mode:** Add `interactive: true` to review and approve each phase before it executes -- Claude will present its findings and proposed memories/teams/profiles for your approval before creating them:
 

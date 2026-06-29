@@ -1321,8 +1321,16 @@ func TestCreateProject(t *testing.T) {
 		t.Fatal("expected success")
 	}
 	text := res.Content[0].(mcp.TextContent).Text
-	if !strings.Contains(text, "Colony Setup") {
-		t.Error("expected onboarding prompt with 'Colony Setup'")
+	if !strings.Contains(text, "Project Setup") {
+		t.Error("expected onboarding prompt with 'Project Setup' header")
+	}
+	// Phase 1 must wire the hooks (the relay is blind without them) and must NOT
+	// reference the removed vault tools.
+	if !strings.Contains(text, "agent-relay hooks install") {
+		t.Error("expected onboarding to install the activity/identity hooks")
+	}
+	if strings.Contains(text, "search_vault") || strings.Contains(text, "register_vault") {
+		t.Error("onboarding must not reference the removed vault tools")
 	}
 	if !strings.Contains(text, "test-app") {
 		t.Error("expected project name in prompt")
@@ -1363,6 +1371,35 @@ func TestCreateProjectValidation(t *testing.T) {
 	msg := expectError(t, res)
 	if !strings.Contains(msg, "name is required") {
 		t.Errorf("expected 'name is required', got: %s", msg)
+	}
+}
+
+func TestOnboardingPromptBoardBranch(t *testing.T) {
+	// Native mode (default): the relay owns the board — create_board + dispatch_task.
+	native := buildOnboardingPrompt("p", "", "", false, false)
+	if !strings.Contains(native, "create_board") {
+		t.Error("native onboarding must create a relay board")
+	}
+	if !strings.Contains(native, "dispatch_task({") {
+		t.Error("native onboarding must dispatch tasks on the relay board")
+	}
+	if strings.Contains(native, "Linear-SSOT mode") {
+		t.Error("native onboarding must not mention Linear-SSOT mode")
+	}
+
+	// Linear-SSOT mode: Linear owns the board — no relay board, no dispatch_task.
+	linear := buildOnboardingPrompt("p", "", "", false, true)
+	if !strings.Contains(linear, "Linear-SSOT mode") {
+		t.Error("Linear onboarding must announce Linear-SSOT mode")
+	}
+	if !strings.Contains(linear, "linear_routing") {
+		t.Error("Linear onboarding must point at the linear_routing map")
+	}
+	if strings.Contains(linear, "create_board") {
+		t.Error("Linear onboarding must NOT create a relay board")
+	}
+	if strings.Contains(linear, "dispatch_task({") {
+		t.Error("Linear onboarding must NOT emit a dispatch_task call (orphan native task)")
 	}
 }
 

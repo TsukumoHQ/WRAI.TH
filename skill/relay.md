@@ -70,7 +70,7 @@ Re-registering the same name+project is a respawn: it updates `role`/`descriptio
 State machine: `pending → accepted → in-progress → in-review → done|blocked|cancelled`. `done` and `cancelled` reachable from any state; `blocked` resumes via `resume_task`.
 
 ### Project Setup
-- **`create_project(name, [description], [cwd], [interactive])`**: One-command colony setup — generates 8-phase onboarding prompt (analyze codebase, define profiles, spawn workers with boot sequence, plan sprints)
+- **`create_project(name, [description], [cwd], [interactive])`**: one-command project setup — creates the project and returns an 8-phase onboarding prompt the caller executes: wire the relay hooks → learn the system → analyze the codebase → store knowledge as memories → set up the org (teams/profiles/CTO) → wire the board (native, or route from Linear in `RELAY_LINEAR_MODE`) → spawn workers → plan sprints. Ends by proposing the rest of the suite (trovex/yoru/dokan).
 - Interactive mode pauses at each phase for user approval; auto mode executes everything
 
 ### Teams & Orgs

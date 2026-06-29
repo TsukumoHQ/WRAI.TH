@@ -55,6 +55,11 @@ func (h *Handlers) SetConnector(c connector.TaskConnector) {
 func (h *Handlers) getConnector() connector.TaskConnector {
 	h.connMu.RLock()
 	defer h.connMu.RUnlock()
+	if h.connector == nil {
+		// Unset (e.g. handlers constructed without relay.New wiring): a Noop is
+		// the correct native-mode default, and keeps callers branch-free.
+		return connector.Noop{}
+	}
 	return h.connector
 }
 
@@ -463,13 +468,13 @@ func (h *Handlers) findExistingClaims(project, selfAgent string, requested []str
 
 // --- Agent lifecycle ---
 
-func buildOnboardingPrompt(name, description, cwd string, interactive bool) string {
+func buildOnboardingPrompt(name, description, cwd string, interactive, linearMode bool) string {
 	var b strings.Builder
 
-	b.WriteString("# Colony Setup — " + name + "\n\n")
-	b.WriteString("You are the **setup agent** for project `" + name + "` on the Agent Relay. ")
-	b.WriteString("Your job is to configure the entire relay infrastructure so multi-agent work can begin. ")
-	b.WriteString("Think of this like founding a colony in a management game — you place the buildings, assign roles, and set objectives before the workers arrive.\n\n")
+	b.WriteString("# Project Setup — " + name + "\n\n")
+	b.WriteString("You are the **setup agent** for project `" + name + "` on the wrai.th relay (`agent-relay`). ")
+	b.WriteString("The relay coordinates a fleet of AI coding agents over MCP. This call created the project; your job now is to stand up the org — wire the machine, store what the codebase is, register the roles, and queue the first work — so agents can start.\n\n")
+	b.WriteString("Work through the phases in order. Each one is concrete: run the shell command or call the tool shown. Don't skip Phase 1 — without the hooks the relay is blind.\n\n")
 
 	if interactive {
 		b.WriteString("**MODE: INTERACTIVE** — At the end of each phase, present your findings and proposed actions to the user. Wait for their approval before executing. Do NOT create anything without confirmation.\n\n")
@@ -478,7 +483,7 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 		b.WriteString("> **Auto mode** or **Interactive mode**?\n")
 		b.WriteString("> - **Auto**: I execute everything autonomously. You get a summary at the end.\n")
 		b.WriteString("> - **Interactive**: I present my findings at each phase and wait for your approval before creating anything.\n\n")
-		b.WriteString("If the user picks interactive, add CHECKPOINT pauses after Phase 2 (present analysis), before Phase 3 (approve vault docs), before Phase 5 (approve teams/profiles), and before Phase 8 (approve sprint tasks). At each checkpoint, present what you plan to do and wait for confirmation.\n\n")
+		b.WriteString("If the user picks interactive, add CHECKPOINT pauses after Phase 3 (present analysis), before Phase 4 (approve memories), before Phase 5 (approve teams/profiles), and before Phase 8 (approve sprint tasks). At each checkpoint, present what you plan to do and wait for confirmation.\n\n")
 		b.WriteString("If the user picks auto (or says nothing after 10 seconds), execute everything in order without stopping.\n\n")
 	}
 
@@ -491,22 +496,25 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 
 	b.WriteString("---\n\n")
 
-	// Phase 1 — Learn the relay
-	b.WriteString("## Phase 1 — Learn the relay\n\n")
-	b.WriteString("The relay embeds its own documentation. Read it first:\n\n")
-	b.WriteString("```\n")
-	b.WriteString("search_vault({ query: \"boot sequence\", project: \"_relay\" })\n")
-	b.WriteString("search_vault({ query: \"profiles vault_paths soul_keys\", project: \"_relay\" })\n")
-	b.WriteString("search_vault({ query: \"memory scopes layers\", project: \"_relay\" })\n")
-	b.WriteString("search_vault({ query: \"teams permissions\", project: \"_relay\" })\n")
-	b.WriteString("search_vault({ query: \"task dispatch boards\", project: \"_relay\" })\n")
-	b.WriteString("```\n\n")
-	b.WriteString("Read the results carefully. This is how the system works.\n\n")
+	// Phase 1 — Wire the relay on this machine
+	b.WriteString("## Phase 1 — Wire the relay on this machine\n\n")
+	b.WriteString("The relay can't see what agents do until the **hooks** are installed. They run from `~/.claude` and POST activity, real token usage, and identity to the relay. The `install.sh` path already wired them; this is idempotent, so run it once per machine to be sure (`agent-relay hooks status` to check):\n\n")
+	b.WriteString("```bash\nagent-relay hooks install   # writes the activity/identity/token hooks + merges settings.json\n```\n\n")
+	b.WriteString("Then confirm the MCP server is wired (the `.mcp.json` in this repo should have an `agent-relay` entry — `agent-relay init " + name + "` adds it if missing), and run `/mcp` in Claude Code to reload the connection.\n\n")
+	b.WriteString("**Identity binds on `cwd` (the worktree), not `session_id`.** That is why `/clear` keeps your identity and why every `register_agent` call MUST pass `cwd`. One agent = one worktree.\n\n")
 
 	b.WriteString("---\n\n")
 
-	// Phase 2 — Analyze the codebase
-	b.WriteString("## Phase 2 — Analyze the codebase\n\n")
+	// Phase 2 — Learn the relay
+	b.WriteString("## Phase 2 — Learn how the relay works\n\n")
+	b.WriteString("Your live context is the source of truth — there is no separate docs vault. Read it:\n\n")
+	b.WriteString("```\nget_session_context()   // your profile, project memories, pending tasks, unread messages\n```\n\n")
+	b.WriteString("Tools use progressive disclosure to stay cheap: the default tool list is lean. To see a tool's schema, call `discover_tools(category)` then `call_tool(tool, args)`; or append `?tools=full` to the relay MCP URL and run `/mcp` to list every tool directly. The bundled skill (`skill/relay.md`) and the README document the full surface.\n\n")
+
+	b.WriteString("---\n\n")
+
+	// Phase 3 — Analyze the codebase
+	b.WriteString("## Phase 3 — Analyze the codebase\n\n")
 	b.WriteString("Thoroughly explore the project to understand:\n\n")
 	b.WriteString("- **Domain**: What does this project do? Who is it for?\n")
 	b.WriteString("- **Tech stack**: Languages, frameworks, databases, package manager, runtime\n")
@@ -528,25 +536,9 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 
 	b.WriteString("---\n\n")
 
-	// Phase 3 — Create the vault
-	b.WriteString("## Phase 3 — Create the vault\n\n")
-	b.WriteString("Create an Obsidian-compatible vault **next to** the repo (not inside it):\n\n")
-	b.WriteString("```bash\nmkdir -p ../obsidian/" + name + "\n```\n\n")
-	b.WriteString("Write markdown docs based on your analysis:\n\n")
-	b.WriteString("| File | Content |\n|------|---------|\n")
-	b.WriteString("| `architecture.md` | System overview, module map, data flow |\n")
-	b.WriteString("| `stack.md` | Full tech stack with versions |\n")
-	b.WriteString("| `conventions.md` | Code style, naming, commit format, testing |\n")
-	b.WriteString("| `api.md` | Endpoints, protocols, session lifecycle (if applicable) |\n")
-	b.WriteString("| `env.md` | Required env vars (names only, never values) |\n\n")
-	b.WriteString("Then register it with the relay:\n\n")
-	b.WriteString("```\nregister_vault({ path: \"<absolute-path-to-vault>\", project: \"" + name + "\" })\n```\n\n")
-
-	b.WriteString("---\n\n")
-
-	// Phase 4 — Store project knowledge
-	b.WriteString("## Phase 4 — Store project knowledge\n\n")
-	b.WriteString("Use `set_memory` to persist what you learned. All memories use `scope: \"project\"`, `project: \"" + name + "\"`.\n\n")
+	// Phase 4 — Store project knowledge as memory
+	b.WriteString("## Phase 4 — Store project knowledge as memory\n\n")
+	b.WriteString("Project knowledge lives in the relay's **memory** — there is no docs vault to create. Persist what you learned with `set_memory` so every agent's `get_session_context()` carries it. All memories use `scope: \"project\"`, `project: \"" + name + "\"`. `tags` is an array.\n\n")
 	b.WriteString("**Required memories:**\n\n")
 	b.WriteString("| Key | Layer | Tags | Content |\n|-----|-------|------|---------|\n")
 	b.WriteString("| `stack` | constraints | `[\"stack\", \"tech\"]` | Languages, frameworks, versions |\n")
@@ -554,13 +546,13 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 	b.WriteString("| `conventions` | behavior | `[\"conventions\", \"style\"]` | Naming, style, commits, testing |\n")
 	b.WriteString("| `domain` | constraints | `[\"domain\", \"product\"]` | What the product does, target users |\n")
 	b.WriteString("| `infra` | behavior | `[\"infra\", \"hosting\"]` | Hosting, CI, databases, deployment |\n\n")
-	b.WriteString("**Optional** (add if relevant): `auth-pattern`, `api-pattern`, `db-schema-overview`, `env-vars`\n\n")
-	b.WriteString("Use `confidence: \"observed\"` since you read the codebase directly.\n\n")
+	b.WriteString("Example:\n```\nset_memory({ key: \"stack\", value: \"<what you found>\", scope: \"project\", layer: \"constraints\", tags: [\"stack\", \"tech\"], confidence: \"observed\", project: \"" + name + "\" })\n```\n\n")
+	b.WriteString("**Optional** (add if relevant): `auth-pattern`, `api-pattern`, `db-schema-overview`, `env-vars`. Use `confidence: \"observed\"` — you read the codebase directly.\n\n")
 
 	b.WriteString("---\n\n")
 
 	if interactive {
-		b.WriteString("**CHECKPOINT:** Show the user the vault docs and memories you plan to create. Wait for approval.\n\n")
+		b.WriteString("**CHECKPOINT:** Show the user the memories you plan to store. Wait for approval.\n\n")
 		b.WriteString("---\n\n")
 	}
 
@@ -581,23 +573,17 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 
 	b.WriteString("### 5b. Profiles\n\n")
 	b.WriteString("Register role archetypes based on the teams you created. **Derive profiles from your Phase 2 analysis, not from a template.**\n\n")
-	b.WriteString("The **CTO** profile is always required:\n```\n")
+	b.WriteString("A profile is an identity card — `slug`, `name`, `role`, and advertised `skills`. The **CTO** profile is always required:\n```\n")
 	b.WriteString("register_profile({\n")
 	b.WriteString("  slug: \"cto\",\n  name: \"CTO\",\n")
-	b.WriteString("  role: \"Technical leader. Owns the backlog, sets priorities, coordinates all teams, reviews architecture.\",\n")
-	b.WriteString("  context_pack: \"You are the CTO of " + name + ". You make architecture decisions, manage the task board, and coordinate between tech leads. You have broadcast permissions.\",\n")
+	b.WriteString("  role: \"Technical leader of " + name + ". Owns the backlog, sets priorities, coordinates all teams, reviews architecture. Has broadcast permissions.\",\n")
 	b.WriteString("  skills: \"[{\\\"id\\\":\\\"architecture\\\",\\\"name\\\":\\\"System Architecture\\\",\\\"tags\\\":[\\\"architecture\\\",\\\"design\\\"]},{\\\"id\\\":\\\"management\\\",\\\"name\\\":\\\"Technical Management\\\",\\\"tags\\\":[\\\"management\\\",\\\"coordination\\\"]}]\",\n")
-	b.WriteString("  soul_keys: \"[\\\"stack\\\",\\\"architecture\\\",\\\"domain\\\",\\\"conventions\\\",\\\"infra\\\"]\",\n")
-	b.WriteString("  vault_paths: \"[\\\"architecture.md\\\",\\\"stack.md\\\"]\",\n")
 	b.WriteString("  project: \"" + name + "\"\n})\n```\n\n")
-	b.WriteString("For each additional team, create **one tech lead profile**. Use the actual stack in skills/context_pack:\n```\n")
+	b.WriteString("For each additional team, create **one tech lead profile**. Put the actual stack in `role` and `skills`:\n```\n")
 	b.WriteString("register_profile({\n")
 	b.WriteString("  slug: \"<team-slug>-lead\",\n  name: \"<Team> Tech Lead\",\n")
-	b.WriteString("  role: \"<what this role does, based on the actual codebase>\",\n")
-	b.WriteString("  context_pack: \"You are the <role> for " + name + ". <specific responsibilities based on what you found>\",\n")
-	b.WriteString("  skills: \"<JSON array — use ACTUAL languages/frameworks/tools from Phase 2>\",\n")
-	b.WriteString("  soul_keys: \"<JSON array — pick relevant memory keys>\",\n")
-	b.WriteString("  vault_paths: \"<JSON array — pick relevant vault docs>\",\n")
+	b.WriteString("  role: \"<what this role does for " + name + ", based on the actual codebase>\",\n")
+	b.WriteString("  skills: \"<JSON array — use ACTUAL languages/frameworks/tools from Phase 3>\",\n")
 	b.WriteString("  project: \"" + name + "\"\n})\n```\n\n")
 	b.WriteString("**Rules:**\n")
 	b.WriteString("- Only create profiles for teams that exist\n")
@@ -623,8 +609,17 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 
 	// Phase 6 — Set up the board
 	b.WriteString("## Phase 6 — Set up the board\n\n")
-	b.WriteString("### 6a. Backlog board\n\n")
-	b.WriteString("```\ncreate_board({ name: \"Backlog\", slug: \"backlog\", description: \"Main task board\", project: \"" + name + "\" })\n```\n\n")
+	if linearMode {
+		b.WriteString("**This relay runs in Linear-SSOT mode** (`RELAY_LINEAR_MODE`). Linear is the source of truth for work; the relay is a live two-way mirror. **Do NOT create a relay board** — the backlog lives in Linear.\n\n")
+		b.WriteString("How dispatch works:\n")
+		b.WriteString("- Issues are authored in Linear. The connector polls open team issues (~1 min) and mirrors them in.\n")
+		b.WriteString("- Moving a Linear issue into a *started* state dispatches it to the routed agent as a relay task.\n")
+		b.WriteString("- Routing is the relay's `linear_routing` map (`{linearProjectId: agent}`) — each Linear project lands in one lane. Confirm a route exists for this project's Linear project before Phase 8, or issues mirror in unrouted and never dispatch.\n")
+		b.WriteString("- Leads never touch Linear directly — they drive the mirrored task on the relay (`claim → start → review → done`); every transition writes back to the issue.\n\n")
+	} else {
+		b.WriteString("### 6a. Backlog board\n\n")
+		b.WriteString("```\ncreate_board({ name: \"Backlog\", slug: \"backlog\", description: \"Main task board\", project: \"" + name + "\" })\n```\n\n")
+	}
 
 	b.WriteString("---\n\n")
 
@@ -645,7 +640,7 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 	b.WriteString("```bash\nclaude -w --dangerously-skip-permissions \\\n")
 	b.WriteString("  \"You are the <ROLE> of " + name + ". Boot sequence:\n")
 	b.WriteString("  1. register_agent({ name: '<SLUG>', project: '" + name + "', profile_slug: '<SLUG>', reports_to: 'cto', cwd: '$PWD' })  // cwd REQUIRED — binds your session so real per-turn tokens attribute to you\n")
-	b.WriteString("  2. get_session_context() — read everything: profile, vault docs, memories, tasks\n")
+	b.WriteString("  2. get_session_context() — read everything: profile, project memories, tasks, unread messages\n")
 	b.WriteString("  3. Research the technologies and patterns mentioned in your context using web search. Get up to speed.\n")
 	b.WriteString("  4. set_memory() to persist your research findings in the relay (scope: 'agent', key: 'onboarding-research')\n")
 	b.WriteString("  5. send_message({ to: 'cto', type: 'notification', subject: 'Ready', content: '<NAME> onboarded and ready for tasks.' })\n")
@@ -655,12 +650,15 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 
 	b.WriteString("### 7c. Report\n\n")
 	b.WriteString("Summarize to the user:\n\n")
-	b.WriteString("- **Project**: name, planet type\n")
-	b.WriteString("- **Vault**: path, docs indexed\n")
+	b.WriteString("- **Project**: name\n")
 	b.WriteString("- **Memories**: keys stored\n")
 	b.WriteString("- **Teams**: list with types\n")
 	b.WriteString("- **Profiles**: list with roles\n")
-	b.WriteString("- **Board**: ready for tasks\n")
+	if linearMode {
+		b.WriteString("- **Work**: routed from Linear (mirror dispatches on a *started* transition)\n")
+	} else {
+		b.WriteString("- **Board**: ready for tasks\n")
+	}
 	b.WriteString("- **CTO**: registered, executive, broadcast enabled\n")
 	b.WriteString("- **Spawn commands**: listed above, ready to paste\n\n")
 	b.WriteString("---\n\n")
@@ -669,19 +667,42 @@ func buildOnboardingPrompt(name, description, cwd string, interactive bool) stri
 	b.WriteString("## Phase 8 — Plan the first two sprints\n\n")
 	b.WriteString("Now that the colony is configured, plan the work.\n\n")
 	b.WriteString("Based on the codebase analysis and current state of the project:\n\n")
-	b.WriteString("### Sprint 1 (immediate priorities)\n")
-	b.WriteString("Create 3-6 tasks for the most impactful work to do right now:\n\n")
-	b.WriteString("```\ndispatch_task({\n  title: \"<task title>\",\n  description: \"<what to do and acceptance criteria>\",\n  profile: \"<profile-slug>\",\n  priority: \"<p0-p3>\",\n  board_id: \"<backlog board ID>\",\n  project: \"" + name + "\"\n})\n```\n\n")
-	b.WriteString("### Sprint 2 (next up)\n")
-	b.WriteString("Create 3-6 more tasks for the next wave of work. These can depend on Sprint 1 outputs.\n\n")
-	b.WriteString("Assign profiles based on the skills needed. Distribute work across teams — don't overload one profile.\n\n")
+	if linearMode {
+		b.WriteString("Tasks are authored in **Linear** (the SSOT), not dispatched on the relay. For each sprint item, create a Linear issue in your team, **set its Linear project so `linear_routing` lands it in the right lane**, and move it into a *started* state — that transition is what mirrors it into the relay and dispatches it to the routed agent.\n\n")
+		b.WriteString("### Sprint 1 (immediate priorities)\n")
+		b.WriteString("Author 3-6 issues for the most impactful work to do right now. Title + description (with acceptance criteria), routed project, priority.\n\n")
+		b.WriteString("### Sprint 2 (next up)\n")
+		b.WriteString("Author 3-6 more issues for the next wave. These can depend on Sprint 1 outputs.\n\n")
+		b.WriteString("Spread work across lanes by skill — don't overload one agent. Do NOT call `dispatch_task` here; in mirror mode it creates an orphan native task the lead won't see alongside Linear work.\n\n")
+	} else {
+		b.WriteString("### Sprint 1 (immediate priorities)\n")
+		b.WriteString("Create 3-6 tasks for the most impactful work to do right now:\n\n")
+		b.WriteString("```\ndispatch_task({\n  title: \"<task title>\",\n  description: \"<what to do and acceptance criteria>\",\n  profile: \"<profile-slug>\",\n  priority: \"<p0-p3>\",\n  board_id: \"<backlog board ID>\",\n  project: \"" + name + "\"\n})\n```\n\n")
+		b.WriteString("### Sprint 2 (next up)\n")
+		b.WriteString("Create 3-6 more tasks for the next wave of work. These can depend on Sprint 1 outputs.\n\n")
+		b.WriteString("Assign profiles based on the skills needed. Distribute work across teams — don't overload one profile.\n\n")
+	}
 
 	if interactive {
 		b.WriteString("**CHECKPOINT:** Present the sprint plan to the user before dispatching tasks. Wait for approval.\n\n")
 	}
 
 	b.WriteString("---\n\n")
-	b.WriteString("**The colony is ready.** Paste the spawn commands from Phase 7 in separate terminals to deploy your workers. They will pick up tasks from the board automatically.\n")
+
+	// Suite — propose the rest of the OSS toolchain
+	b.WriteString("## Optional — the rest of the suite\n\n")
+	b.WriteString("wrai.th is the **orchestration** layer of a four-part OSS suite for running AI coding agents in production. The fleet you just stood up gets sharper with the others installed — propose them to the user:\n\n")
+	b.WriteString("- **[trovex](https://trovex.dev)** — *context*: serve agents the one canonical doc per query instead of rereading the repo (~60% fewer tokens per lookup). Pairs with the memories you stored in Phase 4.\n")
+	b.WriteString("- **[yoru](https://yoru.sh)** — *observability*: session receipts of what each agent actually did. Pairs with the activity hooks from Phase 1.\n")
+	b.WriteString("- **[dokan](https://github.com/TsukumoHQ/dokan)** — *deterministic execution*: run the agent's settled, repeatable work as scripts in clean containers — no model in the loop, no token burn.\n\n")
+	b.WriteString("Each ships its own `install.sh`; point the user at the repo for the current one-liner. They're independent — install only what the project needs.\n\n")
+
+	b.WriteString("---\n\n")
+	if linearMode {
+		b.WriteString("**Setup complete.** Paste the spawn commands from Phase 7 in separate terminals to deploy your workers. They pick up tasks dispatched from Linear (via the mirror) automatically.\n")
+	} else {
+		b.WriteString("**Setup complete.** Paste the spawn commands from Phase 7 in separate terminals to deploy your workers. They pick up tasks from the board automatically.\n")
+	}
 
 	return b.String()
 }
