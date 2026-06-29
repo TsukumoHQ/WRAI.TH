@@ -1071,9 +1071,28 @@ print_summary() {
   echo "${GREEN}${BOLD}  ║      Installation complete!            ║${RESET}"
   echo "${GREEN}${BOLD}  ╚═══════════════════════════════════════╝${RESET}"
   echo
-  info "The relay is running on ${BOLD}http://localhost:${PORT}${RESET}"
+  # Be honest about service state: only the auto-start path actually launches a
+  # relay. With --no-service nothing is running yet — claiming otherwise is the
+  # #1 source of "I followed the steps and nothing works" confusion.
+  local bin_path="${BIN_DIR}/${BINARY_NAME}"
+  local relay_cmd="$BINARY_NAME"
+  case ":${PATH}:" in
+    *":${BIN_DIR}:"*) ;;                 # on PATH — bare command works
+    *) relay_cmd="$bin_path" ;;          # not on PATH — use the full path
+  esac
+
+  if [[ "$NO_SERVICE" == true ]]; then
+    warn "No auto-start service was installed (--no-service). The relay is ${BOLD}not running yet${RESET}."
+    info "Start it: ${BOLD}${relay_cmd} serve${RESET}   (or re-run without --no-service for auto-start on login)"
+  else
+    info "The relay auto-starts on login and is starting now on ${BOLD}http://localhost:${PORT}${RESET}"
+    info "Check it: ${BOLD}${relay_cmd} status${RESET}"
+  fi
   echo
   info "Next steps:"
+  if [[ ":${PATH}:" != *":${BIN_DIR}:"* ]]; then
+    echo "  0. Add the binary to your PATH: ${BOLD}export PATH=\"${BIN_DIR}:\$PATH\"${RESET} (append to your shell profile)"
+  fi
   echo "  1. Open Claude Code in any configured project"
   echo "  2. Use ${BOLD}/relay${RESET} to check your inbox"
   echo "  3. Use ${BOLD}/relay send <agent> <message>${RESET} to talk to another agent"
