@@ -56,6 +56,7 @@ func NewNotifier(database *db.DB, registry *SessionRegistry, events *EventBus) *
 		digestLastFired: make(map[string]time.Time),
 	}
 	n.seedDefaults()
+	n.ensureAutonomyRules()
 	return n
 }
 
@@ -519,6 +520,13 @@ func (n *Notifier) resolveTargets(project, target string, payload map[string]any
 			return []string{d}
 		}
 		return nil
+	case "owner", "owner_of_record":
+		// the owner-of-record carried on the event payload — the lead-machine's
+		// re-nudge target for a stale deal/commitment (donna sets payload.owner).
+		if o := strVal(payload["owner"]); o != "" {
+			return []string{o}
+		}
+		return nil
 	}
 	// Role match (cto / cxx / lead / etc.): any agent whose role equals target.
 	if role := matchByRole(n.db, project, target); len(role) > 0 {
@@ -829,4 +837,82 @@ func (n *Notifier) seedDefaults() {
 		}
 	}
 	log.Printf("notifier: seeded %d default notification rules", len(defaults))
+}
+
+// lead-machine autonomy event names (TSU-146). donna's lead pipeline emits these
+// via POST /api/notification-events {name, project, agent, payload}; the relay
+// turns them into the messages that keep the machine turning without a human
+// poke. Payload contract: every event carries "line" (human summary);
+// deal-stale also carries "owner" (owner-of-record to re-nudge).
+const (
+	EvLeadNew    = "event:lead-new"
+	EvDealStale  = "event:deal-stale"
+	EvReviewAged = "event:review-aged"
+)
+
+// ensureAutonomyRules installs the lead-machine autonomy triggers (TSU-146)
+// idempotently BY NAME. Unlike seedDefaults (first-run only, when the table is
+// empty), this runs every startup so the rules land on an already-seeded prod
+// relay — but it never duplicates a rule a prior run created, and never touches
+// a rule an operator has since edited or disabled. New rules only.
+func (n *Notifier) ensureAutonomyRules() {
+	want := []models.NotificationRule{
+		{
+			// new lead captured → P0 to donna (the COO drives the follow-up).
+			Name:   "New lead → donna (P0)",
+			Event:  EvLeadNew,
+			Match:  `{}`,
+			Action: "message",
+			Target: "donna",
+			Opts:   `{"priority":"P0","ttl":86400,"template":"🆕 new lead: {line}"}`,
+		},
+		{
+			// deal/commitment stale past SLA → re-nudge the owner-of-record
+			// (carried on payload.owner; resolved by the "owner" target).
+			Name:   "Stale deal → owner re-nudge (P1)",
+			Event:  EvDealStale,
+			Match:  `{}`,
+			Action: "message",
+			Target: "owner",
+			Opts:   `{"priority":"P1","ttl":86400,"template":"⏳ stale deal — re-nudge: {line}"}`,
+		},
+		{
+			// review card aged past SLA → escalate to cto (process signal → cto,
+			// per the owner rule; cto carries it to the human if needed).
+			Name:   "Review aged → cto escalate (P1)",
+			Event:  EvReviewAged,
+			Match:  `{}`,
+			Action: "message",
+			Target: "cto",
+			Opts:   `{"priority":"P1","ttl":86400,"template":"🔎 review aged — escalating: {line}"}`,
+		},
+	}
+
+	existing, err := n.db.ListNotificationRules("default")
+	if err != nil {
+		log.Printf("notifier: ensure autonomy rules: list: %v", err)
+		return
+	}
+	have := make(map[string]bool, len(existing))
+	for _, r := range existing {
+		have[r.Name] = true
+	}
+
+	added := 0
+	for i := range want {
+		if have[want[i].Name] {
+			continue // already present (or operator-edited) — leave it alone
+		}
+		r := want[i]
+		r.Enabled = true
+		r.Project = "default" // fires across all event projects (see evaluator)
+		if _, err := n.db.CreateNotificationRule(&r); err != nil {
+			log.Printf("notifier: ensure autonomy rule %q: %v", r.Name, err)
+			continue
+		}
+		added++
+	}
+	if added > 0 {
+		log.Printf("notifier: ensured %d lead-machine autonomy rule(s)", added)
+	}
 }
