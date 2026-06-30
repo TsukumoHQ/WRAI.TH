@@ -195,6 +195,62 @@ func (d *DB) MarkLinearDone(taskID string) error {
 	return nil
 }
 
+// LinearMirrorRef is a minimal handle on a Linear-sourced mirror task.
+type LinearMirrorRef struct {
+	TaskID        string
+	LinearIssueID string
+}
+
+// ActiveLinearMirrors lists the project's Linear-sourced mirror tasks that are
+// still active (not done/cancelled) and carry an issue id — the candidate set
+// for the reconcile Done-dropout sync (TSU-159).
+func (d *DB) ActiveLinearMirrors(project string) ([]LinearMirrorRef, error) {
+	rows, err := d.ro().Query(
+		`SELECT id, linear_issue_id FROM tasks
+		 WHERE project = ? AND source = 'linear'
+		   AND linear_issue_id IS NOT NULL AND linear_issue_id != ''
+		   AND status NOT IN ('done', 'cancelled')`,
+		project,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("active linear mirrors: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []LinearMirrorRef
+	for rows.Next() {
+		var r LinearMirrorRef
+		if err := rows.Scan(&r.TaskID, &r.LinearIssueID); err != nil {
+			return nil, fmt.Errorf("scan linear mirror: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CloseLinearMirror terminally closes a mirror task to match a Linear issue that
+// finished while out of the open poll (TSU-159). status must be "done" or
+// "cancelled". Guarded so it never re-opens or flips an already-terminal task,
+// and stamps the terminal timestamps the stale-scanner / boards read.
+func (d *DB) CloseLinearMirror(taskID, status string) error {
+	if status != "done" && status != "cancelled" {
+		return fmt.Errorf("close linear mirror: invalid status %q", status)
+	}
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	_, err := d.conn.Exec(
+		`UPDATE tasks SET
+		   status = ?,
+		   done_at = COALESCE(done_at, ?),
+		   completed_at = COALESCE(completed_at, ?),
+		   last_activity_at = ?
+		 WHERE id = ? AND status NOT IN ('done', 'cancelled')`,
+		status, now, now, now, taskID,
+	)
+	if err != nil {
+		return fmt.Errorf("close linear mirror: %w", err)
+	}
+	return nil
+}
+
 // linearSyncLogCap bounds the audit table; older rows are pruned on insert.
 const linearSyncLogCap = 500
 

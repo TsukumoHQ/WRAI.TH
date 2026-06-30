@@ -307,6 +307,40 @@ func (c *graphqlClient) openTeamIssues(ctx context.Context, teamKey string) ([]g
 	return issues, nil
 }
 
+// --- issues by id (Done-dropout sync, TSU-159) ---
+
+const issuesByIDsQuery = `query IssuesByIDs($ids: [ID!]!) {
+  issues(filter: { id: { in: $ids } }, first: 250) {
+    nodes { id state { id name type } }
+  }
+}`
+
+// issuesByIDs fetches the current state of specific issues by id — used by the
+// reconcile poll to resolve issues that dropped out of the OPEN set (so it can
+// tell a Done/canceled issue from a transient miss). Chunked to stay under the
+// query-complexity budget; partial results from a failed chunk are not returned
+// (the caller treats a fetch error as "leave the mirror alone").
+func (c *graphqlClient) issuesByIDs(ctx context.Context, ids []string) ([]gqlIssue, error) {
+	const chunk = 100
+	var out []gqlIssue
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var resp struct {
+			Issues struct {
+				Nodes []gqlIssue `json:"nodes"`
+			} `json:"issues"`
+		}
+		if err := c.do(ctx, issuesByIDsQuery, map[string]any{"ids": ids[start:end]}, &resp); err != nil {
+			return nil, err
+		}
+		out = append(out, resp.Issues.Nodes...)
+	}
+	return out, nil
+}
+
 // --- team meta (id + projects) for backfill routing ---
 
 const teamMetaQuery = `query TeamMeta($key: String!) {

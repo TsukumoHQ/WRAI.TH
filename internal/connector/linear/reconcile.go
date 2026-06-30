@@ -22,10 +22,9 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	if len(issues) == 0 {
-		c.lastReconcileAt.Store(time.Now().UnixMilli())
-		return 0, nil
-	}
+	// NOTE: do NOT early-return on an empty open set — an empty poll is exactly
+	// the Done-dropout case (every issue moved to Done/canceled), and pass 3 must
+	// still run to close their now-orphaned mirrors (TSU-159).
 
 	// Pass 1: upsert every issue (creates rows so parent links can resolve).
 	// The poll also detects → In Progress transitions so dispatch works without
@@ -33,10 +32,12 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 	// status is the dedupe — once the row is in-progress, later polls skip it.
 	upserted := 0
 	hasParent := false
+	seen := make(map[string]bool, len(issues)) // every OPEN issue id this poll saw
 	for _, iss := range issues {
 		if iss.ID == "" {
 			continue
 		}
+		seen[iss.ID] = true
 		// Scope: mirror/dispatch issues whose resolved target is an agent — a
 		// configured project route, the issue's delegate (Linear's agent-
 		// delegation field, for multi-lead projects), or a direct agent assignee.
@@ -95,8 +96,73 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		}
 	}
 
+	// Pass 3: Done-dropout sync (TSU-159). openTeamIssues returns OPEN issues
+	// only, so when an issue is moved to Done/canceled in Linear it drops out of
+	// the poll and its mirror never re-upserts — it stays active forever and
+	// fires phantom stale-escalations (and a missed webhook on a localhost relay
+	// makes it permanent). Reconcile the active mirrors absent from this poll's
+	// open set: fetch their real state and close the ones Linear has finished.
+	c.syncDroppedMirrors(ctx, seen)
+
 	c.lastReconcileAt.Store(time.Now().UnixMilli())
 	return upserted, nil
+}
+
+// syncDroppedMirrors closes relay mirror tasks whose Linear issue is no longer
+// in the open set because it completed/canceled (TSU-159). It only acts on an
+// explicit completed/canceled state from Linear — an issue the API doesn't
+// return (e.g. a transient miss or a hard-deleted issue) is left untouched, so a
+// blip never cancels live work. A genuine reopen re-enters the open set and
+// re-dispatches via the normal path.
+func (c *Connector) syncDroppedMirrors(ctx context.Context, seen map[string]bool) {
+	active, err := c.db.ActiveLinearMirrors(c.project)
+	if err != nil {
+		log.Printf("[linear] reconcile dropout-sync list: %v", err)
+		return
+	}
+	taskByIssue := map[string]string{}
+	var missing []string
+	for _, m := range active {
+		if !seen[m.LinearIssueID] {
+			missing = append(missing, m.LinearIssueID)
+			taskByIssue[m.LinearIssueID] = m.TaskID
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	states, err := c.gql.issuesByIDs(ctx, missing)
+	if err != nil {
+		log.Printf("[linear] reconcile dropout-sync fetch: %v", err)
+		return
+	}
+	closed := 0
+	for _, iss := range states {
+		if iss.State == nil {
+			continue
+		}
+		var st string
+		switch iss.State.Type {
+		case "completed":
+			st = "done"
+		case "canceled", "cancelled":
+			st = "cancelled"
+		default:
+			continue // still open (e.g. moved to another non-closed state) — leave it
+		}
+		taskID := taskByIssue[iss.ID]
+		if taskID == "" {
+			continue
+		}
+		if err := c.db.CloseLinearMirror(taskID, st); err != nil {
+			log.Printf("[linear] reconcile close mirror %s: %v", iss.ID, err)
+			continue
+		}
+		closed++
+	}
+	if closed > 0 {
+		log.Printf("[linear] reconcile dropout-sync: closed %d mirror(s) for Done/canceled issues", closed)
+	}
 }
 
 // StartReconcile runs the active-cycle reconcile poll on an interval with a

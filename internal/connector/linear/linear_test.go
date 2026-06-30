@@ -647,3 +647,61 @@ func TestReconcileNoResurrectTerminal(t *testing.T) {
 		t.Errorf("after completion, dispatched = %v, want still 1 (no resurrection)", dispatched)
 	}
 }
+
+// TestReconcileDropoutSync covers TSU-159: an issue that moves to Done in Linear
+// drops out of the OPEN poll, so its mirror must be closed via the by-id state
+// fetch — not left active forever firing phantom stale-escalations.
+func TestReconcileDropoutSync(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	c.SetEventSink(func(e connector.TaskEvent) {})
+
+	// open=true → the issue is in the open poll (started, agent-assigned).
+	// done=true → open poll is empty; IssuesByIDs reports it completed.
+	var done bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		q := readQuery(r)
+		switch {
+		case strings.Contains(q, "TeamOpenIssues"):
+			if done {
+				writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}`)
+				return
+			}
+			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+				{"id":"i-drop","identifier":"TSU-99","number":99,"title":"finish me","priority":1,"url":"u1","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"analytics-lead","displayName":"analytics-lead"},"project":{"id":"proj-growth","name":"growth"},"labels":{"nodes":[]}}
+			]}}`)
+		case strings.Contains(q, "IssuesByIDs"):
+			// The dropped issue is now completed in Linear.
+			writeData(w, `{"issues":{"nodes":[{"id":"i-drop","state":{"id":"s9","name":"Done","type":"completed"}}]}}`)
+		default:
+			writeData(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	// Poll 1: issue open → mirror created, active.
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("ReconcileCycle #1: %v", err)
+	}
+	task, _ := database.GetTaskByLinearIssueID(c.project, "i-drop")
+	if task == nil {
+		t.Fatal("mirror not created on first poll")
+	}
+	if task.Status == "done" || task.Status == "cancelled" {
+		t.Fatalf("mirror should be active after poll 1, got %q", task.Status)
+	}
+
+	// Issue moved to Done in Linear → drops out of the open poll.
+	done = true
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("ReconcileCycle #2: %v", err)
+	}
+	task, _ = database.GetTaskByLinearIssueID(c.project, "i-drop")
+	if task == nil {
+		t.Fatal("mirror disappeared after dropout sync")
+	}
+	if task.Status != "done" {
+		t.Fatalf("dropped-out Done issue: mirror status = %q, want done", task.Status)
+	}
+}
