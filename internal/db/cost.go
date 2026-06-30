@@ -110,3 +110,66 @@ func (d *DB) GetCostByAgent(project, since string) ([]AgentCost, error) {
 	sort.Slice(out, func(i, j int) bool { return out[i].USD > out[j].USD })
 	return out, nil
 }
+
+// DayCost is the per-day token + dollar rollup over a window.
+type DayCost struct {
+	Day    string  `json:"day"` // YYYY-MM-DD (UTC)
+	Tokens int64   `json:"tokens"`
+	USD    float64 `json:"usd"`
+}
+
+// GetCostByDay rolls up real-token usage into $ per UTC day since a time, pricing
+// each (day, model) group at its tier — the "spend by day" half of the fleet
+// cost-model (TSU-153). Same pricing + legacy-bytes fallback as GetCostByAgent;
+// sorted oldest→newest for a timeseries chart.
+func (d *DB) GetCostByDay(project, since string) ([]DayCost, error) {
+	fallback := strings.TrimSpace(d.GetSetting("cost_default_model"))
+	if fallback == "" {
+		fallback = "opus"
+	}
+	rows, err := d.ro().Query(`
+		SELECT strftime('%Y-%m-%d', created_at) AS day, COALESCE(model, ''),
+		       SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens), SUM(cache_creation_tokens), SUM(bytes)
+		FROM token_usage
+		WHERE project = ? AND created_at >= ?
+		GROUP BY day, model`,
+		project, since,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cost by day: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	agg := map[string]*DayCost{}
+	for rows.Next() {
+		var day, model string
+		var in, out, cr, cc, bytes int64
+		if err := rows.Scan(&day, &model, &in, &out, &cr, &cc, &bytes); err != nil {
+			return nil, fmt.Errorf("scan cost by day: %w", err)
+		}
+		dc := agg[day]
+		if dc == nil {
+			dc = &DayCost{Day: day}
+			agg[day] = dc
+		}
+		rate := rateForModel(model, fallback)
+		if in+out+cr+cc > 0 {
+			dc.Tokens += in + out + cr + cc
+			dc.USD += costUSD(rate, in, out, cr, cc)
+		} else if bytes > 0 {
+			est := bytes / 4
+			dc.Tokens += est
+			dc.USD += costUSD(rate, est, 0, 0, 0)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]DayCost, 0, len(agg))
+	for _, dc := range agg {
+		out = append(out, *dc)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Day < out[j].Day })
+	return out, nil
+}

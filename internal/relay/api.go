@@ -171,6 +171,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetTokenTimeSeries(w, req)
 	case path == "/cost" && req.Method == http.MethodGet:
 		r.apiGetCostByAgent(w, req)
+	case path == "/cost/daily" && req.Method == http.MethodGet:
+		r.apiGetCostByDay(w, req)
 	case path == "/quotas" && req.Method == http.MethodGet:
 		r.apiListQuotas(w, req)
 	case path == "/quotas" && req.Method == http.MethodPost:
@@ -1898,6 +1900,25 @@ func (r *Relay) apiGetCostByAgent(w http.ResponseWriter, req *http.Request) {
 	}
 	if data == nil {
 		data = []db.AgentCost{}
+	}
+	writeJSON(w, data)
+}
+
+// apiGetCostByDay returns the per-day $ rollup (TSU-153 "spend by day").
+// Path: /cost/daily?project=&period=
+func (r *Relay) apiGetCostByDay(w http.ResponseWriter, req *http.Request) {
+	project := req.URL.Query().Get("project")
+	if project == "" {
+		project = "default"
+	}
+	since := db.PeriodToSince(req.URL.Query().Get("period"))
+	data, err := r.DB.GetCostByDay(project, since)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to get cost by day", err)
+		return
+	}
+	if data == nil {
+		data = []db.DayCost{}
 	}
 	writeJSON(w, data)
 }

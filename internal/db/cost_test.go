@@ -86,3 +86,40 @@ func TestGetCostByAgent_BytesFallback(t *testing.T) {
 		t.Fatalf("bytes-fallback cost = %.4f, want 5.00", costs[0].USD)
 	}
 }
+
+// TestGetCostByDay covers TSU-153 "spend by day": real-token usage rolled up to
+// $ per UTC day, priced per model tier, sorted oldest→newest.
+func TestGetCostByDay(t *testing.T) {
+	d := testDB(t)
+	const project = "p1"
+	const since = "2020-01-01T00:00:00.000000Z"
+
+	if err := d.InsertTokenUsageBatch([]TokenRecord{
+		// 2026-06-26: opus 1M output = $25
+		{Project: project, Agent: "alice", Model: "claude-opus-4-8", Output: 1_000_000, CreatedAt: "2026-06-26T09:00:00.000000Z"},
+		// 2026-06-26: sonnet 1M input = $3 (same day, different agent/model → coalesces into the day)
+		{Project: project, Agent: "bob", Model: "claude-sonnet-4-6", Input: 1_000_000, CreatedAt: "2026-06-26T20:00:00.000000Z"},
+		// 2026-06-27: sonnet 1M output = $15
+		{Project: project, Agent: "alice", Model: "claude-sonnet-4-6", Output: 1_000_000, CreatedAt: "2026-06-27T10:00:00.000000Z"},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	days, err := d.GetCostByDay(project, since)
+	if err != nil {
+		t.Fatalf("cost by day: %v", err)
+	}
+	if len(days) != 2 {
+		t.Fatalf("want 2 day buckets, got %d: %+v", len(days), days)
+	}
+	// Ascending by day.
+	if days[0].Day != "2026-06-26" || days[1].Day != "2026-06-27" {
+		t.Fatalf("days not sorted ascending: %q, %q", days[0].Day, days[1].Day)
+	}
+	if math.Abs(days[0].USD-28.0) > 1e-6 { // $25 + $3
+		t.Fatalf("2026-06-26 cost = %.4f, want 28.00", days[0].USD)
+	}
+	if math.Abs(days[1].USD-15.0) > 1e-6 {
+		t.Fatalf("2026-06-27 cost = %.4f, want 15.00", days[1].USD)
+	}
+}
