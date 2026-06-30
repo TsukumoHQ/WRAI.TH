@@ -39,7 +39,7 @@ func TestEnsureAutonomyRulesIdempotent(t *testing.T) {
 	n := &Notifier{db: database}
 
 	names := map[string]bool{
-		"New lead → donna (P0)":            true,
+		"Lead ready → donna (P0)":          true,
 		"Stale deal → owner re-nudge (P1)": true,
 		"Review aged → cto escalate (P1)":  true,
 	}

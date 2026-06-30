@@ -845,7 +845,11 @@ func (n *Notifier) seedDefaults() {
 // poke. Payload contract: every event carries "line" (human summary);
 // deal-stale also carries "owner" (owner-of-record to re-nudge).
 const (
-	EvLeadNew    = "event:lead-new"
+	// EvLeadReady is the canonical event the lead pipeline emits when a lead is
+	// ready for surfacing — donna's lead-trigger emits name:"lead-ready" (verified
+	// live via the GAP3 smoke). It is NOT "lead-new": the rule must match what the
+	// emitter actually sends or the route never connects.
+	EvLeadReady  = "event:lead-ready"
 	EvDealStale  = "event:deal-stale"
 	EvReviewAged = "event:review-aged"
 )
@@ -858,13 +862,13 @@ const (
 func (n *Notifier) ensureAutonomyRules() {
 	want := []models.NotificationRule{
 		{
-			// new lead captured → P0 to donna (the COO drives the follow-up).
-			Name:   "New lead → donna (P0)",
-			Event:  EvLeadNew,
+			// lead ready for surfacing → P0 to donna (the COO drives the follow-up).
+			Name:   "Lead ready → donna (P0)",
+			Event:  EvLeadReady,
 			Match:  `{}`,
 			Action: "message",
 			Target: "donna",
-			Opts:   `{"priority":"P0","ttl":86400,"template":"🆕 new lead: {line}"}`,
+			Opts:   `{"priority":"P0","ttl":86400,"template":"🆕 lead ready: {line}"}`,
 		},
 		{
 			// deal/commitment stale past SLA → re-nudge the owner-of-record
