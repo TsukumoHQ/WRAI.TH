@@ -41,14 +41,17 @@ jobs:
           # --- publish-gate: WAIT for a published, non-prerelease GitHub Release ---
           # tag-push fires this workflow BEFORE the Release object exists (race) — poll for it.
           rel=""
-          for i in $(seq 1 10); do
+          # 60×12s = 12min: a PAT-created Release object can land minutes after the
+          # tag push, and the old 10×12s (120s) gate gave up first — v1.6.0's
+          # auto-announce was SKIPPED that way. Sync'd with dokan's gate.
+          for i in $(seq 1 60); do
             rel=$(gh api "repos/${REPO}/releases/tags/${TAG}" 2>/dev/null || true)
             if [ -n "$rel" ] \
                && [ "$(printf '%s' "$rel" | jq -r '.draft')" = "false" ] \
                && [ "$(printf '%s' "$rel" | jq -r '.prerelease')" != "true" ]; then
               break
             fi
-            echo "Release for ${TAG} not published yet (attempt $i/10) — waiting 12s..." >&2
+            echo "Release for ${TAG} not published yet (attempt $i/60) — waiting 12s..." >&2
             rel=""; sleep 12
           done
           if [ -z "$rel" ]; then
