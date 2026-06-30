@@ -580,3 +580,70 @@ func writeData(w http.ResponseWriter, data string) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"data":` + data + `}`))
 }
+
+func TestIsTerminalOrActive(t *testing.T) {
+	for _, s := range []string{"in-progress", "done", "cancelled"} {
+		if !isTerminalOrActive(s) {
+			t.Errorf("isTerminalOrActive(%q) = false, want true (must not re-dispatch)", s)
+		}
+	}
+	for _, s := range []string{"pending", "accepted", "blocked", ""} {
+		if isTerminalOrActive(s) {
+			t.Errorf("isTerminalOrActive(%q) = true, want false (still dispatchable)", s)
+		}
+	}
+}
+
+// TestReconcileNoResurrectTerminal guards the phantom-stale fix: once a mirror
+// task is completed in the relay, a reconcile poll that still sees the Linear
+// issue in a started state (its PR wasn't auto-closed) must NOT re-dispatch it.
+func TestReconcileNoResurrectTerminal(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+
+	var dispatched []string
+	c.SetEventSink(func(e connector.TaskEvent) {
+		if e.Type == "task.dispatched" {
+			dispatched = append(dispatched, e.Agent)
+		}
+	})
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(readQuery(r), "TeamOpenIssues") {
+			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+				{"id":"i-term","identifier":"TSU-98","number":98,"title":"merged work","priority":1,"url":"u1","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"analytics-lead","displayName":"analytics-lead"},"project":{"id":"proj-growth","name":"growth"},"labels":{"nodes":[]}}
+			]}}`)
+			return
+		}
+		writeData(w, `{}`)
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	// First poll: dispatches once, mirror is created in-progress.
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("ReconcileCycle #1: %v", err)
+	}
+	if len(dispatched) != 1 {
+		t.Fatalf("first poll dispatched = %v, want 1", dispatched)
+	}
+
+	// Agent finishes the work → relay task done (the Linear issue still lags in
+	// the started state).
+	task, _ := database.GetTaskByLinearIssueID(c.project, "i-term")
+	if task == nil {
+		t.Fatal("mirror task not created")
+	}
+	if _, err := database.CompleteTask(task.ID, "analytics-lead", c.project, nil); err != nil {
+		t.Fatalf("CompleteTask: %v", err)
+	}
+
+	// Second poll: the issue is STILL started, but the mirror is terminal — it
+	// must NOT be resurrected (this was the phantom claim+start re-fire).
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("ReconcileCycle #2: %v", err)
+	}
+	if len(dispatched) != 1 {
+		t.Errorf("after completion, dispatched = %v, want still 1 (no resurrection)", dispatched)
+	}
+}

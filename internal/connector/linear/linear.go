@@ -153,6 +153,19 @@ func looksLikeBlocked(name string) bool {
 	return strings.Contains(strings.ToLower(name), "block")
 }
 
+// isTerminalOrActive reports whether a relay mirror's current status means the
+// reconcile poll must NOT (re-)dispatch it: already in-progress (would double
+// claim+start) or terminal (done/cancelled — resurrecting it is the phantom-
+// stale bug). Other statuses (pending/accepted/blocked) remain dispatchable.
+func isTerminalOrActive(status string) bool {
+	switch status {
+	case "in-progress", "done", "cancelled":
+		return true
+	default:
+		return false
+	}
+}
+
 // Warmup fetches the viewer id (anti-loop) and the team's workflow states. It is
 // best-effort: failures are logged and retried lazily on first use. Safe to call
 // from a startup goroutine.

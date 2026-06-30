@@ -65,9 +65,18 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		// Dispatch on a genuine transition into a working "started" state (the
 		// agent target is already confirmed by the scope gate above; first sight
 		// in-progress counts: boot-time pickup).
+		//
+		// NEVER re-dispatch a mirror that's already in-progress (avoid a double
+		// claim+start) OR already TERMINAL (done/cancelled). The latter is the
+		// phantom-stale resurrection: an agent completes the relay task, but the
+		// Linear issue lags in a started state (its PR wasn't auto-closed), so
+		// every reconcile poll would otherwise re-fire claim+start on work that's
+		// done. The webhook path is safe (it gates on a real state change); the
+		// poll has no such signal, so it must not resurrect a terminal task. A
+		// genuine reopen arrives via the webhook with an actual state transition.
 		if c.onEvent != nil &&
 			iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
-			(prior == nil || prior.Status != "in-progress") {
+			(prior == nil || !isTerminalOrActive(prior.Status)) {
 			c.onEvent(c.dispatchEvent(taskID, iss.Title, target, seed))
 		}
 	}
