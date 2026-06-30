@@ -395,6 +395,11 @@ func refreshSkillAndHooks(version string) {
 		}
 	}
 
+	// Public end-user skill → ~/.claude/skills/agent-relay/SKILL.md. Baked into
+	// the binary (const), so refresh it from there — no download, always current
+	// with the just-installed binary.
+	pubSkillOK := InstallPublicSkill(home) == nil
+
 	// Activity hooks → ~/.claude/hooks/ (executable)
 	hooksDir := filepath.Join(home, ".claude", "hooks")
 	_ = os.MkdirAll(hooksDir, 0o755)
@@ -420,7 +425,11 @@ func refreshSkillAndHooks(version string) {
 		settingsPath := filepath.Join(home, ".claude", "settings.json")
 		wired, _ = mergeHookSettings(hooksDir, settingsPath)
 	}
-	fmt.Printf("skill %d/2, hooks %d/%d (wired %d new)\n", skillOK, hookOK, len(hooks), wired)
+	pubStr := "ok"
+	if !pubSkillOK {
+		pubStr = "fail"
+	}
+	fmt.Printf("skill %d/2 (public %s), hooks %d/%d (wired %d new)\n", skillOK, pubStr, hookOK, len(hooks), wired)
 }
 
 // verifyChecksum compares the SHA-256 of file against the entry for name in a

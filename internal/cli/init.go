@@ -112,6 +112,15 @@ func runInit(args []string) {
 	if project != "" {
 		fmt.Printf("  project: %s (set as default via URL param)\n", project)
 	}
+
+	// Land the public end-user skill so a fresh Claude Code session knows how to
+	// drive relay setup + usage. Best-effort — never fail `init` over it.
+	if home, err := os.UserHomeDir(); err == nil {
+		if err := InstallPublicSkill(home); err == nil {
+			fmt.Printf("  skill: ~/.claude/skills/%s/SKILL.md\n", PublicSkillName)
+		}
+	}
+
 	fmt.Println("\nnext steps:")
 	fmt.Println("  1. Run /mcp in Claude Code to reload MCP connections")
 	fmt.Println("  2. Call whoami() with a unique salt to identify your session")

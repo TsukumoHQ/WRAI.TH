@@ -772,6 +772,16 @@ SKILL_EOF
 
   rm -rf "$tmpdir"
   success "Installed /relay command at ${DIM}${skill_path}${RESET}"
+
+  # Public end-user skill → ~/.claude/skills/agent-relay/SKILL.md. The binary
+  # carries it as a baked-in template (single source of truth), so let it write
+  # the file rather than curling a copy — guarantees it matches this version.
+  local _bin="${BIN_DIR}/${BINARY_NAME}"
+  if [[ -x "$_bin" ]] && "$_bin" skill install >/dev/null 2>&1; then
+    success "Installed ${BOLD}agent-relay${RESET} skill at ${DIM}${HOME}/.claude/skills/agent-relay/SKILL.md${RESET}"
+  else
+    warn "Could not install the agent-relay skill (run ${BOLD}agent-relay skill install${RESET} after adding the binary to PATH)"
+  fi
 }
 
 # ── Step 5: Scan and configure projects ──────────────────────────────────────
@@ -1025,6 +1035,13 @@ verify_installation() {
     success "Skill: /relay command installed"
   else
     warn "Skill: not found"
+  fi
+
+  # Check public end-user skill
+  if [[ -f "$HOME/.claude/skills/agent-relay/SKILL.md" ]]; then
+    success "Skill: agent-relay skill installed"
+  else
+    warn "Skill: agent-relay skill not found"
   fi
 
   # Check port availability and service status
