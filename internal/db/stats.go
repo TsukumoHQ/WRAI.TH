@@ -113,6 +113,11 @@ type OpsMetrics struct {
 	TasksOpen                int64 `json:"tasks_open"`
 	AuditLogRows             int64 `json:"audit_log_rows"`
 	MemoriesRows             int64 `json:"memories_rows"`
+	// EventsDeadLettered counts notification/dispatch events the durable outbox
+	// gave up on after the retry cap (failEvent → MarkEventDead stamps a "DLQ:"
+	// last_error). A non-zero / growing value = deliveries are being dropped —
+	// the CTO-visible "no silent drops" gauge (TSU-147).
+	EventsDeadLettered int64 `json:"events_dead_lettered"`
 }
 
 // MetricsSnapshot returns a one-shot OpsMetrics. Best-effort: a failing count
@@ -138,5 +143,6 @@ func (d *DB) MetricsSnapshot() OpsMetrics {
 	scan(&m.TasksOpen, `SELECT COUNT(*) FROM tasks WHERE status NOT IN ('done', 'cancelled')`)
 	scan(&m.AuditLogRows, `SELECT COUNT(*) FROM audit_log`)
 	scan(&m.MemoriesRows, `SELECT COUNT(*) FROM memories`)
+	scan(&m.EventsDeadLettered, `SELECT COUNT(*) FROM events WHERE last_error LIKE 'DLQ:%'`)
 	return m
 }
