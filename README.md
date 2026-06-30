@@ -8,7 +8,7 @@ Stop babysitting one chat. Run a *fleet* -- agents that remember across sessions
 
 <br>
 
-[![Release](https://img.shields.io/badge/v1.0.0-Stable-2ecc71?style=for-the-badge)](https://github.com/TsukumoHQ/WRAI.TH/releases/tag/v1.0.0)
+[![Release](https://img.shields.io/badge/v1.6.0-Stable-2ecc71?style=for-the-badge)](https://github.com/TsukumoHQ/WRAI.TH/releases/latest)
 [![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://go.dev)
 [![MCP](https://img.shields.io/badge/MCP-Protocol-8A2BE2?style=for-the-badge)](https://modelcontextprotocol.io)
 [![SQLite](https://img.shields.io/badge/SQLite-FTS5-003B57?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.sqlite.org)
@@ -23,7 +23,7 @@ Stop babysitting one chat. Run a *fleet* -- agents that remember across sessions
 
 *One binary. One SQLite file. 58 MCP tools. Zero required config.*
 
-**v1.0 -- stable.** Battle-tested on real multi-agent projects, API stable. Breaking changes are documented in [CHANGELOG.md](CHANGELOG.md).
+**v1.6 -- stable.** Battle-tested on real multi-agent projects, API stable. Breaking changes are documented in [CHANGELOG.md](CHANGELOG.md).
 
 **100% local by default. Optional API key for team/server deployments. No cloud, no telemetry.**
 
@@ -44,6 +44,7 @@ AI agents have no persistent memory, no way to talk to each other, and no shared
 - **Shared knowledge** -- scoped, conflict-aware memory (agent / project / global) with FTS5 search, plus `query_context` RAG that fuses memories and past task results.
 - **Profile archetypes** -- reusable role definitions (skills, working style, context keys) so agents boot with the right role.
 - **Server-side notifications** -- rules fire on relay events (task blocked, P0 message, ...) and fan out to delivery channels, with a test-fire endpoint.
+- **Claude-native** -- ships a public Claude Code skill (`agent-relay`) the installer lands at `~/.claude/skills/`, so a fresh session knows how to install, configure, and drive the relay without you pasting docs. Updates apply via a restart-safe self-update (`agent-relay update`) that never kills a live MCP pipe.
 
 All through MCP -- any AI client can plug in (Claude Code, Cursor, Windsurf, or anything that speaks the protocol). Same binary for solo devs and teams -- enable an API key and it becomes a shared server.
 
@@ -60,7 +61,7 @@ Set up wrai.th (https://github.com/TsukumoHQ/WRAI.TH) in this repo, end to end:
 
 1. Install it — run:
    curl -fsSL https://raw.githubusercontent.com/TsukumoHQ/WRAI.TH/main/install.sh | bash
-   (builds the binary, starts the relay on localhost:8090, installs the /relay skill)
+   (builds/downloads the binary, starts the relay on localhost:8090, installs the activity hooks + the /relay command + the agent-relay skill)
 2. Register the MCP server for this project — run `agent-relay init` in the repo root,
    then tell me to run /mcp so the agent-relay tools load.
 3. Once the agent-relay MCP tools are available, call:
@@ -82,7 +83,7 @@ A couple of minutes later: relay running, your codebase analyzed, and a crew of 
 curl -fsSL https://raw.githubusercontent.com/TsukumoHQ/WRAI.TH/main/install.sh | bash
 ```
 
-The installer checks dependencies, builds from source (Go + GCC) or falls back to prebuilt, sets up auto-start, installs the `/relay` skill, and configures your projects. Existing `.mcp.json` files are merged (never overwritten) with a `.bak` backup.
+The installer checks dependencies, builds from source (Go + GCC) or falls back to a checksum-verified prebuilt, sets up auto-start, installs the activity hooks, installs both the `/relay` command **and** the public `agent-relay` skill (so a fresh Claude Code session knows how to drive the relay out of the box), and configures your projects. Existing `.mcp.json` files are merged (never overwritten) with a `.bak` backup; re-running is idempotent.
 
 <details>
 <summary><b>Build from source</b></summary>
@@ -285,10 +286,10 @@ The salt must be unique (3+ random words) and must appear in your conversation t
 Agents are not sessions -- they're persistent entities in the DB. An agent named `backend` exists across restarts:
 
 ```
-register_agent({ name: "backend", role: "FastAPI developer", reports_to: "tech-lead" })
+register_agent({ name: "backend", role: "FastAPI developer", reports_to: "tech-lead", cwd: "$PWD" })
 ```
 
-First call creates the agent. Second call from a new session? **Respawn** -- same identity, same inbox, same memories, same task queue. The response includes `is_respawn: true` and the full `session_context` so the agent picks up mid-conversation without missing a beat.
+Pass `cwd` (the agent's worktree) -- identity binds on it, so it survives `/clear`, and the Stop hook's real per-turn token usage attributes to the right agent. First call creates the agent. Second call from a new session? **Respawn** -- same identity, same inbox, same memories, same task queue. The response includes `is_respawn: true` and the full `session_context` so the agent picks up mid-conversation without missing a beat.
 
 Executive agents (`is_executive: true`) are automatically added to a `leadership` admin team with broadcast permissions -- no manual team setup needed.
 
