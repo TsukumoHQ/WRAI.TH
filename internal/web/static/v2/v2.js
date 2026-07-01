@@ -14,6 +14,7 @@ import { initTeam } from './team.js';
 import { initMessages } from './messages.js';
 import { initMemory } from './memory.js';
 import { initLinearStrip } from './linear.js';
+import { initFederation } from './federation.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => (
@@ -118,6 +119,7 @@ const PAGES = {
   overview: { init: () => overviewPage(ctx), instance: null },
   board: { init: (el) => initBoard(el, ctx), instance: null },
   messages: { init: (el) => initMessages(el, ctx), instance: null },
+  federation: { init: (el) => initFederation(el, ctx), instance: null },
   memory: { init: (el) => initMemory(el, ctx), instance: null },
   stats: { init: (el) => initStats(el, ctx), instance: null },
   notifications: { init: (el) => initNotifications(el, ctx), instance: null },
@@ -129,6 +131,7 @@ let linearStrip = null;
 function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
   if (h === 'messages') return { view: 'global', project: null, page: 'messages' };
+  if (h === 'federation') return { view: 'global', project: null, page: 'federation' };
   if (h.startsWith('p/')) {
     const rest = h.slice(2);
     const i = rest.indexOf('/');

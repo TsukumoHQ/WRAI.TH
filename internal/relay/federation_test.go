@@ -210,12 +210,9 @@ func TestFederationRoundTrip(t *testing.T) {
 	// Point B's peer "relaya" at A's server so the reverse hop resolves.
 	aServer := httptest.NewServer(http.HandlerFunc(relayA.ServeAPI))
 	defer aServer.Close()
-	relayB.Federation.peersByLabel["relaya"] = config.FederationPeer{Label: "relaya", URL: aServer.URL, Token: "pair-tok", Project: "default"}
-	for i := range relayB.Federation.peers {
-		if relayB.Federation.peers[i].Label == "relaya" {
-			relayB.Federation.peers[i].URL = aServer.URL
-		}
-	}
+	relayB.Federation.Reload([]config.FederationPeer{
+		{Label: "relaya", URL: aServer.URL, Token: "pair-tok", Project: "default"},
+	})
 
 	res, err = relayB.Handlers.HandleSendMessage(context.Background(), call(map[string]any{
 		"project": "default",

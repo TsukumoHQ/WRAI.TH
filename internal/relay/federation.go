@@ -6,14 +6,22 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-relay/internal/config"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// setFederationPeers is the settings-table key holding the runtime (UI-driven)
+// peer list as a JSON array of {label,url,token,project}. When the env var
+// RELAY_FEDERATION_PEERS is set it wins (env = ops override); otherwise this
+// settings value drives the connector and is hot-reloaded on change.
+const setFederationPeers = "federation_peers"
 
 // Federation forwards direct messages between two independent relay instances.
 //
@@ -30,6 +38,7 @@ import (
 // Federation is off unless at least one valid peer is configured; when off the
 // send path and inbound route behave as if the feature did not exist.
 type Federation struct {
+	mu           sync.RWMutex // guards peersByLabel/peers (swapped by Reload)
 	peersByLabel map[string]config.FederationPeer
 	peers        []config.FederationPeer // preserves order for token matching
 	client       *http.Client
@@ -55,26 +64,57 @@ type fedMessage struct {
 // empty peer list yields a disabled Federation (Enabled() == false).
 func NewFederation(peers []config.FederationPeer) *Federation {
 	f := &Federation{
-		peersByLabel: make(map[string]config.FederationPeer, len(peers)),
+		peersByLabel: map[string]config.FederationPeer{},
 		client:       &http.Client{Timeout: 5 * time.Second},
 	}
+	f.Reload(peers)
+	return f
+}
+
+// Reload atomically swaps the peer set (called at boot and on every
+// federation_* settings change). Invalid entries (missing label/url/token) and
+// duplicate labels are dropped; first definition of a label wins.
+func (f *Federation) Reload(peers []config.FederationPeer) {
+	byLabel := make(map[string]config.FederationPeer, len(peers))
+	var ordered []config.FederationPeer
 	for _, p := range peers {
 		label := strings.ToLower(strings.TrimSpace(p.Label))
-		if label == "" || p.URL == "" || p.Token == "" {
+		if label == "" || strings.TrimSpace(p.URL) == "" || strings.TrimSpace(p.Token) == "" {
 			continue
 		}
-		if _, dup := f.peersByLabel[label]; dup {
-			continue // first definition wins; ignore duplicate labels
+		if _, dup := byLabel[label]; dup {
+			continue
 		}
-		f.peersByLabel[label] = p
-		f.peers = append(f.peers, p)
+		p.Label = label
+		byLabel[label] = p
+		ordered = append(ordered, p)
 	}
-	return f
+	f.mu.Lock()
+	f.peersByLabel = byLabel
+	f.peers = ordered
+	f.mu.Unlock()
 }
 
 // Enabled reports whether any peer is configured.
 func (f *Federation) Enabled() bool {
-	return f != nil && len(f.peersByLabel) > 0
+	if f == nil {
+		return false
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return len(f.peersByLabel) > 0
+}
+
+// Peers returns a snapshot of the configured peers (for the settings API).
+func (f *Federation) Peers() []config.FederationPeer {
+	if f == nil {
+		return nil
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	out := make([]config.FederationPeer, len(f.peers))
+	copy(out, f.peers)
+	return out
 }
 
 // PeerByLabel resolves an outbound peer by its local alias.
@@ -82,6 +122,8 @@ func (f *Federation) PeerByLabel(label string) (config.FederationPeer, bool) {
 	if f == nil {
 		return config.FederationPeer{}, false
 	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	p, ok := f.peersByLabel[strings.ToLower(strings.TrimSpace(label))]
 	return p, ok
 }
@@ -93,6 +135,8 @@ func (f *Federation) PeerByToken(token string) (config.FederationPeer, bool) {
 	if f == nil || token == "" {
 		return config.FederationPeer{}, false
 	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	tok := []byte(token)
 	var match config.FederationPeer
 	found := false
@@ -130,6 +174,102 @@ func (f *Federation) Forward(ctx context.Context, peer config.FederationPeer, ms
 		return fmt.Errorf("peer %q returned %d", peer.Label, resp.StatusCode)
 	}
 	return nil
+}
+
+// effectiveFederationPeers resolves the peer list: the env var
+// RELAY_FEDERATION_PEERS wins (ops override), else the settings-table JSON
+// (UI-driven). Malformed settings JSON yields no peers (federation stays off)
+// rather than an error — a bad value must not break the running relay.
+func (r *Relay) effectiveFederationPeers() (peers []config.FederationPeer, source string) {
+	if len(r.Config.FederationPeers) > 0 {
+		return r.Config.FederationPeers, "env"
+	}
+	raw := strings.TrimSpace(r.DB.GetSetting(setFederationPeers))
+	if raw == "" {
+		return nil, "settings"
+	}
+	var parsed []config.FederationPeer
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil, "settings"
+	}
+	return parsed, "settings"
+}
+
+// ReconfigureFederation (re)loads the peer registry from the effective config.
+// Called at boot and on every federation_* settings change — the shared
+// Federation is reloaded atomically, no restart needed.
+func (r *Relay) ReconfigureFederation() {
+	if r.Federation == nil {
+		return
+	}
+	peers, source := r.effectiveFederationPeers()
+	r.Federation.Reload(peers)
+	log.Printf("[federation] reloaded %d peer(s) (source=%s)", len(r.Federation.Peers()), source)
+}
+
+// mergeFederationPeersJSON preserves stored tokens across a settings write from
+// the UI, which only ever sees masked tokens. Any incoming peer whose token is
+// empty inherits the currently-stored token for the same label; that lets the
+// dashboard save label/url/project edits without the operator re-typing secrets.
+// On any parse error the input is returned unchanged (Reload re-validates).
+func (r *Relay) mergeFederationPeersJSON(incoming string) string {
+	var next []config.FederationPeer
+	if err := json.Unmarshal([]byte(incoming), &next); err != nil {
+		return incoming
+	}
+	existing := map[string]string{} // label -> token
+	if raw := strings.TrimSpace(r.DB.GetSetting(setFederationPeers)); raw != "" {
+		var prev []config.FederationPeer
+		if json.Unmarshal([]byte(raw), &prev) == nil {
+			for _, p := range prev {
+				existing[strings.ToLower(strings.TrimSpace(p.Label))] = p.Token
+			}
+		}
+	}
+	for i := range next {
+		if strings.TrimSpace(next[i].Token) == "" {
+			next[i].Token = existing[strings.ToLower(strings.TrimSpace(next[i].Label))]
+		}
+	}
+	out, err := json.Marshal(next)
+	if err != nil {
+		return incoming
+	}
+	return string(out)
+}
+
+// maskToken redacts a peer token for display, keeping only a short suffix so an
+// operator can tell two peers apart without exposing the secret.
+func maskToken(tok string) string {
+	if n := len(tok); n <= 4 {
+		return "…"
+	}
+	return "…" + tok[len(tok)-4:]
+}
+
+// federationStatus is the settings-API view of federation: enabled flag, config
+// source, and the peer list with tokens masked.
+func (r *Relay) federationStatus() map[string]any {
+	_, source := r.effectiveFederationPeers()
+	peers := r.Federation.Peers()
+	view := make([]map[string]any, 0, len(peers))
+	for _, p := range peers {
+		project := p.Project
+		if project == "" {
+			project = "default"
+		}
+		view = append(view, map[string]any{
+			"label":        p.Label,
+			"url":          p.URL,
+			"project":      project,
+			"token_masked": maskToken(p.Token),
+		})
+	}
+	return map[string]any{
+		"enabled": r.Federation.Enabled(),
+		"source":  source, // "env" (read-only, RELAY_FEDERATION_PEERS) or "settings"
+		"peers":   view,
+	}
 }
 
 // splitPeerAddr splits "name@peerlabel" into (name, label, true). It returns

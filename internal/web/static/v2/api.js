@@ -28,6 +28,7 @@ export const api = {
   health: () => getJSON('/api/health'),
   projects: () => getJSON('/api/projects'),
   settings: () => getJSON('/api/settings'),
+  saveSettings: (body) => sendJSON('PUT', '/api/settings', body),
   board: (project, cycle = 'active') =>
     getJSON(`/api/tasks/board?${q({ project, cycle })}`),
   cycles: (project) => getJSON(`/api/cycles?${q({ project })}`),

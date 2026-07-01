@@ -365,6 +365,7 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 			"interval":       interval.String(),
 			"source":         source,
 		},
+		"federation": r.federationStatus(),
 	})
 }
 
@@ -372,13 +373,14 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 // it, an (unauthenticated by default) caller could set arbitrary key→value pairs
 // — including swapping linear_api_key or repointing the connector.
 var writableSettings = map[string]bool{
-	"sun_type":        true,
-	setLinearEnabled:  true,
-	setLinearAPIKey:   true,
-	setLinearTeamKey:  true,
-	setLinearProject:  true,
-	setLinearInterval: true,
-	setLinearRouting:  true,
+	"sun_type":         true,
+	setLinearEnabled:   true,
+	setLinearAPIKey:    true,
+	setLinearTeamKey:   true,
+	setLinearProject:   true,
+	setLinearInterval:  true,
+	setLinearRouting:   true,
+	setFederationPeers: true,
 }
 
 func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
@@ -395,15 +397,27 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 	linearChanged := false
+	federationChanged := false
 	for k, v := range body {
+		if k == setFederationPeers {
+			// Preserve stored tokens for peers the UI submitted with an empty
+			// token (it only ever holds masked values).
+			v = r.mergeFederationPeersJSON(v)
+		}
 		r.DB.SetSetting(k, v)
 		if strings.HasPrefix(k, "linear_") {
 			linearChanged = true
+		}
+		if strings.HasPrefix(k, "federation_") {
+			federationChanged = true
 		}
 	}
 	if linearChanged {
 		// Hot-reload the connector — no restart needed.
 		r.ReconfigureLinear()
+	}
+	if federationChanged {
+		r.ReconfigureFederation()
 	}
 	writeJSON(w, map[string]string{"ok": "true"})
 }

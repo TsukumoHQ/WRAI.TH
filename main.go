@@ -198,6 +198,10 @@ func startServer() {
 	// Inert when unconfigured; hot-reloaded on settings changes without restart.
 	r.ReconfigureLinear()
 
+	// Load federation peers from effective config (env RELAY_FEDERATION_PEERS wins,
+	// else the settings table). Inert when no peers; hot-reloaded via /api/settings.
+	r.ReconfigureFederation()
+
 	// Log ingested events (phase 1: log only, phase 2: TouchAgent + WS broadcast)
 	go func() {
 		for evt := range ingester.Events {
