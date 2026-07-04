@@ -15,7 +15,7 @@ jobs:
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
-          if printf '%s' "$BODY" | grep -qiE 'review-(trovex|wraith|dokan|yoru|tsukumo|donna)'; then
+          if printf '%s' "$BODY" | grep -qiE 'review-(trovex|wraith|dokan|yoru|tsukumo|donna)|anti-ai-slop'; then
             echo "self-review verdict block found"
           else
             echo "::error::PR body is missing the review-<lane> self-review verdict block."
