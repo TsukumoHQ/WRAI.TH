@@ -1,0 +1,24 @@
+name: skill-gate
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+permissions:
+  contents: read
+jobs:
+  verdict:
+    name: review-skill verdict present
+    runs-on: ubuntu-latest
+    # internal branches only — external fork PRs are CTO-reviewed by hand
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Require review-<lane> verdict block in PR body
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$BODY" | grep -qiE 'review-(trovex|wraith|dokan|yoru|tsukumo|donna)'; then
+            echo "self-review verdict block found"
+          else
+            echo "::error::PR body is missing the review-<lane> self-review verdict block."
+            echo "Run your lane's domain review skill (persona -> pr-review-self -> review-<lane>) on your diff and paste its verdict into the PR body, then re-trigger (edit the body)."
+            exit 1
+          fi
