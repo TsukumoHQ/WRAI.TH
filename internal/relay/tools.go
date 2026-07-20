@@ -418,6 +418,9 @@ func reviewTaskTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("comment", mcp.Description("Optional note (PR link / result) posted to Linear on the In Review transition")),
+		mcp.WithString("git_branch", mcp.Description("Branch the work sits on (review-gate git zone; stored opaquely)")),
+		mcp.WithString("git_worktree", mcp.Description("Absolute path of the worktree holding the work")),
+		mcp.WithString("git_target", mcp.Description("Branch the work should merge into")),
 	)
 }
 

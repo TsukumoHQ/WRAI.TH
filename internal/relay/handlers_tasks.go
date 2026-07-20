@@ -219,12 +219,36 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 		return mcp.NewToolResultError(err.Error()), nil
 	}
 
+	// Git zone: where the work lives, for the external review gate. Written
+	// BEFORE the transition so the re-read task (and its in_review event)
+	// carries the fields.
+	gitBranch := optionalString(req.GetString("git_branch", ""))
+	gitWorktree := optionalString(req.GetString("git_worktree", ""))
+	gitTarget := optionalString(req.GetString("git_target", ""))
+	if gitBranch != nil || gitWorktree != nil || gitTarget != nil {
+		if err := h.db.SetTaskGit(taskID, project, gitBranch, gitWorktree, gitTarget); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to record git fields: %v", err)), nil
+		}
+	}
+
 	task, err := h.db.ReviewTask(taskID, agent, project)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to mark task in-review: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "review", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
-	emitTaskEvent(h.events, "task.in_review", "review", project, task)
+	// The in_review event carries the git zone + the submitting agent, so a
+	// gate subscribed to the stream can act without a follow-up GET.
+	gitPayload := map[string]any{"doer": agent}
+	if task.GitBranch != nil {
+		gitPayload["git_branch"] = *task.GitBranch
+	}
+	if task.GitWorktree != nil {
+		gitPayload["git_worktree"] = *task.GitWorktree
+	}
+	if task.GitTarget != nil {
+		gitPayload["git_target"] = *task.GitTarget
+	}
+	emitTaskEvent(h.events, "task.in_review", "review", project, task, gitPayload)
 
 	// Notify dispatcher — work is up for review.
 	h.registry.Notify(project, task.DispatchedBy, agent, fmt.Sprintf("In review: %s", task.Title), task.ID)

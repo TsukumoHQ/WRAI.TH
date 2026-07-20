@@ -455,6 +455,12 @@ func migrate(conn *sql.DB) error {
 		// progress note) so the stale-scanner measures idle-since-activity, not
 		// idle-since-dispatch — a heads-down lead on a multi-hour build isn't stale.
 		"last_activity_at": "TEXT",
+
+		// --- Git zone (review gate) — branch/worktree/target of the work,
+		// set at review_task time so an external supervisor can merge it.
+		"git_branch":   "TEXT",
+		"git_worktree": "TEXT",
+		"git_target":   "TEXT",
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
