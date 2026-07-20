@@ -134,6 +134,10 @@ func emitTaskEvent(events *EventBus, name, action, project string, t *models.Tas
 		"agent":   agentForEvent(t),
 		"task_id": t.ID,
 		"title":   t.Title,
+		// The profile archetype the task targets — an external pool manager
+		// (niwa spawn-on-dispatch) needs it to decide whether a worker of
+		// that profile must be born, without a follow-up GET.
+		"profile_slug": t.ProfileSlug,
 	}
 	if t.LinearKey != nil && *t.LinearKey != "" {
 		semantic["linear_key"] = *t.LinearKey
