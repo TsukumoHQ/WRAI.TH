@@ -63,7 +63,8 @@ var validTransitions = map[string][]string{
 
 const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, description, priority, status, result, blocked_reason, project, dispatched_at, accepted_at, started_at, completed_at, parent_task_id, ack_notified_at, ack_escalated_at, board_id, archived_at, " +
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
-	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at"
+	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
+	"git_branch, git_worktree, git_target"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -73,7 +74,8 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.AckNotifiedAt, &t.AckEscalatedAt, &t.BoardID, &t.ArchivedAt,
 		&t.Source, &t.LinearIssueID, &t.LinearKey, &t.ExternalURL, &t.Points, &t.Labels,
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
-		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt)
+		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
+		&t.GitBranch, &t.GitWorktree, &t.GitTarget)
 	return t, err
 }
 
@@ -115,6 +117,22 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 // ReviewTask transitions a task to in-review (the agent's "PR up" signal).
 func (d *DB) ReviewTask(taskID, agentName, project string) (*models.Task, error) {
 	return d.transitionTask(taskID, agentName, project, "in-review", nil, nil)
+}
+
+// SetTaskGit records where the task's work physically lives (branch /
+// worktree / target). Nil values leave the existing column untouched, so a
+// resubmission that only names the branch doesn't wipe the worktree recorded
+// earlier. The relay stores these opaquely — the review gate consumes them.
+func (d *DB) SetTaskGit(taskID, project string, branch, worktree, target *string) error {
+	_, err := d.conn.Exec(
+		`UPDATE tasks SET
+			git_branch = COALESCE(?, git_branch),
+			git_worktree = COALESCE(?, git_worktree),
+			git_target = COALESCE(?, git_target)
+		 WHERE id = ? AND project = ?`,
+		branch, worktree, target, taskID, project,
+	)
+	return err
 }
 
 func (d *DB) ResetTask(taskID, agentName, project string) (*models.Task, error) {

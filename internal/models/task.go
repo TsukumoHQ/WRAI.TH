@@ -49,6 +49,13 @@ type Task struct {
 	// measures idle from here, not from dispatch.
 	LastActivityAt *string `json:"last_activity_at,omitempty"`
 
+	// --- Git zone (review gate) — where the work physically lives, so an
+	// external supervisor (e.g. niwa's Q&A gate) can review and merge it.
+	// Set by the doer at review_task time; never interpreted by the relay.
+	GitBranch   *string `json:"git_branch,omitempty"`
+	GitWorktree *string `json:"git_worktree,omitempty"`
+	GitTarget   *string `json:"git_target,omitempty"`
+
 	Subtasks []Task `json:"subtasks,omitempty"`
 }
 
