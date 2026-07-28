@@ -545,6 +545,15 @@ EOF
 }
 
 install_systemd_service() {
+  # Containers / minimal hosts have no systemd: an unguarded systemctl under
+  # `set -e` killed the whole install AFTER the binary landed (and its
+  # half-start left users chasing a phantom relay). Auto-start is a nicety —
+  # skip it, never die on it.
+  if ! command -v systemctl &>/dev/null; then
+    warn "systemd not available — skipping auto-start service (run '${BINARY_NAME} serve' yourself, e.g. under nohup/supervisor)"
+    return 0
+  fi
+
   local unit_dir="$HOME/.config/systemd/user"
   local unit_path="${unit_dir}/${BINARY_NAME}.service"
   local bin_path="${BIN_DIR}/${BINARY_NAME}"
@@ -567,7 +576,12 @@ Environment=PORT=${PORT}
 WantedBy=default.target
 EOF
 
-  systemctl --user daemon-reload
+  # A user bus may be missing even where systemctl exists (ssh session
+  # without lingering, chroot) — degrade to a warning, never die (set -e).
+  if ! systemctl --user daemon-reload 2>/dev/null; then
+    warn "systemd user bus unavailable — skipping auto-start service (run '${BINARY_NAME} serve' yourself)"
+    return 0
+  fi
   systemctl --user enable "$BINARY_NAME" 2>/dev/null || true
   systemctl --user restart "$BINARY_NAME" 2>/dev/null || true
 
