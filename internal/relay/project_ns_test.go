@@ -131,3 +131,30 @@ func TestSendMessageNormalizesSpelling(t *testing.T) {
 		t.Errorf("expected 1 message in canonical project, got %d", len(msgs))
 	}
 }
+
+// TestLastTaskActivity: newest task timestamp wins; empty project reads "".
+func TestLastTaskActivity(t *testing.T) {
+	h := testHandlers(t)
+	if last, err := h.db.LastTaskActivity("ghost-town"); err != nil || last != "" {
+		t.Errorf("no tasks: want empty, got %q (err %v)", last, err)
+	}
+	if _, err := h.HandleRegisterAgent(context.Background(), call(map[string]any{
+		"project": "busy-town", "name": "cto",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.HandleDispatchTask(context.Background(), call(map[string]any{
+		"project": "busy-town", "as": "cto", "title": "t1", "description": "d",
+		"profile": "dev",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Fatalf("dispatch failed: %v", res.Content)
+	}
+	last, err := h.db.LastTaskActivity("busy-town")
+	if err != nil || last == "" {
+		t.Errorf("expected activity timestamp, got %q (err %v)", last, err)
+	}
+}
