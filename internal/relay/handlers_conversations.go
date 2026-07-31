@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handlers) HandleCreateConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	title := req.GetString("title", "")
 	if title == "" {
@@ -50,7 +50,7 @@ func (h *Handlers) HandleCreateConversation(ctx context.Context, req mcp.CallToo
 }
 
 func (h *Handlers) HandleListConversations(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 
 	convs, err := h.db.ListConversations(project, agent)
@@ -128,7 +128,7 @@ func (h *Handlers) HandleGetConversationMessages(ctx context.Context, req mcp.Ca
 		formatted[i] = entry
 	}
 
-	return h.resultJSONTracked(resolveProject(ctx, req), agent, "get_conversation_messages", map[string]any{
+	return h.resultJSONTracked(h.resolveProject(ctx, req), agent, "get_conversation_messages", map[string]any{
 		"conversation_id": convID,
 		"count":           len(formatted),
 		"format":          format,
@@ -137,7 +137,7 @@ func (h *Handlers) HandleGetConversationMessages(ctx context.Context, req mcp.Ca
 }
 
 func (h *Handlers) HandleInviteToConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	convID := req.GetString("conversation_id", "")
 	if convID == "" {
@@ -171,7 +171,7 @@ func (h *Handlers) HandleInviteToConversation(ctx context.Context, req mcp.CallT
 }
 
 func (h *Handlers) HandleLeaveConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	convID := req.GetString("conversation_id", "")
 	if convID == "" {
@@ -205,7 +205,7 @@ func (h *Handlers) HandleLeaveConversation(ctx context.Context, req mcp.CallTool
 }
 
 func (h *Handlers) HandleArchiveConversation(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	convID := req.GetString("conversation_id", "")
 	if convID == "" {
 		return mcp.NewToolResultError("conversation_id is required"), nil

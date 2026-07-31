@@ -1285,9 +1285,10 @@ func TestTaskSubtaskCompletion(t *testing.T) {
 // --- Validation Tests (cross-cutting) ---
 
 func TestResolveProjectDefault(t *testing.T) {
+	h := testHandlers(t)
 	ctx := context.Background()
 	req := call(map[string]any{})
-	if p := resolveProject(ctx, req); p != "default" {
+	if p := h.resolveProject(ctx, req); p != "default" {
 		t.Errorf("expected 'default', got %s", p)
 	}
 }

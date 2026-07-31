@@ -9,7 +9,7 @@ import (
 )
 
 func (h *Handlers) HandleCreateBoard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	name := req.GetString("name", "")
 	slug := req.GetString("slug", "")
@@ -26,7 +26,7 @@ func (h *Handlers) HandleCreateBoard(ctx context.Context, req mcp.CallToolReques
 }
 
 func (h *Handlers) HandleListBoards(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	boards, err := h.db.ListBoards(project)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to list boards: %v", err)), nil
@@ -38,7 +38,7 @@ func (h *Handlers) HandleListBoards(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleArchiveBoard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	boardID := req.GetString("board_id", "")
 	if boardID == "" {
 		return mcp.NewToolResultError("board_id is required"), nil
@@ -51,7 +51,7 @@ func (h *Handlers) HandleArchiveBoard(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleDeleteBoard(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	boardID := req.GetString("board_id", "")
 	if boardID == "" {
 		return mcp.NewToolResultError("board_id is required"), nil

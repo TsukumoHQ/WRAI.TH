@@ -11,7 +11,7 @@ import (
 )
 
 func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	profile := req.GetString("profile", "")
 	requiredSkill := req.GetString("required_skill", "")
@@ -129,7 +129,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -151,7 +151,7 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 }
 
 func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -177,7 +177,7 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 // already) — kept as a distinct MCP tool so agents discovering tools don't have
 // to guess that start_task resumes too.
 func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -208,7 +208,7 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -265,7 +265,7 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 // the Linear issue (Linear is SSOT); otherwise it is saved as a local progress
 // note so the action still lands somewhere.
 func (h *Handlers) HandleComment(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	body := strings.TrimSpace(req.GetString("body", ""))
@@ -295,7 +295,7 @@ func (h *Handlers) HandleComment(ctx context.Context, req mcp.CallToolRequest) (
 }
 
 func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -347,7 +347,7 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -392,7 +392,7 @@ func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest)
 }
 
 func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -444,7 +444,7 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -477,7 +477,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleArchiveTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	status := req.GetString("status", "")
 	boardID := req.GetString("board_id", "")
 
@@ -497,7 +497,7 @@ func (h *Handlers) HandleArchiveTasks(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleMoveTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
@@ -535,7 +535,7 @@ func (h *Handlers) HandleMoveTask(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	tasksJSON := req.GetString("tasks", "")
 
@@ -591,7 +591,7 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 }
 
 func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	tasksJSON := req.GetString("tasks", "[]")
 
@@ -638,7 +638,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 }
 
 func (h *Handlers) HandleGetTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
 		return mcp.NewToolResultError("task_id is required"), nil
@@ -667,7 +667,7 @@ func (h *Handlers) HandleGetTask(ctx context.Context, req mcp.CallToolRequest) (
 }
 
 func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	status := req.GetString("status", "")
 	profile := req.GetString("profile", "")
 	priority := req.GetString("priority", "")

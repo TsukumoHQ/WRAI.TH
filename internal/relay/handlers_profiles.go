@@ -9,7 +9,7 @@ import (
 )
 
 func (h *Handlers) HandleRegisterProfile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	slug := req.GetString("slug", "")
 	if slug == "" {
 		return mcp.NewToolResultError("slug is required"), nil
@@ -29,7 +29,7 @@ func (h *Handlers) HandleRegisterProfile(ctx context.Context, req mcp.CallToolRe
 }
 
 func (h *Handlers) HandleGetProfile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	slug := req.GetString("slug", "")
 	if slug == "" {
 		return mcp.NewToolResultError("slug is required"), nil
@@ -46,7 +46,7 @@ func (h *Handlers) HandleGetProfile(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleListProfiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 
 	profiles, err := h.db.ListProfiles(project)
 	if err != nil {
@@ -63,7 +63,7 @@ func (h *Handlers) HandleListProfiles(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleFindProfiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	tag := req.GetString("skill_tag", "")
 	skillName := req.GetString("skill_name", "")
 

@@ -319,15 +319,6 @@ func (h *Handlers) notifyConversation(project, conversationID, senderName, subje
 	}
 }
 
-// resolveProject returns the project from the explicit `project` tool parameter,
-// falling back to the HTTP context default (from ?project= URL param).
-func resolveProject(ctx context.Context, req mcp.CallToolRequest) string {
-	if p := req.GetString("project", ""); p != "" {
-		return p
-	}
-	return ProjectFromContext(ctx)
-}
-
 // resolveAgent returns the agent name from the explicit `as` tool parameter,
 // falling back to the HTTP context default (from ?agent= URL param).
 // Names are lowercased for case-insensitive matching.

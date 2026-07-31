@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handlers) HandleClaimFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	filePaths := req.GetString("file_paths", "[]")
 	ttlSeconds := req.GetInt("ttl_seconds", 1800)
@@ -40,7 +40,7 @@ func (h *Handlers) HandleClaimFiles(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleReleaseFiles(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	filePaths := req.GetString("file_paths", "[]")
 
@@ -57,7 +57,7 @@ func (h *Handlers) HandleReleaseFiles(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleListLocks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 
 	locks, err := h.db.ListFileLocks(project)
 	if err != nil {

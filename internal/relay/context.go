@@ -31,7 +31,7 @@ func HTTPContextFunc(ctx context.Context, r *http.Request) context.Context {
 	if agent == "" {
 		agent = "anonymous"
 	}
-	project := r.URL.Query().Get("project")
+	project := NormalizeProject(r.URL.Query().Get("project"))
 	if project == "" {
 		project = "default"
 	}

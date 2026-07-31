@@ -10,7 +10,7 @@ import (
 )
 
 func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
@@ -47,7 +47,7 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 }
 
 func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
@@ -80,7 +80,7 @@ func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest)
 // memories (layer="decision"); the accepted set is surfaced at session start so
 // agents stop re-litigating settled calls.
 func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	decision := req.GetString("decision", "")
 	if decision == "" {
@@ -101,7 +101,7 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 
 // HandleRecallDecisions returns the project's accepted (non-superseded) decisions.
 func (h *Handlers) HandleRecallDecisions(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	decs, err := h.db.ListDecisions(project)
 	if err != nil {
@@ -111,7 +111,7 @@ func (h *Handlers) HandleRecallDecisions(ctx context.Context, req mcp.CallToolRe
 }
 
 func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	query := req.GetString("query", "")
 	if query == "" {
@@ -158,7 +158,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	scope := req.GetString("scope", "")
 	agentFilter := req.GetString("agent", "")
 	tags := req.GetStringSlice("tags", nil)
@@ -217,7 +217,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleDeleteMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
@@ -237,7 +237,7 @@ func (h *Handlers) HandleDeleteMemory(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleResolveConflict(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {

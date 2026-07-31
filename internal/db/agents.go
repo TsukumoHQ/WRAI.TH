@@ -362,3 +362,42 @@ func (d *DB) SetAgentAvatar(project, name, url string) error {
 	_, err := d.conn.Exec("UPDATE agents SET avatar_url = ? WHERE project = ? AND name = ?", v, project, name)
 	return err
 }
+
+// ProjectsOfAgent returns the distinct projects holding a non-deactivated
+// registration of `name`. Used to bind project-less tool calls to the
+// caller's own namespace instead of the "default" catch-all.
+func (d *DB) ProjectsOfAgent(name string) ([]string, error) {
+	rows, err := d.ro().Query(
+		"SELECT DISTINCT project FROM agents WHERE name = ? AND status IN ('active', 'sleeping', 'inactive')", name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// ProjectNames returns every project name, for near-miss suggestions.
+func (d *DB) ProjectNames() ([]string, error) {
+	rows, err := d.ro().Query("SELECT name FROM projects ORDER BY name")
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}

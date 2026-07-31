@@ -219,9 +219,11 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-// projectFromRequest extracts the ?project= query parameter, defaulting to "default".
+// projectFromRequest extracts the ?project= query parameter, defaulting to
+// "default". Normalized like every other entry point — the REST API must
+// read the same namespace the MCP tools write.
 func projectFromRequest(req *http.Request) string {
-	p := req.URL.Query().Get("project")
+	p := NormalizeProject(req.URL.Query().Get("project"))
 	if p == "" {
 		return "default"
 	}
