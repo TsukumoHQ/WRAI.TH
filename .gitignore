@@ -37,3 +37,4 @@ test.txt
 # local model cache + agent working vault (never commit)
 .fastembed_cache/
 vault/
+.worktrees/
