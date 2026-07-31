@@ -179,7 +179,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	case conversationID != nil:
 		action = "conversation"
 	}
-	h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: subject})
+	h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: subject, Priority: priority})
 
 	return h.resultJSONTracked(project, from, "send_message", msg)
 }
