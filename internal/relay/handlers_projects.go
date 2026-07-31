@@ -22,7 +22,7 @@ func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequ
 	// Check if already configured
 	agents, _ := h.db.ListAgents(name)
 	if len(agents) > 0 {
-		return h.resultJSONTracked(resolveProject(ctx, req), name, "create_project", map[string]any{
+		return h.resultJSONTracked(h.resolveProject(ctx, req), name, "create_project", map[string]any{
 			"project": name,
 			"status":  "already_configured",
 			"agents":  len(agents),
@@ -55,7 +55,7 @@ func (h *Handlers) HandleDeleteProject(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultError(fmt.Sprintf("failed to delete project: %v", err)), nil
 	}
 
-	return h.resultJSONTracked(resolveProject(ctx, req), "", "delete_project", map[string]any{
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "delete_project", map[string]any{
 		"deleted": true,
 		"project": project,
 	})

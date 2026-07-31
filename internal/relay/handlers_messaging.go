@@ -12,7 +12,7 @@ import (
 )
 
 func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	from := resolveAgent(ctx, req)
 	to := strings.ToLower(req.GetString("to", ""))
 	msgType := req.GetString("type", "notification")
@@ -27,7 +27,21 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	conversationID := optionalString(req.GetString("conversation_id", ""))
 	priority := mapPriority(req.GetString("priority", "P2"))
 	ttlSeconds := req.GetInt("ttl_seconds", 14400)
-	targetProject := strings.TrimSpace(req.GetString("target_project", ""))
+	targetProject := NormalizeProject(req.GetString("target_project", ""))
+
+	// A message to a project nobody ever created is a black hole: the row
+	// is written (messages have no project FK), no inbox ever reads it, and
+	// the sender walks away believing it was delivered. Fail loud with the
+	// nearest real name instead. "default" stays grandfathered — it is the
+	// CLI's compiled fallback, not a caller mistake.
+	if project != "default" {
+		if known, err := h.db.GetProject(project); err == nil && known == nil {
+			if sugg := h.suggestProject(project); sugg != "" && sugg != project {
+				return mcp.NewToolResultError(fmt.Sprintf("unknown project %q — did you mean %q? (projects are created by register_agent or create_project)", project, sugg)), nil
+			}
+			return mcp.NewToolResultError(fmt.Sprintf("unknown project %q — register_agent or create_project first", project)), nil
+		}
+	}
 
 	// Quota check: messages
 	if qErr := h.db.CheckQuotaError(project, from, "messages"); qErr != "" {
@@ -171,7 +185,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 }
 
 func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	unreadOnly := req.GetBool("unread_only", true)
 	limit := clampLimit(req.GetInt("limit", 10))
@@ -319,7 +333,7 @@ func (h *Handlers) HandleAckDelivery(ctx context.Context, req mcp.CallToolReques
 		// caller also passed as+project so we can resolve message_id → delivery_id.
 		if msgID := req.GetString("message_id", ""); msgID != "" {
 			agent := resolveAgent(ctx, req)
-			project := resolveProject(ctx, req)
+			project := h.resolveProject(ctx, req)
 			if err := h.db.AcknowledgeDeliveryByMessage(msgID, agent, project); err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("failed to acknowledge delivery by message: %v", err)), nil
 			}
@@ -330,7 +344,7 @@ func (h *Handlers) HandleAckDelivery(ctx context.Context, req mcp.CallToolReques
 	if err := h.db.AcknowledgeDelivery(deliveryID); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to acknowledge delivery: %v", err)), nil
 	}
-	return h.resultJSONTracked(resolveProject(ctx, req), "", "ack_delivery", map[string]any{"acknowledged": deliveryID})
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "ack_delivery", map[string]any{"acknowledged": deliveryID})
 }
 
 func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -384,17 +398,17 @@ func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest)
 			rows[i] = []string{m.ID, m.From, m.To, m.Type, m.Priority, m.CreatedAt, m.Subject, content}
 		}
 		table := renderTable([]string{"id", "from", "to", "type", "priority", "created_at", "subject", "content"}, rows)
-		return h.resultTextTracked(resolveProject(ctx, req), "", "get_thread", fmt.Sprintf("%d messages in thread\n%s", len(messages), table))
+		return h.resultTextTracked(h.resolveProject(ctx, req), "", "get_thread", fmt.Sprintf("%d messages in thread\n%s", len(messages), table))
 	}
 
-	return h.resultJSONTracked(resolveProject(ctx, req), "", "get_thread", map[string]any{
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "get_thread", map[string]any{
 		"count":    len(formatted),
 		"messages": formatted,
 	})
 }
 
 func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 
 	// Support marking a whole conversation as read
@@ -439,7 +453,7 @@ func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) 
 }
 
 func (h *Handlers) HandleGetTeamInbox(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	teamSlug := req.GetString("team", "")
 	limit := clampLimit(req.GetInt("limit", 50))
 
@@ -501,7 +515,7 @@ func (h *Handlers) HandleGetTeamInbox(ctx context.Context, req mcp.CallToolReque
 }
 
 func (h *Handlers) HandleAddNotifyChannel(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	target := strings.ToLower(req.GetString("target", ""))
 

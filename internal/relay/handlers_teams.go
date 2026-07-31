@@ -22,7 +22,7 @@ func (h *Handlers) HandleCreateOrg(ctx context.Context, req mcp.CallToolRequest)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to create org: %v", err)), nil
 	}
-	return h.resultJSONTracked(resolveProject(ctx, req), "", "create_org", org)
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "create_org", org)
 }
 
 func (h *Handlers) HandleListOrgs(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -33,11 +33,11 @@ func (h *Handlers) HandleListOrgs(ctx context.Context, req mcp.CallToolRequest) 
 	if orgs == nil {
 		orgs = []models.Org{}
 	}
-	return h.resultJSONTracked(resolveProject(ctx, req), "", "list_orgs", map[string]any{"count": len(orgs), "orgs": orgs})
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "list_orgs", map[string]any{"count": len(orgs), "orgs": orgs})
 }
 
 func (h *Handlers) HandleCreateTeam(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	name := req.GetString("name", "")
 	slug := req.GetString("slug", "")
 	description := req.GetString("description", "")
@@ -64,7 +64,7 @@ func (h *Handlers) HandleCreateTeam(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleListTeams(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 
 	teams, err := h.db.ListTeams(project)
 	if err != nil {
@@ -91,7 +91,7 @@ func (h *Handlers) HandleListTeams(ctx context.Context, req mcp.CallToolRequest)
 }
 
 func (h *Handlers) HandleAddTeamMember(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	teamSlug := req.GetString("team", "")
 	agentName := strings.ToLower(req.GetString("agent_name", ""))
 	role := req.GetString("role", "member")
@@ -125,7 +125,7 @@ func (h *Handlers) HandleAddTeamMember(ctx context.Context, req mcp.CallToolRequ
 }
 
 func (h *Handlers) HandleRemoveTeamMember(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	teamSlug := req.GetString("team", "")
 	agentName := strings.ToLower(req.GetString("agent_name", ""))
 

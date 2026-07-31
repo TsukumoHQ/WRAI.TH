@@ -80,7 +80,7 @@ func (h *Handlers) HandleWhoami(ctx context.Context, req mcp.CallToolRequest) (*
 }
 
 func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	name := strings.ToLower(req.GetString("name", ""))
 	if name == "" {
 		return mcp.NewToolResultError("name is required"), nil
@@ -165,7 +165,7 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 }
 
 func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 
 	agents, err := h.db.ListAgents(project)
 	if err != nil {
@@ -244,7 +244,7 @@ func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest
 }
 
 func (h *Handlers) HandleDeactivateAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	name := strings.ToLower(req.GetString("name", ""))
 	if name == "" {
 		return mcp.NewToolResultError("name is required"), nil
@@ -262,7 +262,7 @@ func (h *Handlers) HandleDeactivateAgent(ctx context.Context, req mcp.CallToolRe
 }
 
 func (h *Handlers) HandleDeleteAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	name := strings.ToLower(req.GetString("name", ""))
 	if name == "" {
 		return mcp.NewToolResultError("name is required"), nil
@@ -279,7 +279,7 @@ func (h *Handlers) HandleDeleteAgent(ctx context.Context, req mcp.CallToolReques
 }
 
 func (h *Handlers) HandleSleepAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 
 	if err := h.db.SleepAgent(project, agent); err != nil {

@@ -9,7 +9,7 @@ import (
 )
 
 func (h *Handlers) HandleGetSessionContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	profileSlugParam := optionalString(req.GetString("profile_slug", ""))
 
@@ -31,7 +31,7 @@ func (h *Handlers) HandleGetSessionContext(ctx context.Context, req mcp.CallTool
 }
 
 func (h *Handlers) HandleQueryContext(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := resolveProject(ctx, req)
+	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	query := req.GetString("query", "")
 	if query == "" {
