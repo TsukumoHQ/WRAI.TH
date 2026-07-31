@@ -15,6 +15,7 @@ import (
 	"agent-relay/internal/models"
 
 	"github.com/mark3labs/mcp-go/mcp"
+	"golang.org/x/time/rate"
 )
 
 type Handlers struct {
@@ -39,6 +40,84 @@ type Handlers struct {
 	// requireRegistered gates mutating tools behind a registered acting agent
 	// (RELAY_REQUIRE_REGISTERED). Set from config in relay.New before dispatch.
 	requireRegistered bool
+
+	// registerLimiters throttles register_agent per (project, name) identity so a
+	// runaway client loop (e.g. a headless job re-registering on every tick) can't
+	// flood the agents table. Keyed lazily, swept on a timer like the HTTP-layer
+	// visitor map in middleware.go.
+	registerMu       sync.Mutex
+	registerLimiters map[string]*registerVisitor
+}
+
+type registerVisitor struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// allowRegister reports whether a register_agent call for this (project, name)
+// identity is within the allowed rate: 1 call per 5s, bursting up to 5 (covers a
+// normal respawn plus a couple of quick retries) — well above legitimate use, far
+// below a tight loop.
+func (h *Handlers) allowRegister(project, name string) bool {
+	key := project + "/" + name
+	h.registerMu.Lock()
+	v, ok := h.registerLimiters[key]
+	if !ok {
+		v = &registerVisitor{limiter: rate.NewLimiter(rate.Every(5*time.Second), 5)}
+		h.registerLimiters[key] = v
+	}
+	v.lastSeen = time.Now()
+	h.registerMu.Unlock()
+	return v.limiter.Allow()
+}
+
+// sweepRegisterLimiters drops idle entries so the map doesn't grow unbounded
+// across the lifetime of a long-running relay.
+func (h *Handlers) sweepRegisterLimiters() {
+	for {
+		time.Sleep(10 * time.Minute)
+		h.registerMu.Lock()
+		for key, v := range h.registerLimiters {
+			if time.Since(v.lastSeen) > 15*time.Minute {
+				delete(h.registerLimiters, key)
+			}
+		}
+		h.registerMu.Unlock()
+	}
+}
+
+// validProjectName rejects garbage project identifiers (empty, path-shaped,
+// hidden-dir-shaped like ".agentd" from a bad `basename $PWD`, or absurdly
+// long) before they reach EnsureProject and silently mint a new project row.
+// One "@" is allowed mid-name: remote projects are addressed "name@host"
+// (e.g. synergix-prod@synx-prod) and rejecting the separator would break
+// every remote registration.
+func validProjectName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	seenAt := false
+	for i, r := range name {
+		isAlnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if i == 0 {
+			if !isAlnum {
+				return false
+			}
+			continue
+		}
+		if r == '@' {
+			// one separator, never leading/trailing
+			if seenAt || i == len(name)-1 {
+				return false
+			}
+			seenAt = true
+			continue
+		}
+		if !isAlnum && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 // SetNotifier connects the notifications subsystem so handlers can emit custom
@@ -68,8 +147,9 @@ func (h *Handlers) getConnector() connector.TaskConnector {
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
-	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), budgetAlerted: map[string]time.Time{}}
+	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
 	go h.flushTokenUsage()
+	go h.sweepRegisterLimiters()
 	return h
 }
 

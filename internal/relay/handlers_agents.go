@@ -85,6 +85,12 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	if name == "" {
 		return mcp.NewToolResultError("name is required"), nil
 	}
+	if !validProjectName(project) {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", project)), nil
+	}
+	if !h.allowRegister(project, name) {
+		return mcp.NewToolResultError("rate limited: too many register_agent calls for this identity, slow down"), nil
+	}
 	role := req.GetString("role", "")
 	description := req.GetString("description", "")
 	reportsTo := optionalStringLower(req.GetString("reports_to", ""))

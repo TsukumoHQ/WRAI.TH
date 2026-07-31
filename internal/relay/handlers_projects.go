@@ -13,6 +13,9 @@ func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequ
 	if name == "" {
 		return mcp.NewToolResultError("name is required"), nil
 	}
+	if !validProjectName(name) {
+		return mcp.NewToolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", name)), nil
+	}
 	description := req.GetString("description", "")
 	cwd := req.GetString("cwd", "")
 

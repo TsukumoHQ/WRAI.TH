@@ -108,6 +108,72 @@ func TestRegisterAgentRespawn(t *testing.T) {
 	}
 }
 
+// TestRegisterAgentRejectsInvalidProjectName guards against a headless job with a
+// bad `basename $PWD` (e.g. ".agentd") silently minting a garbage project.
+func TestRegisterAgentRejectsInvalidProjectName(t *testing.T) {
+	h := testHandlers(t)
+
+	for _, bad := range []string{".agentd", "../etc", "has space", "-leadingdash"} {
+		res, err := h.HandleRegisterAgent(ctx, call(map[string]any{
+			"project": bad,
+			"name":    "bot-a",
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		msg := expectError(t, res)
+		if !strings.Contains(msg, "invalid project name") {
+			t.Errorf("project %q: expected invalid-project-name error, got %q", bad, msg)
+		}
+	}
+
+	if p, err := h.db.GetProject(".agentd"); err != nil || p != nil {
+		t.Errorf("rejected project name must not be created, got %v (err %v)", p, err)
+	}
+
+	// Remote projects are addressed "name@host" — the separator must pass.
+	for _, good := range []string{"synergix-prod@synx-prod", "niwa@synx-prod"} {
+		if !validProjectName(good) {
+			t.Errorf("remote project %q must be valid", good)
+		}
+	}
+	for _, bad := range []string{"a@@b", "a@", "@host"} {
+		if validProjectName(bad) {
+			t.Errorf("%q must be invalid", bad)
+		}
+	}
+}
+
+// TestRegisterAgentRateLimit reproduces the runaway classify-loop incident: the
+// same identity re-registering far faster than any legitimate respawn should be
+// throttled instead of piling up rows.
+func TestRegisterAgentRateLimit(t *testing.T) {
+	h := testHandlers(t)
+
+	var lastErr string
+	blocked := false
+	for i := 0; i < 20; i++ {
+		res, err := h.HandleRegisterAgent(ctx, call(map[string]any{
+			"project": "test-proj",
+			"name":    "loopy",
+		}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.IsError {
+			blocked = true
+			lastErr = res.Content[0].(mcp.TextContent).Text
+			break
+		}
+	}
+	if !blocked {
+		t.Fatal("expected rate limiter to eventually reject a tight register_agent loop")
+	}
+	if !strings.Contains(lastErr, "rate limited") {
+		t.Errorf("expected rate-limit error, got %q", lastErr)
+	}
+}
+
 // TestRegisterAgentRespawnPreservesProfileSlug reproduces the production bug end-to-end:
 // the orchestrator registers an agent WITH profile_slug, then the agent's own in-pane
 // /relay register (per skill/relay.md — never passes profile_slug) re-registers without it.
