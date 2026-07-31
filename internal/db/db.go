@@ -904,6 +904,10 @@ func migrate(conn *sql.DB) error {
 	// Lowercase all agent names for case-insensitive matching
 	migrateLowercaseAgentNames(conn)
 
+	// Canonicalize project names everywhere (lockstep with the handlers'
+	// NormalizeProject) so an upgrade doesn't split existing namespaces.
+	migrateNormalizeProjects(conn)
+
 	return nil
 }
 
