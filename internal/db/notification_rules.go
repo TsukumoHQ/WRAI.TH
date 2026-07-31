@@ -237,6 +237,21 @@ func (d *DB) ComputeDigestStats(project string) (*DigestStats, error) {
 
 // ProjectsWithTasks returns the distinct project names that currently have any
 // non-archived tasks (used by the digest scheduler to emit one event per project).
+// LastTaskActivity returns the most recent task timestamp (dispatch, accept,
+// start, completion) in a project, RFC3339-ish TEXT as stored, or "" when the
+// project has no tasks. Lets the digest loop skip projects whose boards have
+// gone still instead of summarizing them forever.
+func (d *DB) LastTaskActivity(project string) (string, error) {
+	var last sql.NullString
+	err := d.ro().QueryRow(`
+		SELECT MAX(COALESCE(completed_at, started_at, accepted_at, dispatched_at))
+		FROM tasks WHERE project = ? AND archived_at IS NULL`, project).Scan(&last)
+	if err != nil {
+		return "", err
+	}
+	return last.String, nil
+}
+
 func (d *DB) ProjectsWithTasks() ([]string, error) {
 	rows, err := d.ro().Query(`SELECT DISTINCT project FROM tasks WHERE archived_at IS NULL`)
 	if err != nil {

@@ -660,6 +660,20 @@ func (n *Notifier) maybeEmitDigests() {
 		if now.Sub(last) < intervalDur {
 			continue
 		}
+		// A board nobody touched since well before the last digest is DEAD,
+		// not quiet: one lone digest rule used to fan out to every project
+		// that EVER had tasks, dropping ~15 P3 "Cycle …" messages on the
+		// human every interval, forever (the unread user|20 pile in every
+		// retired project). Two intervals of task silence mutes the digest;
+		// any new task activity revives it.
+		if lastActivity, err := n.db.LastTaskActivity(project); err == nil {
+			if t, perr := time.Parse(time.RFC3339, lastActivity); perr == nil {
+				if now.Sub(t) > 2*intervalDur {
+					n.digestLastFired[project] = now
+					continue
+				}
+			}
+		}
 		n.digestLastFired[project] = now
 		stats, err := n.db.ComputeDigestStats(project)
 		if err != nil {
