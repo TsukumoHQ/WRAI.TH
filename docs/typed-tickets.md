@@ -51,6 +51,12 @@ free-form dispatcher. Enforcement is a per-project flag,
 `projects.require_typed_ticket` (default `0`). `niwa` is seeded **on**; flip
 others with `SetProjectRequiresTypedTicket(project, true)`.
 
+The `niwa` seed is **one-shot**, guarded by a `settings` marker
+(`seed_niwa_typed_ticket`): it sets the rollout default exactly once, not on
+every boot. After the first migration the flag is operator-owned — opt a
+project out with `SetProjectRequiresTypedTicket(project, false)` and it
+survives relay restarts (a re-run seed would otherwise silently re-enable it).
+
 When a project enforces tickets:
 
 - **`dispatch_task`** with a missing `goal`, `acceptance_criteria`, or `dod` is

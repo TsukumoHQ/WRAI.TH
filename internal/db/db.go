@@ -307,7 +307,17 @@ func migrate(conn *sql.DB) error {
 		"require_typed_ticket": "INTEGER NOT NULL DEFAULT 0",
 	})
 	_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES ('niwa', 'forest/1', ?)", nowStr)
-	_, _ = conn.Exec("UPDATE projects SET require_typed_ticket = 1 WHERE name = 'niwa'")
+	// ONE-SHOT seed, guarded by a settings marker. The old code re-ran this
+	// UPDATE on every boot, so an operator who deliberately opted niwa out
+	// (SetProjectRequiresTypedTicket false) was silently re-enabled at the next
+	// relay restart. Seed the rollout default exactly once; after that the flag
+	// is operator-owned and survives restarts.
+	var seededTypedTicket string
+	_ = conn.QueryRow("SELECT value FROM settings WHERE key = 'seed_niwa_typed_ticket'").Scan(&seededTypedTicket)
+	if seededTypedTicket == "" {
+		_, _ = conn.Exec("UPDATE projects SET require_typed_ticket = 1 WHERE name = 'niwa'")
+		_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES ('seed_niwa_typed_ticket', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'")
+	}
 
 	ensureColumns(conn, "messages", map[string]string{
 		"conversation_id": "TEXT",
