@@ -376,6 +376,9 @@ func dispatchTaskTool() mcp.Tool {
 		),
 		mcp.WithString("parent_task_id", mcp.Description("Parent task ID (subtasks)")),
 		mcp.WithString("board_id", mcp.Description("Board to assign to")),
+		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required for projects that enforce typed tickets (e.g. niwa); optional elsewhere.")),
+		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array string of individually testable items, e.g. '[\"builds green\",\"refuses without goal\"]'. The review gate verdicts per item. Required where typed tickets are enforced.")),
+		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done (the merge bar). Required where typed tickets are enforced.")),
 	)
 }
 
@@ -513,10 +516,10 @@ func batchCompleteTasksTool() mcp.Tool {
 func batchDispatchTasksTool() mcp.Tool {
 	return mcp.NewTool(
 		"batch_dispatch_tasks",
-		mcp.WithDescription("Dispatch multiple tasks at once."),
+		mcp.WithDescription("Dispatch multiple tasks at once. On projects that enforce typed tickets (e.g. niwa) each item must carry goal + acceptance_criteria + dod; an item missing any is skipped and reported in errors while the rest dispatch."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\"}]. Only profile and title required."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\",\"goal\":\"...\",\"acceptance_criteria\":[\"item1\",\"item2\"],\"dod\":\"...\"}]. profile and title always required; goal/acceptance_criteria/dod required only where typed tickets are enforced (acceptance_criteria is a real JSON array here, not a string)."), mcp.Required()),
 	)
 }
 

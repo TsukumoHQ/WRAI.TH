@@ -53,6 +53,30 @@ func (d *DB) UpdateProjectPlanetType(name, planetType string) error {
 	return err
 }
 
+// ProjectRequiresTypedTicket reports whether `name` enforces typed tickets at
+// dispatch (goal + acceptance criteria + dod mandatory). Default off — an
+// unknown project or a missing column reads as false, so the many free-form
+// projects the relay serves keep dispatching untouched. niwa is seeded on.
+func (d *DB) ProjectRequiresTypedTicket(name string) bool {
+	var v int
+	err := d.ro().QueryRow("SELECT require_typed_ticket FROM projects WHERE name = ?", name).Scan(&v)
+	if err != nil {
+		return false
+	}
+	return v != 0
+}
+
+// SetProjectRequiresTypedTicket flips the per-project enforcement flag. The row
+// must already exist (projects are created on first agent registration).
+func (d *DB) SetProjectRequiresTypedTicket(name string, required bool) error {
+	v := 0
+	if required {
+		v = 1
+	}
+	_, err := d.conn.Exec("UPDATE projects SET require_typed_ticket = ? WHERE name = ?", v, name)
+	return err
+}
+
 // GetSetting returns a setting value by key.
 func (d *DB) GetSetting(key string) string {
 	var val string

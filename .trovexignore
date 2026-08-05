@@ -15,3 +15,6 @@ skill/**
 #
 # Blog articles stay publishable source files (they ship as web pages):
 **/blog/**
+# Repo feature reference read from the branch by the review gate (like
+# docs/deployment.md) — kept on disk so the doc ships with the code it documents.
+docs/typed-tickets.md

@@ -64,7 +64,7 @@ func TestGetAgentTasks_DispatchedExcludesInactiveStatuses(t *testing.T) {
 
 	// 5 cancelled + 1 active task, all dispatched_by cto.
 	for i := 0; i < 5; i++ {
-		tsk, err := d.DispatchTask("p1", "dev", "cto", "cancelled task", "", "P2", nil, nil)
+		tsk, err := d.DispatchTask("p1", "dev", "cto", "cancelled task", "", "P2", nil, nil, TypedTicket{})
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestGetAgentTasks_DispatchedExcludesInactiveStatuses(t *testing.T) {
 			t.Fatalf("cancel: %v", err)
 		}
 	}
-	activeTsk, err := d.DispatchTask("p1", "dev", "cto", "active task", "", "P2", nil, nil)
+	activeTsk, err := d.DispatchTask("p1", "dev", "cto", "active task", "", "P2", nil, nil, TypedTicket{})
 	if err != nil {
 		t.Fatalf("dispatch active: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestGetAgentTasks_DispatchedLimited(t *testing.T) {
 
 	_, _, _ = d.RegisterAgent("p1", "cto", "lead", "", nil, nil, true, nil, "[]", 0, RegisterOptions{})
 	for i := 0; i < 30; i++ {
-		_, err := d.DispatchTask("p1", "dev", "cto", "task", "", "P2", nil, nil)
+		_, err := d.DispatchTask("p1", "dev", "cto", "task", "", "P2", nil, nil, TypedTicket{})
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}
@@ -140,7 +140,7 @@ func TestRegisterProfile_MergesOnUpdate(t *testing.T) {
 func TestProgressNotes_RoundTrip(t *testing.T) {
 	d := testDB(t)
 
-	tsk, _ := d.DispatchTask("p1", "dev", "cto", "long task", "", "P2", nil, nil)
+	tsk, _ := d.DispatchTask("p1", "dev", "cto", "long task", "", "P2", nil, nil, TypedTicket{})
 
 	if err := d.AddProgressNote(tsk.ID, "p1", "worker-1", "halfway through"); err != nil {
 		t.Fatalf("add progress: %v", err)

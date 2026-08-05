@@ -64,7 +64,8 @@ var validTransitions = map[string][]string{
 const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, description, priority, status, result, blocked_reason, project, dispatched_at, accepted_at, started_at, completed_at, parent_task_id, ack_notified_at, ack_escalated_at, board_id, archived_at, " +
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
 	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
-	"git_branch, git_worktree, git_target"
+	"git_branch, git_worktree, git_target, " +
+	"goal, acceptance_criteria, dod"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -75,38 +76,56 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.Source, &t.LinearIssueID, &t.LinearKey, &t.ExternalURL, &t.Points, &t.Labels,
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
 		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
-		&t.GitBranch, &t.GitWorktree, &t.GitTarget)
+		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
+		&t.Goal, &t.AcceptanceCriteria, &t.Dod)
 	return t, err
 }
 
-func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string) (*models.Task, error) {
+// TypedTicket carries the V-lifecycle dispatch-time fields. Zero value = no
+// ticket recorded (free-form dispatch); the DB layer persists it verbatim and
+// never enforces — enforcement is the handler's job, gated per project.
+type TypedTicket struct {
+	Goal               string // one-line intent
+	AcceptanceCriteria string // json array of testable items ("" normalised to "[]")
+	Dod                string // definition of done
+}
+
+func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket) (*models.Task, error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	if priority == "" {
 		priority = "P2"
 	}
+	acceptanceCriteria := ticket.AcceptanceCriteria
+	if strings.TrimSpace(acceptanceCriteria) == "" {
+		acceptanceCriteria = "[]"
+	}
 
 	task := &models.Task{
-		ID:             uuid.New().String(),
-		ProfileSlug:    profileSlug,
-		DispatchedBy:   dispatchedBy,
-		Title:          title,
-		Description:    description,
-		Priority:       priority,
-		Status:         "pending",
-		Project:        project,
-		DispatchedAt:   now,
-		ParentTaskID:   parentTaskID,
-		BoardID:        boardID,
-		Source:         "native",
-		Labels:         "[]",
-		BlockedPeriods: "[]",
+		ID:                 uuid.New().String(),
+		ProfileSlug:        profileSlug,
+		DispatchedBy:       dispatchedBy,
+		Title:              title,
+		Description:        description,
+		Priority:           priority,
+		Status:             "pending",
+		Project:            project,
+		DispatchedAt:       now,
+		ParentTaskID:       parentTaskID,
+		BoardID:            boardID,
+		Source:             "native",
+		Labels:             "[]",
+		BlockedPeriods:     "[]",
+		Goal:               ticket.Goal,
+		AcceptanceCriteria: acceptanceCriteria,
+		Dod:                ticket.Dod,
 	}
 
 	_, err := d.conn.Exec(
-		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?)`,
+		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?)`,
 		task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
 		task.Priority, task.Status, task.Project, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
+		task.Goal, task.AcceptanceCriteria, task.Dod,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch task: %w", err)

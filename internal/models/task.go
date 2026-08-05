@@ -56,6 +56,16 @@ type Task struct {
 	GitWorktree *string `json:"git_worktree,omitempty"`
 	GitTarget   *string `json:"git_target,omitempty"`
 
+	// --- Typed ticket zone (V-lifecycle, dispatch time) — the deterministic
+	// left branch of the V. Goal states intent, AcceptanceCriteria is the
+	// per-requirement checklist the review gate verdicts against, Dod is the
+	// done bar. Enforced only for projects with require_typed_ticket set
+	// (default off — other projects keep dispatching free-form). Additive:
+	// empty strings / "[]" mean "no ticket recorded", never break old clients.
+	Goal               string `json:"goal"`                // one-line intent
+	AcceptanceCriteria string `json:"acceptance_criteria"` // json array of testable items
+	Dod                string `json:"dod"`                 // definition of done
+
 	Subtasks []Task `json:"subtasks,omitempty"`
 }
 

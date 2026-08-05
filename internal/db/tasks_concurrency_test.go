@@ -15,7 +15,7 @@ func TestClaimTask_NoDoubleClaim(t *testing.T) {
 	d := testDB(t)
 	const project = "p1"
 
-	task, err := d.DispatchTask(project, "", "dispatcher", "race me", "", "P1", nil, nil)
+	task, err := d.DispatchTask(project, "", "dispatcher", "race me", "", "P1", nil, nil, TypedTicket{})
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

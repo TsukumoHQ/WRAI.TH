@@ -1393,13 +1393,16 @@ func (r *Relay) apiGetTaskProgress(w http.ResponseWriter, req *http.Request, pat
 
 func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 	var body struct {
-		Project      string  `json:"project"`
-		Profile      string  `json:"profile"`
-		Title        string  `json:"title"`
-		Description  string  `json:"description"`
-		Priority     string  `json:"priority"`
-		ParentTaskID *string `json:"parent_task_id,omitempty"`
-		BoardID      *string `json:"board_id,omitempty"`
+		Project            string   `json:"project"`
+		Profile            string   `json:"profile"`
+		Title              string   `json:"title"`
+		Description        string   `json:"description"`
+		Priority           string   `json:"priority"`
+		ParentTaskID       *string  `json:"parent_task_id,omitempty"`
+		BoardID            *string  `json:"board_id,omitempty"`
+		Goal               string   `json:"goal"`
+		AcceptanceCriteria []string `json:"acceptance_criteria"`
+		Dod                string   `json:"dod"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -1413,7 +1416,24 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 		body.Project = "default"
 	}
 
-	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID)
+	// acceptance_criteria arrives as a real JSON array; persist it as the same
+	// JSON-array string the MCP dispatch path stores.
+	acJSON := "[]"
+	if len(body.AcceptanceCriteria) > 0 {
+		if b, mErr := json.Marshal(body.AcceptanceCriteria); mErr == nil {
+			acJSON = string(b)
+		}
+	}
+	// Same per-project typed-ticket gate as the MCP handler.
+	if r.DB.ProjectRequiresTypedTicket(body.Project) {
+		if missing := missingTicketFields(body.Goal, acJSON, body.Dod); len(missing) > 0 {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, ticketRefusal(body.Project, missing)), http.StatusBadRequest)
+			return
+		}
+	}
+	ticket := db.TypedTicket{Goal: body.Goal, AcceptanceCriteria: acJSON, Dod: body.Dod}
+
+	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID, ticket)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "failed to dispatch task", err)
 		return

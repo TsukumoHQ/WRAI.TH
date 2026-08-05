@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"agent-relay/internal/db"
 	"agent-relay/internal/models"
 	"context"
 	"encoding/json"
@@ -9,6 +10,55 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// missingTicketFields returns which of goal / acceptance_criteria / dod are
+// absent, in dispatch order. acceptanceCriteria is the raw wire value (a JSON
+// array string); it counts as present only when it parses to a non-empty list
+// with at least one non-blank item. Empty return = a complete typed ticket.
+func missingTicketFields(goal, acceptanceCriteria, dod string) []string {
+	var missing []string
+	if strings.TrimSpace(goal) == "" {
+		missing = append(missing, "goal")
+	}
+	if !hasAcceptanceItems(acceptanceCriteria) {
+		missing = append(missing, "acceptance_criteria")
+	}
+	if strings.TrimSpace(dod) == "" {
+		missing = append(missing, "dod")
+	}
+	return missing
+}
+
+// hasAcceptanceItems is true when raw is a JSON array carrying ≥1 non-blank
+// string — the "list of individually testable items" the review gate verdicts
+// against. A bare string, empty array, or unparseable value is not enough.
+func hasAcceptanceItems(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	var items []string
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return false
+	}
+	for _, it := range items {
+		if strings.TrimSpace(it) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// ticketRefusal formats the per-field refusal shown to a dispatcher when a
+// typed-ticket project is missing fields.
+func ticketRefusal(project string, missing []string) string {
+	// The missing list is bracketed so callers (and tests) can read exactly
+	// which fields were absent without tripping on the guidance sentence, which
+	// necessarily names all three field keys.
+	return fmt.Sprintf("typed ticket required for project '%s': missing [%s]. "+
+		"Dispatch with goal (intent), acceptance_criteria (JSON array of individually testable items) and dod (definition of done).",
+		project, strings.Join(missing, ", "))
+}
 
 func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
@@ -38,6 +88,18 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	priority := req.GetString("priority", "P2")
 	parentTaskID := optionalString(req.GetString("parent_task_id", ""))
 	boardID := optionalString(req.GetString("board_id", ""))
+
+	// Typed ticket (V-lifecycle). Refuse an incomplete ticket only where the
+	// project opts in — free-form projects dispatch unchanged.
+	goal := req.GetString("goal", "")
+	acceptanceCriteria := req.GetString("acceptance_criteria", "")
+	dod := req.GetString("dod", "")
+	if h.db.ProjectRequiresTypedTicket(project) {
+		if missing := missingTicketFields(goal, acceptanceCriteria, dod); len(missing) > 0 {
+			return mcp.NewToolResultError(ticketRefusal(project, missing)), nil
+		}
+	}
+	ticket := db.TypedTicket{Goal: goal, AcceptanceCriteria: acceptanceCriteria, Dod: dod}
 
 	// Resolve truncated board_id prefix to full UUID
 	if boardID != nil && len(*boardID) < 36 {
@@ -75,7 +137,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	task, err := h.db.DispatchTask(project, profile, agent, title, description, priority, parentTaskID, boardID)
+	task, err := h.db.DispatchTask(project, profile, agent, title, description, priority, parentTaskID, boardID, ticket)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
 	}
@@ -596,11 +658,14 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 	tasksJSON := req.GetString("tasks", "[]")
 
 	var items []struct {
-		Profile     string  `json:"profile"`
-		Title       string  `json:"title"`
-		Description string  `json:"description"`
-		Priority    string  `json:"priority"`
-		BoardID     *string `json:"board_id"`
+		Profile            string   `json:"profile"`
+		Title              string   `json:"title"`
+		Description        string   `json:"description"`
+		Priority           string   `json:"priority"`
+		BoardID            *string  `json:"board_id"`
+		Goal               string   `json:"goal"`
+		AcceptanceCriteria []string `json:"acceptance_criteria"`
+		Dod                string   `json:"dod"`
 	}
 	if err := json.Unmarshal([]byte(tasksJSON), &items); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
@@ -609,6 +674,10 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		return mcp.NewToolResultError("tasks is required — pass tasks:'[{\"profile\":\"...\",\"title\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\"}]' (JSON string). Only profile and title are required per item."), nil
 	}
 
+	// Same per-project typed-ticket enforcement as dispatch_task; a failing item
+	// lands in errors and the batch continues (per-item, not all-or-nothing).
+	requireTicket := h.db.ProjectRequiresTypedTicket(project)
+
 	var dispatched []map[string]string
 	var errors []string
 	for _, item := range items {
@@ -616,11 +685,26 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 			errors = append(errors, fmt.Sprintf("missing profile or title: %+v", item))
 			continue
 		}
+		// acceptance_criteria arrives as a real JSON array per item; store it as
+		// the same JSON-array string the single dispatch path persists.
+		acJSON := "[]"
+		if len(item.AcceptanceCriteria) > 0 {
+			if b, err := json.Marshal(item.AcceptanceCriteria); err == nil {
+				acJSON = string(b)
+			}
+		}
+		if requireTicket {
+			if missing := missingTicketFields(item.Goal, acJSON, item.Dod); len(missing) > 0 {
+				errors = append(errors, fmt.Sprintf("%s: %s", item.Title, ticketRefusal(project, missing)))
+				continue
+			}
+		}
 		priority := item.Priority
 		if priority == "" {
 			priority = "P2"
 		}
-		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID)
+		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod}
+		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", item.Title, err))
 			continue

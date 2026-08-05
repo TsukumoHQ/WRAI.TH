@@ -299,6 +299,16 @@ func migrate(conn *sql.DB) error {
 	nowStr := time.Now().UTC().Format("2006-01-02T15:04:05Z")
 	_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES ('default', 'forest/1', ?)", nowStr)
 
+	// Typed-ticket enforcement flag (V-lifecycle). Per-project opt-in: the relay
+	// serves many projects, so a hard "no goal/AC/dod → refuse" default would
+	// break every free-form dispatcher. Default 0 (off); niwa is seeded on as
+	// the rollout project. Flip others with require_typed_ticket = 1.
+	ensureColumns(conn, "projects", map[string]string{
+		"require_typed_ticket": "INTEGER NOT NULL DEFAULT 0",
+	})
+	_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES ('niwa', 'forest/1', ?)", nowStr)
+	_, _ = conn.Exec("UPDATE projects SET require_typed_ticket = 1 WHERE name = 'niwa'")
+
 	ensureColumns(conn, "messages", map[string]string{
 		"conversation_id": "TEXT",
 		"project":         "TEXT NOT NULL DEFAULT 'default'",
@@ -461,6 +471,14 @@ func migrate(conn *sql.DB) error {
 		"git_branch":   "TEXT",
 		"git_worktree": "TEXT",
 		"git_target":   "TEXT",
+
+		// --- Typed ticket zone (V-lifecycle) — goal / acceptance criteria / dod
+		// stamped at dispatch. Additive with safe defaults so existing rows and
+		// clients that never send a ticket keep working; enforcement is opt-in
+		// per project (projects.require_typed_ticket), not on these columns.
+		"goal":                "TEXT NOT NULL DEFAULT ''",
+		"acceptance_criteria": "TEXT NOT NULL DEFAULT '[]'", // json array of testable items
+		"dod":                 "TEXT NOT NULL DEFAULT ''",
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
