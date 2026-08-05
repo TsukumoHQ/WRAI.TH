@@ -32,7 +32,8 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 	// status is the dedupe — once the row is in-progress, later polls skip it.
 	upserted := 0
 	hasParent := false
-	seen := make(map[string]bool, len(issues)) // every OPEN issue id this poll saw
+	requireTicket := c.db.ProjectRequiresTypedTicket(c.project) // constant this cycle
+	seen := make(map[string]bool, len(issues))                  // every OPEN issue id this poll saw
 	for _, iss := range issues {
 		if iss.ID == "" {
 			continue
@@ -75,9 +76,15 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		// done. The webhook path is safe (it gates on a real state change); the
 		// poll has no such signal, so it must not resurrect a terminal task. A
 		// genuine reopen arrives via the webhook with an actual state transition.
+		// Typed-ticket gate: the poll must not auto-dispatch a non-conforming
+		// issue on a project that requires typed tickets. It still mirrors
+		// (visible on the board), just never launches an agent on work with no
+		// goal/AC/DoD. The loud refusal comment is the webhook's job (the poll
+		// would re-comment every cycle); here we stay silent and simply hold.
 		if c.onEvent != nil &&
 			iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
-			(prior == nil || !isTerminalOrActive(prior.Status)) {
+			(prior == nil || !isTerminalOrActive(prior.Status)) &&
+			(!requireTicket || len(parseTicket(iss.Description).missing) == 0) {
 			c.onEvent(c.dispatchEvent(taskID, iss.Title, target, seed))
 		}
 	}

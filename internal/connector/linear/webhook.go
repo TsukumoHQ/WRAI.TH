@@ -169,6 +169,29 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 		seed.Status = "cancelled"
 	}
 
+	// Typed-ticket enforcement (V-lifecycle). On a project that requires typed
+	// tickets, an issue whose description lacks Goal / Acceptance Criteria / DoD
+	// is refused AT BIRTH — no mirror, no dispatch — with a loud comment back on
+	// the issue (never a silent relay log, or the executive thinks it dispatched
+	// and the work dies in the void). An already-mirrored task (work in flight)
+	// is never retro-refused. A conforming ticket is parsed onto the mirror so
+	// the review gate can verdict per requirement.
+	// seed already carries the parsed typed ticket (seedFromIssue). Enforce it:
+	// on a typed-ticket project a non-conforming issue is refused AT BIRTH — no
+	// mirror, no dispatch — with a loud comment back on the issue (never a
+	// silent relay log). An already-mirrored task (work in flight) is not
+	// retro-refused; a "remove" is never refused.
+	if missing := parseTicket(iss.Description).missing; len(missing) > 0 &&
+		!strings.EqualFold(env.Action, "remove") && c.db.ProjectRequiresTypedTicket(c.project) {
+		existing, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
+		if existing == nil {
+			if err := c.Comment(iss.ID, refusalComment(missing)); err != nil {
+				return nil, fmt.Errorf("typed-ticket refusal comment: %w", err)
+			}
+			return nil, nil
+		}
+	}
+
 	taskID, _, err := c.db.UpsertLinearMirror(seed)
 	if err != nil {
 		return nil, err
@@ -305,6 +328,17 @@ func (c *Connector) seedFromIssue(iss gqlIssue) db.LinearMirrorSeed {
 		if parent, err := c.db.GetTaskByLinearIssueID(c.project, pid); err == nil && parent != nil {
 			seed.ParentTaskID = strptr(parent.ID)
 		}
+	}
+	// Typed ticket (V-lifecycle): parse the issue description onto the mirror so
+	// EVERY path that builds a seed (webhook + reconcile) carries goal/AC/dod
+	// consistently. Enforcement (refuse/dispatch-gate) lives at the call sites.
+	tk := parseTicket(seed.Description)
+	seed.Goal = tk.goal
+	seed.Dod = tk.dod
+	if acJSON, err := json.Marshal(tk.acceptance); err == nil && len(tk.acceptance) > 0 {
+		seed.AcceptanceCriteria = string(acJSON)
+	} else {
+		seed.AcceptanceCriteria = "[]"
 	}
 	return seed
 }

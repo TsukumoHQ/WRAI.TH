@@ -66,3 +66,41 @@ only when it is a JSON array with at least one non-blank item (`[]` or
 
 Projects **without** the flag dispatch exactly as before — the three fields are
 optional and default to empty.
+
+## Linear-origin tasks
+
+Enforcement is uniform: a task **born in Linear** (mirrored from an issue) is
+held to the same bar. There are no Linear custom fields — the ticket lives in
+the **issue description** as markdown sections, so it is portable, human-visible
+and needs zero per-workspace config:
+
+```
+## Goal
+<one-line intent>
+
+## Acceptance Criteria
+- <testable item>
+- <testable item>
+
+## DoD
+<definition of done>
+```
+
+Headers are case-insensitive and any depth works (`#`, `##`, `### `); `Definition
+of Done` is accepted for `DoD`. Acceptance Criteria must carry at least one
+bullet (`-`, `*`, `+`, or `1.`).
+
+On a project with `require_typed_ticket` on:
+
+- **Conforming issue** → mirrored and dispatched as normal, and the parsed
+  goal / acceptance_criteria / dod are written onto the mirror row (so the
+  review gate verdicts a Linear task per requirement, same as a relay dispatch).
+- **Non-conforming issue** → **refused at birth**: no mirror row, no dispatch,
+  and a **loud comment is posted back on the Linear issue** naming the missing
+  sections and pointing here. It is never a silent relay log — otherwise the
+  executive believes the task dispatched and the work dies in the void. An
+  already-mirrored task (work in flight) is never retro-refused.
+- **Flag off** → Linear sync is unchanged.
+
+The webhook→issue comment is the one Linear write allowed outside an executive
+(agents never touch Linear; they go through the relay).

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"agent-relay/internal/models"
@@ -35,6 +36,13 @@ type LinearMirrorSeed struct {
 	CycleStart      *string
 	CycleEnd        *string
 	ParentTaskID    *string // relay task id of the parent issue's mirror row
+
+	// Typed ticket (V-lifecycle) parsed from the issue description, so a
+	// Linear-born task carries the same goal/acceptance/dod a relay dispatch
+	// does and the review gate can verdict it per requirement.
+	Goal               string
+	AcceptanceCriteria string // json array; defaults to "[]"
+	Dod                string
 }
 
 // GetTaskByLinearIssueID returns the mirror row for a Linear issue id, or
@@ -80,6 +88,9 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 	if s.Labels == "" {
 		s.Labels = "[]"
 	}
+	if strings.TrimSpace(s.AcceptanceCriteria) == "" {
+		s.AcceptanceCriteria = "[]"
+	}
 
 	existing, err := d.GetTaskByLinearIssueID(s.Project, s.LinearIssueID)
 	if err != nil {
@@ -96,13 +107,16 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 			   linear_key=?, external_url=?, points=?, labels=?, linear_state=?,
 			   assignee=?, cycle_id=?, cycle_name=?, cycle_start=?, cycle_end=?,
 			   linear_project_id=COALESCE(?, linear_project_id),
-			   parent_task_id=COALESCE(?, parent_task_id)
+			   parent_task_id=COALESCE(?, parent_task_id),
+			   goal=?, acceptance_criteria=?, dod=?
 			 WHERE id=? AND project=?`,
 			s.Title, s.Description, s.Priority, s.Status,
 			s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState,
 			s.Assignee, s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd,
 			s.LinearProjectID,
-			s.ParentTaskID, existing.ID, s.Project,
+			s.ParentTaskID,
+			s.Goal, s.AcceptanceCriteria, s.Dod,
+			existing.ID, s.Project,
 		)
 		if err != nil {
 			return "", false, fmt.Errorf("update linear mirror: %w", err)
@@ -123,11 +137,13 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 		`INSERT INTO tasks
 		   (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at,
 		    source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee,
-		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, last_activity_at, blocked_periods)
-		 VALUES (?, '', 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]')`,
+		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, last_activity_at, blocked_periods,
+		    goal, acceptance_criteria, dod)
+		 VALUES (?, '', 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
 		id, s.Title, s.Description, s.Priority, s.Status, s.Project, now,
 		s.LinearIssueID, s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState, s.Assignee,
 		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd, s.ParentTaskID, s.LinearProjectID, now,
+		s.Goal, s.AcceptanceCriteria, s.Dod,
 	)
 	if err != nil {
 		return "", false, fmt.Errorf("insert linear mirror: %w", err)
