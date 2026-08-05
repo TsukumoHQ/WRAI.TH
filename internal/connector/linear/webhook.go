@@ -169,25 +169,25 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 		seed.Status = "cancelled"
 	}
 
-	// Typed-ticket enforcement (V-lifecycle). On a project that requires typed
-	// tickets, an issue whose description lacks Goal / Acceptance Criteria / DoD
-	// is refused AT BIRTH — no mirror, no dispatch — with a loud comment back on
-	// the issue (never a silent relay log, or the executive thinks it dispatched
-	// and the work dies in the void). An already-mirrored task (work in flight)
-	// is never retro-refused. A conforming ticket is parsed onto the mirror so
-	// the review gate can verdict per requirement.
-	// seed already carries the parsed typed ticket (seedFromIssue). Enforce it:
-	// on a typed-ticket project a non-conforming issue is refused AT BIRTH — no
-	// mirror, no dispatch — with a loud comment back on the issue (never a
-	// silent relay log). An already-mirrored task (work in flight) is not
-	// retro-refused; a "remove" is never refused.
-	if missing := parseTicket(iss.Description).missing; len(missing) > 0 &&
-		!strings.EqualFold(env.Action, "remove") && c.db.ProjectRequiresTypedTicket(c.project) {
-		existing, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
-		if existing == nil {
-			if err := c.Comment(iss.ID, refusalComment(missing)); err != nil {
-				return nil, fmt.Errorf("typed-ticket refusal comment: %w", err)
-			}
+	// Typed-ticket enforcement (V-lifecycle), unified with the reconcile poll on
+	// a single refused mirror row + refusal_notified_at marker (see
+	// handleTypedTicket). A non-conforming issue on a typed-ticket project is
+	// refused with a loud comment back on the issue (never a silent relay log, or
+	// the executive thinks it dispatched and the work dies in the void). A "remove"
+	// is never refused; a non-agent issue was never dispatchable so it is not
+	// refused either (kept symmetric with the poll, which skips non-agent issues
+	// before enforcement). Work already in flight is never retro-refused.
+	if !strings.EqualFold(env.Action, "remove") &&
+		c.db.ProjectRequiresTypedTicket(c.project) && isAgent(c.dispatchTarget(iss)) {
+		existing, err := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
+		if err != nil {
+			return nil, err
+		}
+		decision, err := c.handleTypedTicket(iss, seed, existing)
+		if err != nil {
+			return nil, err
+		}
+		if decision == refusedHold {
 			return nil, nil
 		}
 	}

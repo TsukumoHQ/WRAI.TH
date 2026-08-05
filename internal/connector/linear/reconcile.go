@@ -51,6 +51,25 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		}
 		prior, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
 		seed := c.seedFromIssue(iss)
+
+		// Typed-ticket enforcement, unified with the webhook path on the refused
+		// mirror row + marker (see handleTypedTicket). A non-conforming issue that
+		// reaches the relay only via the poll (its webhook was missed) is refused
+		// here too — the loud comment fires ONCE, deduped by the persistent marker,
+		// so no work dies silently and later cycles stay quiet. On refusal the row
+		// is persisted refused; skip dispatch. A conforming issue falls through to
+		// the normal upsert + dispatch below.
+		if requireTicket {
+			decision, err := c.handleTypedTicket(iss, seed, prior)
+			if err != nil {
+				log.Printf("[linear] reconcile typed-ticket %s: %v", iss.ID, err)
+				continue
+			}
+			if decision == refusedHold {
+				continue
+			}
+		}
+
 		taskID, _, err := c.db.UpsertLinearMirror(seed)
 		if err != nil {
 			log.Printf("[linear] reconcile upsert %s: %v", iss.ID, err)

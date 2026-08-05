@@ -65,7 +65,7 @@ const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, descri
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
 	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
 	"git_branch, git_worktree, git_target, " +
-	"goal, acceptance_criteria, dod"
+	"goal, acceptance_criteria, dod, refusal_notified_at"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -77,7 +77,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
 		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
 		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
-		&t.Goal, &t.AcceptanceCriteria, &t.Dod)
+		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.RefusalNotifiedAt)
 	return t, err
 }
 

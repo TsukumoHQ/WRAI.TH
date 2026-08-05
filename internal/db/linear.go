@@ -267,6 +267,34 @@ func (d *DB) CloseLinearMirror(taskID, status string) error {
 	return nil
 }
 
+// SetRefusalNotified stamps the anti-spam marker on a refused Linear mirror row:
+// the one loud "typed ticket required" comment has been posted. COALESCE keeps it
+// idempotent — a re-entry never bumps an already-set marker, so the timestamp
+// records the FIRST notification. Best-effort at the call site (the comment has
+// already landed), so a marker-write hiccup never re-drives the whole ingest.
+func (d *DB) SetRefusalNotified(taskID string) error {
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	_, err := d.conn.Exec(
+		`UPDATE tasks SET refusal_notified_at = COALESCE(refusal_notified_at, ?) WHERE id = ?`,
+		now, taskID,
+	)
+	if err != nil {
+		return fmt.Errorf("set refusal notified: %w", err)
+	}
+	return nil
+}
+
+// ClearRefusalNotified resets the anti-spam marker when a refused issue becomes
+// conforming again, so a LATER re-non-conformity re-notifies exactly once.
+func (d *DB) ClearRefusalNotified(taskID string) error {
+	if _, err := d.conn.Exec(
+		`UPDATE tasks SET refusal_notified_at = NULL WHERE id = ?`, taskID,
+	); err != nil {
+		return fmt.Errorf("clear refusal notified: %w", err)
+	}
+	return nil
+}
+
 // linearSyncLogCap bounds the audit table; older rows are pruned on insert.
 const linearSyncLogCap = 500
 

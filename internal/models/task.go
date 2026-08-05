@@ -66,6 +66,13 @@ type Task struct {
 	AcceptanceCriteria string `json:"acceptance_criteria"` // json array of testable items
 	Dod                string `json:"dod"`                 // definition of done
 
+	// RefusalNotifiedAt is the anti-spam marker for a Linear issue refused for
+	// missing its typed ticket: a REFUSED mirror row (Status "refused") carries
+	// it, stamped when the one loud comment was posted so no path re-comments.
+	// Cleared when the issue becomes conforming, so a later regression re-notifies
+	// once. Set only on Linear-sourced refused rows.
+	RefusalNotifiedAt *string `json:"refusal_notified_at,omitempty"`
+
 	Subtasks []Task `json:"subtasks,omitempty"`
 }
 

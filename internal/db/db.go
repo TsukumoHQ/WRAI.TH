@@ -479,6 +479,14 @@ func migrate(conn *sql.DB) error {
 		"goal":                "TEXT NOT NULL DEFAULT ''",
 		"acceptance_criteria": "TEXT NOT NULL DEFAULT '[]'", // json array of testable items
 		"dod":                 "TEXT NOT NULL DEFAULT ''",
+
+		// --- Linear refusal marker (V-lifecycle) — anti-spam for the loud
+		// non-conforming refusal. A Linear issue missing its typed ticket mirrors
+		// as a REFUSED row (status 'refused', never dispatched); this stamps when
+		// the one loud comment was posted, so neither the webhook nor any poll
+		// cycle re-comments. Cleared when the issue becomes conforming, so a later
+		// regression re-notifies exactly once. Nullable, additive.
+		"refusal_notified_at": "TEXT",
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)

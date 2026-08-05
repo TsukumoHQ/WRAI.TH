@@ -97,8 +97,11 @@ func conformingDesc() string {
 	return "## Goal\nShip it\n\n## Acceptance Criteria\n- a\n- b\n\n## DoD\ngreen"
 }
 
-// AC2: a non-conforming issue on a typed-ticket project is refused at birth —
-// a comment fires on the issue, and NO mirror row is created.
+// AC1: a non-conforming issue on a typed-ticket project is refused on the webhook
+// path — a loud comment fires ONCE, and the mirror persists as a REFUSED row
+// (status "refused", marker stamped) that never dispatches. The ruling amends the
+// original "no mirror" stance (V1-bis): a refused row is the single anti-spam
+// home shared with the poll path.
 func TestIngest_TypedTicket_RefusesNonConforming(t *testing.T) {
 	database := newTestDB(t)
 	c := newTestConn(t, database)
@@ -123,8 +126,15 @@ func TestIngest_TypedTicket_RefusesNonConforming(t *testing.T) {
 	if cr.count() != 1 {
 		t.Errorf("expected exactly one refusal comment on the issue, got %d", cr.count())
 	}
-	if task, _ := database.GetTaskByLinearIssueID(c.project, "issue-uuid-1"); task != nil {
-		t.Error("refused issue must not create a mirror row")
+	task, _ := database.GetTaskByLinearIssueID(c.project, "issue-uuid-1")
+	if task == nil {
+		t.Fatal("refused issue must persist a mirror row (ruling: refused row)")
+	}
+	if task.Status != linearRefusedStatus {
+		t.Errorf("refused row status = %q, want %q", task.Status, linearRefusedStatus)
+	}
+	if task.RefusalNotifiedAt == nil {
+		t.Error("refused row must carry the refusal_notified_at anti-spam marker")
 	}
 }
 

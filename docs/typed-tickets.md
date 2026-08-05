@@ -95,12 +95,37 @@ On a project with `require_typed_ticket` on:
 - **Conforming issue** → mirrored and dispatched as normal, and the parsed
   goal / acceptance_criteria / dod are written onto the mirror row (so the
   review gate verdicts a Linear task per requirement, same as a relay dispatch).
-- **Non-conforming issue** → **refused at birth**: no mirror row, no dispatch,
+- **Non-conforming issue** → **refused**: the mirror is persisted as a
+  **`refused` row** — never dispatched, never surfaced as a pending/active task —
   and a **loud comment is posted back on the Linear issue** naming the missing
   sections and pointing here. It is never a silent relay log — otherwise the
   executive believes the task dispatched and the work dies in the void. An
-  already-mirrored task (work in flight) is never retro-refused.
-- **Flag off** → Linear sync is unchanged.
+  already-mirrored task **in flight** (accepted / in-progress / in-review /
+  blocked / terminal) is never retro-refused.
+- **Flag off** → Linear sync is unchanged (a non-conforming issue mirrors as a
+  plain row, no comment).
 
 The webhook→issue comment is the one Linear write allowed outside an executive
 (agents never touch Linear; they go through the relay).
+
+### Refused rows — states and the anti-spam marker
+
+An issue can arrive by **two** paths: the webhook (real-time) and the reconcile
+**poll** (heals missed webhooks, and is the only path on a webhook-less localhost
+relay). Both run refusal through one mechanism so no issue dies silently and
+neither path spams:
+
+- The refused mirror carries status **`refused`** and a **`refusal_notified_at`**
+  marker. The loud comment fires **exactly once** — stamped by the marker — no
+  matter how many webhook re-deliveries or poll cycles see the same
+  non-conforming issue. (A non-agent issue was never dispatchable, so it is not
+  refused on either path.)
+- **Becomes conforming** → the row flips out of `refused` to the normal Linear
+  status, the marker is **reset**, and it dispatches on its next started state —
+  exactly like any conforming issue.
+- **Regresses to non-conforming** while still refusable (a fresh, unstarted
+  backlog issue) → because the marker was reset, it **re-notifies once**. Work
+  already in flight is left untouched.
+
+State flow: `refused ⇄ (normal mirror)` — the marker is set on entering
+`refused`, cleared on leaving it.
