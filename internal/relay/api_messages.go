@@ -157,7 +157,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 		for _, m := range recipients {
 			r.Registry.Notify(project, m, from, body.Subject, msg.ID)
 		}
-		r.Events.Emit(MCPEvent{Type: "message", Action: "team", Agent: from, Project: project, Label: to, Priority: priority})
+		r.Events.Emit(MCPEvent{Type: "message", Action: "team", Agent: from, Project: project, Label: to, Priority: priority, MsgType: msgType})
 		writeJSON(w, msg)
 		return
 	}
@@ -176,6 +176,6 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 	} else {
 		r.Registry.Notify(project, to, from, body.Subject, msg.ID)
 	}
-	r.Events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Label: to, Priority: priority})
+	r.Events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Label: to, Priority: priority, MsgType: msgType})
 	writeJSON(w, msg)
 }

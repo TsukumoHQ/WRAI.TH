@@ -315,7 +315,7 @@ func (h *Handlers) sendFederated(ctx context.Context, project, from, peerLabel, 
 	if err := h.federation.Forward(ctx, peer, fm); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("federated send to %q failed: %v", peerLabel, err)), nil
 	}
-	h.events.Emit(MCPEvent{Type: "message", Action: "federated", Agent: from, Project: project, Target: fmt.Sprintf("%s@%s", fm.To, peerLabel), Label: subject})
+	h.events.Emit(MCPEvent{Type: "message", Action: "federated", Agent: from, Project: project, Target: fmt.Sprintf("%s@%s", fm.To, peerLabel), Label: subject, MsgType: msgType})
 	return h.resultJSONTracked(project, from, "send_message", map[string]any{
 		"sent": "federated",
 		"to":   fmt.Sprintf("%s@%s", fm.To, peerLabel),
@@ -395,7 +395,7 @@ func (r *Relay) apiFederationInbound(w http.ResponseWriter, req *http.Request) {
 
 	// Best-effort wake-up; the message is already durable if this no-ops.
 	r.Registry.Notify(project, to, fromLabel, fm.Subject, msg.ID)
-	r.Events.Emit(MCPEvent{Type: "message", Action: "federated_in", Agent: fromLabel, Project: project, Target: to, Label: fm.Subject})
+	r.Events.Emit(MCPEvent{Type: "message", Action: "federated_in", Agent: fromLabel, Project: project, Target: to, Label: fm.Subject, MsgType: msgType})
 
 	writeJSON(w, map[string]any{"delivered": true, "message_id": msg.ID})
 }

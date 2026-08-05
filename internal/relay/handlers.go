@@ -382,6 +382,7 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 		Project: srcProject,
 		Target:  fmt.Sprintf("%s@%s", to, dstProject),
 		Label:   subject,
+		MsgType: msgType,
 	})
 
 	return h.resultJSONTracked(srcProject, from, "send_message", msg)

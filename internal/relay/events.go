@@ -23,6 +23,7 @@ type MCPEvent struct {
 	Target   string         `json:"target,omitempty"`   // target agent/profile (for dispatch, team ops)
 	Label    string         `json:"label,omitempty"`    // short label (task title, memory key, etc.)
 	Priority string         `json:"priority,omitempty"` // message priority (P0-P3) on Type "message" — lets a wake daemon gate debounce/bypass from the envelope without an inbox fetch per event
+	MsgType  string         `json:"msg_type,omitempty"` // message kind (notification/ack/fyi/...) on Type "message" — lets a wake daemon skip waking a busy agent for an ack/fyi from the envelope alone, no inbox fetch. Empty on an old relay → the daemon falls back to priority-only gating
 	Semantic map[string]any `json:"semantic,omitempty"` // tiny payload for the notifications evaluator ({agent, task_id, linear_key, title, ...}); nil for plain visual events
 	TS       int64          `json:"ts"`                 // unix ms
 }
