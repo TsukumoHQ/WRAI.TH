@@ -397,11 +397,15 @@ func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
 	out := make([]DecisionSummary, 0, len(decs))
 	used := 0
 	for _, m := range decs {
-		s := DecisionSummary{Key: m.Key}
+		// Key and Area are attacker-influenced (a remember call sets them), so
+		// bound them too — otherwise a multi-megabyte Key/Area inflates the
+		// always-surfaced first entry past the budget and bloats every boot.
+		s := DecisionSummary{}
+		s.Key, _ = truncatePreview(m.Key, decisionPreview)
 		var dv db.DecisionValue
 		if json.Unmarshal([]byte(m.Value), &dv) == nil && dv.Decision != "" {
 			s.Decision, _ = truncatePreview(dv.Decision, decisionPreview)
-			s.Area = dv.Area
+			s.Area, _ = truncatePreview(dv.Area, decisionPreview)
 			s.Rationale, _ = truncatePreview(dv.Rationale, decisionPreview)
 		} else {
 			s.Decision, _ = truncatePreview(m.Value, decisionPreview)
