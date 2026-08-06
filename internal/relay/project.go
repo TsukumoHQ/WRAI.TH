@@ -355,6 +355,14 @@ const sessionDecisionMax = 40
 // payload; the full text is fetched via recall_decisions.
 const decisionPreview = 400
 
+// decisionKeyMax bounds a decision Key. Unlike the payload fields, a Key cannot
+// be truncated — it is the lookup handle for get_memory/supersedes, so a
+// truncated Key returns a dangling identifier. Real keys are short slugs
+// (~"DEC-ops-3"); a Key past this bound only comes from a pathological area fed
+// to remember, so such a decision is dropped from the boot view (and counted as
+// omitted) rather than surfaced with a broken id.
+const decisionKeyMax = 256
+
 // sessionDecisionBudget bounds the total bytes spent on decisions[] in
 // session_context, mirroring sessionMemoryBudget. Without it, 40 multi-line
 // checkpoint/resume blobs dominated the entire boot payload (~50KB observed).
@@ -397,11 +405,16 @@ func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
 	out := make([]DecisionSummary, 0, len(decs))
 	used := 0
 	for _, m := range decs {
-		// Key and Area are attacker-influenced (a remember call sets them), so
-		// bound them too — otherwise a multi-megabyte Key/Area inflates the
-		// always-surfaced first entry past the budget and bloats every boot.
-		s := DecisionSummary{}
-		s.Key, _ = truncatePreview(m.Key, decisionPreview)
+		// The Key is the lookup handle (get_memory/supersedes) and MUST be
+		// surfaced verbatim — never truncated, or the client gets a dangling id.
+		// A key past decisionKeyMax only comes from a pathological remember area;
+		// drop that decision (it still counts as omitted) rather than emit a
+		// broken id or let its unbounded key blow the always-surfaced first entry.
+		if len(m.Key) > decisionKeyMax {
+			continue
+		}
+		// Area IS bounded — it is display-only payload, not a lookup handle.
+		s := DecisionSummary{Key: m.Key}
 		var dv db.DecisionValue
 		if json.Unmarshal([]byte(m.Value), &dv) == nil && dv.Decision != "" {
 			s.Decision, _ = truncatePreview(dv.Decision, decisionPreview)

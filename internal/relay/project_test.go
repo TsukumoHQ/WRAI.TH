@@ -336,6 +336,32 @@ func TestProjectDecisions_TruncatesAndByteBudgets(t *testing.T) {
 	}
 }
 
+// TestProjectDecisions_KeyVerbatimOrDropped proves the Key is a lookup handle:
+// a normal key is surfaced byte-for-byte (so get_memory/supersedes resolve), and
+// a pathologically oversized key is DROPPED — never surfaced truncated (which
+// would return a dangling identifier).
+func TestProjectDecisions_KeyVerbatimOrDropped(t *testing.T) {
+	normalKey := "DEC-ops-3"
+	hugeKey := "DEC-" + strings.Repeat("k", decisionKeyMax) // > decisionKeyMax
+	mk := func(k string) models.Memory {
+		return models.Memory{Key: k, Value: `{"decision":"d","area":"ops","status":"accepted"}`, Layer: "decision"}
+	}
+	out := projectDecisions([]models.Memory{mk(normalKey), mk(hugeKey)}, sessionDecisionMax)
+
+	if len(out) != 1 {
+		t.Fatalf("expected only the normal-key decision to surface, got %d: %+v", len(out), out)
+	}
+	if out[0].Key != normalKey {
+		t.Fatalf("key not surfaced verbatim: got %q want %q", out[0].Key, normalKey)
+	}
+	// The oversized key must appear NOWHERE — not verbatim, not truncated.
+	for _, d := range out {
+		if strings.HasPrefix(d.Key, "DEC-k") {
+			t.Fatalf("oversized key leaked (possibly truncated): %q", d.Key)
+		}
+	}
+}
+
 // TestProjectDecisions_EncodedBudget_ControlChars proves the byte budget counts
 // the ENCODED JSON size, not raw field lengths: escape-heavy decisions (quotes +
 // newlines) roughly double on the wire, so a raw-len budget under-counts and lets
