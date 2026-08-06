@@ -859,9 +859,13 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	// new agent reads them before re-litigating. Bounded; full text via
 	// recall_decisions / get_memory(key).
 	if decs, derr := h.db.ListDecisions(project); derr == nil && len(decs) > 0 {
-		result["decisions"] = projectDecisions(decs, sessionDecisionMax)
-		if len(decs) > sessionDecisionMax {
-			result["decisions_omitted"] = len(decs) - sessionDecisionMax
+		// Count omitted from the PROJECTED result, not the count cap: the byte
+		// budget can drop decisions below sessionDecisionMax, and an agent that
+		// sees no overflow signal would silently miss accepted decisions.
+		projectedDecs := projectDecisions(decs, sessionDecisionMax)
+		result["decisions"] = projectedDecs
+		if len(projectedDecs) < len(decs) {
+			result["decisions_omitted"] = len(decs) - len(projectedDecs)
 		}
 	}
 

@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -293,5 +294,101 @@ func TestProjectTasks_P0FloodObeysHardCeiling(t *testing.T) {
 	}
 	if len(out) >= len(tasks) || len(out) == 0 {
 		t.Fatalf("hard ceiling should bound P0 tasks, kept %d of %d", len(out), len(tasks))
+	}
+}
+
+func TestProjectDecisions_TruncatesAndByteBudgets(t *testing.T) {
+	// The regression: agents write multi-line checkpoint/resume blobs as
+	// decisions, so 40 of them dominated the boot payload. Build 40 fat ones.
+	big := strings.Repeat("y", 3000)
+	val := `{"decision":"` + big + `","rationale":"` + big + `","area":"ops","status":"accepted"}`
+	decs := make([]models.Memory, 0, 40)
+	for i := 0; i < 40; i++ {
+		decs = append(decs, models.Memory{Key: "DEC-ops-x", Value: val, Layer: "decision"})
+	}
+	out := projectDecisions(decs, sessionDecisionMax)
+
+	// Every field is preview-truncated (rune-safe helper, ≤ decisionPreview).
+	total := 0
+	for _, d := range out {
+		if len(d.Decision) > decisionPreview {
+			t.Fatalf("Decision not truncated: %d > %d", len(d.Decision), decisionPreview)
+		}
+		if len(d.Rationale) > decisionPreview {
+			t.Fatalf("Rationale not truncated: %d > %d", len(d.Rationale), decisionPreview)
+		}
+		total += decisionSummaryBytes(d)
+	}
+	// The whole section is ENCODED-byte-bounded near the budget — NOT the raw
+	// 40×6KB. Slack = one always-surfaced first entry over the budget.
+	if total > sessionDecisionBudget+decisionPreview*2+256 {
+		t.Fatalf("decisions[] not byte-bounded: %d encoded bytes", total)
+	}
+	// The first (most-recent) decision always surfaces.
+	if len(out) == 0 {
+		t.Fatal("expected at least the first decision to surface under budget")
+	}
+
+	// A raw (non-DecisionValue-JSON) value still lands truncated in Decision.
+	raw := projectDecisions([]models.Memory{{Key: "DEC-raw", Value: strings.Repeat("z", 2000)}}, sessionDecisionMax)
+	if len(raw) != 1 || len(raw[0].Decision) > decisionPreview {
+		t.Fatalf("raw decision value not truncated: %+v", raw)
+	}
+}
+
+// TestProjectDecisions_EncodedBudget_ControlChars proves the byte budget counts
+// the ENCODED JSON size, not raw field lengths: escape-heavy decisions (quotes +
+// newlines) roughly double on the wire, so a raw-len budget under-counts and lets
+// decisions[] exceed the intended bound.
+func TestProjectDecisions_EncodedBudget_ControlChars(t *testing.T) {
+	// 3000 runes of `"` then `\n` — every byte becomes a 2-byte JSON escape.
+	heavy := strings.Repeat("\"\n", 1500)
+	valBytes, _ := json.Marshal(map[string]string{
+		"decision": heavy, "rationale": heavy, "area": "ops", "status": "accepted",
+	})
+	decs := make([]models.Memory, 0, 40)
+	for i := 0; i < 40; i++ {
+		decs = append(decs, models.Memory{Key: "DEC-esc", Value: string(valBytes), Layer: "decision"})
+	}
+	out := projectDecisions(decs, sessionDecisionMax)
+
+	encoded := 0
+	raw := 0
+	for _, d := range out {
+		encoded += decisionSummaryBytes(d)
+		raw += len(d.Key) + len(d.Area) + len(d.Decision) + len(d.Rationale)
+	}
+	if encoded > sessionDecisionBudget+decisionPreview*2+256 {
+		t.Fatalf("encoded decisions[] exceeded budget: %d bytes", encoded)
+	}
+	// The whole point of the fix: encoded size materially exceeds raw for
+	// escape-heavy content, so a raw-len budget would have over-admitted.
+	if raw >= encoded {
+		t.Fatalf("expected encoded > raw for escape-heavy decisions: raw=%d encoded=%d", raw, encoded)
+	}
+}
+
+// TestProjectDecisions_OmittedReflectsByteTruncation proves the handler must
+// compute decisions_omitted from the PROJECTED length: with fewer items than the
+// count cap but more bytes than the budget, the old count-cap formula reports 0
+// omitted while the projection actually drops entries.
+func TestProjectDecisions_OmittedReflectsByteTruncation(t *testing.T) {
+	big := strings.Repeat("y", 3000)
+	val := `{"decision":"` + big + `","rationale":"` + big + `","area":"ops","status":"accepted"}`
+	decs := make([]models.Memory, 0, 30) // 30 < sessionDecisionMax (40)
+	for i := 0; i < 30; i++ {
+		decs = append(decs, models.Memory{Key: "DEC-ops", Value: val, Layer: "decision"})
+	}
+	out := projectDecisions(decs, sessionDecisionMax)
+	if len(out) >= len(decs) {
+		t.Fatalf("expected byte budget to drop decisions: projected %d of %d", len(out), len(decs))
+	}
+	omitted := len(decs) - len(out) // handler's new formula
+	countCapOmitted := 0            // old buggy formula: len<=cap → 0
+	if len(decs) > sessionDecisionMax {
+		countCapOmitted = len(decs) - sessionDecisionMax
+	}
+	if omitted <= countCapOmitted {
+		t.Fatalf("projected-omitted (%d) must exceed count-cap-omitted (%d)", omitted, countCapOmitted)
 	}
 }

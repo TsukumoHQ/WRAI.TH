@@ -344,10 +344,21 @@ func memorySummaryBytes(s MemorySummary) int {
 // a CTO constraint must always survive into the boot payload. The caller
 // (ListBootMemories) already orders constraints first, then updated_at DESC.
 // sessionDecisionMax bounds how many accepted decisions are injected at session
-// start. Decisions are one-liners, so the count keeps the section bounded
-// without a byte budget; the overflow count is surfaced and the rest are
+// start. It is a count cap layered on top of sessionDecisionBudget below —
+// decisions were ASSUMED to be one-liners, but agents write multi-line
+// checkpoint/resume blobs into them, so the byte budget (not the count) is what
+// actually keeps the section bounded. The overflow is surfaced and the rest are
 // reachable via recall_decisions.
 const sessionDecisionMax = 40
+
+// decisionPreview bounds each decision's Decision/Rationale text in the boot
+// payload; the full text is fetched via recall_decisions.
+const decisionPreview = 400
+
+// sessionDecisionBudget bounds the total bytes spent on decisions[] in
+// session_context, mirroring sessionMemoryBudget. Without it, 40 multi-line
+// checkpoint/resume blobs dominated the entire boot payload (~50KB observed).
+const sessionDecisionBudget = 6000
 
 // DecisionSummary is the compact session-context form of an accepted decision.
 type DecisionSummary struct {
@@ -357,24 +368,52 @@ type DecisionSummary struct {
 	Rationale string `json:"rationale,omitempty"`
 }
 
-// projectDecisions decodes accepted decision memories into the compact boot form,
-// capped at max.
+// decisionSummaryBytes measures the ENCODED JSON size of a decision entry, not
+// the sum of its raw field lengths. Decisions carry multi-line checkpoint blobs
+// full of control characters and quotes; each such byte encodes to a 2-to-6-byte
+// escape (\n, \", \uXXXX) on the wire, so raw len() undercounts the real payload
+// and lets decisions[] blow past sessionDecisionBudget. Marshaling the summary is
+// the exact number of bytes the client receives.
+func decisionSummaryBytes(s DecisionSummary) int {
+	b, err := json.Marshal(s)
+	if err != nil {
+		// A struct of plain string fields never fails to marshal; fall back to
+		// raw lengths plus structural slack so the budget still bounds the loop.
+		return len(s.Key) + len(s.Area) + len(s.Decision) + len(s.Rationale) + 64
+	}
+	return len(b)
+}
+
+// projectDecisions decodes accepted decision memories into the compact boot
+// form: each Decision/Rationale is preview-truncated to decisionPreview, then
+// entries are greedily selected (in the caller's updated_at-DESC order) until
+// sessionDecisionBudget bytes is reached — the count cap `max` still applies
+// first. The first entry always surfaces even under the budget, mirroring
+// projectMemories; the full text stays reachable via recall_decisions.
 func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
 	if max > 0 && len(decs) > max {
 		decs = decs[:max]
 	}
 	out := make([]DecisionSummary, 0, len(decs))
+	used := 0
 	for _, m := range decs {
 		s := DecisionSummary{Key: m.Key}
 		var dv db.DecisionValue
 		if json.Unmarshal([]byte(m.Value), &dv) == nil && dv.Decision != "" {
-			s.Decision = dv.Decision
+			s.Decision, _ = truncatePreview(dv.Decision, decisionPreview)
 			s.Area = dv.Area
-			s.Rationale = dv.Rationale
+			s.Rationale, _ = truncatePreview(dv.Rationale, decisionPreview)
 		} else {
-			s.Decision = m.Value
+			s.Decision, _ = truncatePreview(m.Value, decisionPreview)
+		}
+		b := decisionSummaryBytes(s)
+		// First entry always surfaces; then the byte budget caps the total
+		// (a later, smaller decision can still fit — hence continue, not break).
+		if len(out) > 0 && used+b > sessionDecisionBudget {
+			continue
 		}
 		out = append(out, s)
+		used += b
 	}
 	return out
 }
