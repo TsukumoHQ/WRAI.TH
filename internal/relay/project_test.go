@@ -362,6 +362,26 @@ func TestProjectDecisions_KeyVerbatimOrDropped(t *testing.T) {
 	}
 }
 
+// TestProjectDecisions_CapAppliesAfterKeyFilter proves the count cap is spent on
+// VALID decisions only: a run of oversized-key recent decisions must not consume
+// the cap and starve a valid decision that follows, while capacity is unused.
+func TestProjectDecisions_CapAppliesAfterKeyFilter(t *testing.T) {
+	hugeKey := "DEC-" + strings.Repeat("k", decisionKeyMax)
+	val := `{"decision":"d","area":"ops","status":"accepted"}`
+	// max recent decisions all have oversized keys; the (max+1)th is valid.
+	const max = 3
+	decs := make([]models.Memory, 0, max+1)
+	for i := 0; i < max; i++ {
+		decs = append(decs, models.Memory{Key: hugeKey, Value: val, Layer: "decision"})
+	}
+	decs = append(decs, models.Memory{Key: "DEC-valid-1", Value: val, Layer: "decision"})
+
+	out := projectDecisions(decs, max)
+	if len(out) != 1 || out[0].Key != "DEC-valid-1" {
+		t.Fatalf("valid decision starved by oversized-key run: %+v", out)
+	}
+}
+
 // TestProjectDecisions_EncodedBudget_ControlChars proves the byte budget counts
 // the ENCODED JSON size, not raw field lengths: escape-heavy decisions (quotes +
 // newlines) roughly double on the wire, so a raw-len budget under-counts and lets

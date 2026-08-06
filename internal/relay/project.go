@@ -399,11 +399,9 @@ func decisionSummaryBytes(s DecisionSummary) int {
 // first. The first entry always surfaces even under the budget, mirroring
 // projectMemories; the full text stays reachable via recall_decisions.
 func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
-	if max > 0 && len(decs) > max {
-		decs = decs[:max]
-	}
 	out := make([]DecisionSummary, 0, len(decs))
 	used := 0
+	considered := 0
 	for _, m := range decs {
 		// The Key is the lookup handle (get_memory/supersedes) and MUST be
 		// surfaced verbatim — never truncated, or the client gets a dangling id.
@@ -413,6 +411,13 @@ func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
 		if len(m.Key) > decisionKeyMax {
 			continue
 		}
+		// Count cap applies to VALID decisions only — apply it AFTER the oversized
+		// -key filter, or 40 oversized recent keys would consume the cap and starve
+		// a valid decision despite unused capacity.
+		if max > 0 && considered >= max {
+			break
+		}
+		considered++
 		// Area IS bounded — it is display-only payload, not a lookup handle.
 		s := DecisionSummary{Key: m.Key}
 		var dv db.DecisionValue
