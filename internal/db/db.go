@@ -293,11 +293,10 @@ func migrate(conn *sql.DB) error {
 	// Backfill projects from existing agents
 	backfillProjects(conn)
 
-	// Ensure the 'default' project row always exists — CLI and MCP tools accept
-	// project="default" implicitly but never created the row, so the UI hid
-	// activity that happened in the implicit default scope.
+	// The implicit 'default' project is gone: every call must resolve a real
+	// project or be rejected (guardIdentity). The row is no longer auto-created,
+	// and migratePurgeDefaultProject removes any legacy 'default' data on boot.
 	nowStr := time.Now().UTC().Format("2006-01-02T15:04:05Z")
-	_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES ('default', 'forest/1', ?)", nowStr)
 
 	// Typed-ticket enforcement flag (V-lifecycle). Per-project opt-in: the relay
 	// serves many projects, so a hard "no goal/AC/dod → refuse" default would
@@ -943,6 +942,11 @@ func migrate(conn *sql.DB) error {
 	// Canonicalize project names everywhere (lockstep with the handlers'
 	// NormalizeProject) so an upgrade doesn't split existing namespaces.
 	migrateNormalizeProjects(conn)
+
+	// Purge the retired 'default' catch-all project and its data. Runs after
+	// normalization so any 'Default'/'DEFAULT' spellings have already folded to
+	// 'default'. Idempotent: once purged the deletes match nothing.
+	migratePurgeDefaultProject(conn)
 
 	return nil
 }

@@ -12,27 +12,36 @@ func ctxWith(agent, project string) context.Context {
 	return context.WithValue(ctx, projectKey, project)
 }
 
-// TestGuardRegistered verifies the RELAY_REQUIRE_REGISTERED gate: anonymous and
-// unregistered identities are rejected before the wrapped handler runs, while a
-// registered agent passes through.
-func TestGuardRegistered(t *testing.T) {
+// TestGuardIdentity verifies the always-on identity gate: a call with no
+// resolvable project or agent, or an agent not registered in the project, is
+// rejected before the wrapped handler runs; a registered agent passes through.
+func TestGuardIdentity(t *testing.T) {
 	h := testHandlers(t)
-	h.requireRegistered = true
 
 	ran := false
 	next := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		ran = true
 		return mcp.NewToolResultText("ok"), nil
 	}
-	guarded := h.guardRegistered(next)
+	guarded := h.guardIdentity(next)
 
-	// anonymous → rejected, next never runs
-	res, _ := guarded(ctxWith("anonymous", "p1"), call(nil))
+	// no project resolvable → rejected, next never runs
+	res, _ := guarded(ctxWith("", ""), call(nil))
 	if !res.IsError {
-		t.Fatal("anonymous identity should be rejected")
+		t.Fatal("call with no project should be rejected")
 	}
 	if ran {
-		t.Fatal("wrapped handler must not run for anonymous")
+		t.Fatal("wrapped handler must not run without a project")
+	}
+
+	// project present but no agent identity → rejected
+	ran = false
+	res, _ = guarded(ctxWith("", "p1"), call(nil))
+	if !res.IsError {
+		t.Fatal("call with no agent identity should be rejected")
+	}
+	if ran {
+		t.Fatal("wrapped handler must not run without an identity")
 	}
 
 	// unregistered name → rejected
@@ -66,15 +75,28 @@ func TestGuardRegistered(t *testing.T) {
 	}
 }
 
-// TestGuardDisabledByDefault confirms toolRegistry leaves handlers unwrapped
-// when the flag is off (no identity enforcement).
-func TestToolRegistryNoWrapByDefault(t *testing.T) {
+// TestGuardInstalledOnMutatingTools confirms toolRegistry now wraps every
+// mutating tool with the identity gate (no opt-in flag): an unidentified
+// send_message is rejected, while a bootstrap tool like create_project is not
+// wrapped and stays reachable.
+func TestGuardInstalledOnMutatingTools(t *testing.T) {
 	h := testHandlers(t)
-	// requireRegistered defaults false
+	var sendGuarded, createProjectWrapped bool
 	for _, rt := range h.toolRegistry() {
-		_ = rt // handlers are the bare h.HandleX; nothing to assert beyond no panic
+		switch rt.Tool.Name {
+		case "send_message":
+			// An unidentified call must be rejected by the wrapper.
+			res, _ := rt.Handler(ctxWith("", ""), call(map[string]any{"to": "x", "content": "y"}))
+			sendGuarded = res != nil && res.IsError
+		case "create_project":
+			createProjectWrapped = true // presence in mutatingTools would wrap it; asserted below
+		}
 	}
-	if h.requireRegistered {
-		t.Fatal("requireRegistered should default to false")
+	if !sendGuarded {
+		t.Fatal("send_message should be identity-guarded in the registry")
 	}
+	if mutatingTools["create_project"] {
+		t.Fatal("create_project must stay a bootstrap tool (unguarded)")
+	}
+	_ = createProjectWrapped
 }

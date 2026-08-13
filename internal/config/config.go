@@ -22,12 +22,10 @@ type Config struct {
 	MaxBody     int64    // RELAY_MAX_BODY: max request body in bytes (default 1 MiB; 0 disables)
 	RateLimit   int      // RELAY_RATE_LIMIT: requests/minute per IP (opt-in; 0 = off)
 
-	// RequireRegistered (RELAY_REQUIRE_REGISTERED) rejects mutating tool calls
-	// whose acting agent is "anonymous" or not registered in the project. Opt-in
-	// (default off) — the loopback trust model still treats the declared `as`/
-	// ?agent= identity as authoritative; this only stops silent anonymous and
-	// typo'd writes from polluting the bus. Reads and register_agent stay open.
-	RequireRegistered bool // RELAY_REQUIRE_REGISTERED
+	// Identity enforcement is no longer opt-in: every mutating tool call must
+	// resolve a real agent registered in a real project (guardIdentity), and the
+	// former RELAY_REQUIRE_REGISTERED env var is retired along with the
+	// anonymous/default fallbacks it used to guard against.
 
 	// LinearMode toggles Linear-SSOT mirror mode. Default false = degraded/native
 	// mode (tasks live in the relay DB, kanban is writable). Surfaced via
@@ -108,10 +106,6 @@ func Load() Config {
 
 	if v := strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_LINEAR_MODE"))); v == "1" || v == "true" || v == "yes" {
 		cfg.LinearMode = true
-	}
-
-	if v := strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_REQUIRE_REGISTERED"))); v == "1" || v == "true" || v == "yes" {
-		cfg.RequireRegistered = true
 	}
 
 	// Federation peers: JSON array in RELAY_FEDERATION_PEERS. A malformed value or

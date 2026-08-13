@@ -37,10 +37,6 @@ type Handlers struct {
 	budgetMu      sync.Mutex
 	budgetAlerted map[string]time.Time
 
-	// requireRegistered gates mutating tools behind a registered acting agent
-	// (RELAY_REQUIRE_REGISTERED). Set from config in relay.New before dispatch.
-	requireRegistered bool
-
 	// registerLimiters throttles register_agent per (project, name) identity so a
 	// runaway client loop (e.g. a headless job re-registering on every tick) can't
 	// flood the agents table. Keyed lazily, swept on a timer like the HTTP-layer

@@ -226,13 +226,9 @@ func startServer() {
 	if cfg.MaxBody > 0 {
 		bodyStatus = fmt.Sprintf("%dKB", cfg.MaxBody/1024)
 	}
-	requireReg := "off"
-	if cfg.RequireRegistered {
-		requireReg = "on"
-	}
 	log.Printf("agent-relay starting on %s", addr)
-	log.Printf("  auth: %s | cors: %s | max body: %s | rate limit: %s | require-registered: %s",
-		authStatus, corsStatus, bodyStatus, rateLimitStatus, requireReg)
+	log.Printf("  auth: %s | cors: %s | max body: %s | rate limit: %s | identity: enforced (no anonymous/default)",
+		authStatus, corsStatus, bodyStatus, rateLimitStatus)
 
 	// serveErr surfaces a bind/listen failure (e.g. EADDRINUSE when a stale
 	// relay still holds the port after sleep/wake) so we exit non-zero instead
