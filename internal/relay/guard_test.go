@@ -75,6 +75,64 @@ func TestGuardIdentity(t *testing.T) {
 	}
 }
 
+type fakeSession string
+
+func (f fakeSession) SessionID() string { return string(f) }
+
+func ctxWithSession(agent, project, sessionID string) context.Context {
+	return context.WithValue(ctxWith(agent, project), sessionKey, fakeSession(sessionID))
+}
+
+// TestGuardIdentityBinding verifies the Option-A binding: a connection whose
+// session is provably bound to one agent cannot act as another; an unknown
+// session fails open (the write proceeds) so legitimate traffic is never dropped.
+func TestGuardIdentityBinding(t *testing.T) {
+	h := testHandlers(t)
+	// Register alice on session sA and bob on session sB, both in p1. Registering
+	// with a session in context populates the reverse session→agent binding.
+	if r, _ := h.HandleRegisterAgent(ctxWithSession("", "p1", "sA"), call(map[string]any{"name": "alice", "role": "dev"})); r.IsError {
+		t.Fatalf("register alice: %s", expectError(t, r))
+	}
+	if r, _ := h.HandleRegisterAgent(ctxWithSession("", "p1", "sB"), call(map[string]any{"name": "bob", "role": "dev"})); r.IsError {
+		t.Fatalf("register bob: %s", expectError(t, r))
+	}
+
+	ran := false
+	next := func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		ran = true
+		return mcp.NewToolResultText("ok"), nil
+	}
+	guarded := h.guardIdentity(next)
+
+	// alice acting as herself from her own session → passes
+	ran = false
+	if res, _ := guarded(ctxWithSession("", "p1", "sA"), call(map[string]any{"as": "alice"})); res != nil && res.IsError {
+		t.Fatalf("alice on her own session should pass: %s", res.Content[0].(mcp.TextContent).Text)
+	}
+	if !ran {
+		t.Fatal("legit self-identified write should run")
+	}
+
+	// alice's session claiming as:bob → impersonation, rejected
+	ran = false
+	res, _ := guarded(ctxWithSession("", "p1", "sA"), call(map[string]any{"as": "bob"}))
+	if !res.IsError {
+		t.Fatal("session bound to alice must not act as bob")
+	}
+	if ran {
+		t.Fatal("impersonating write must not run")
+	}
+
+	// unknown session claiming as:alice → fail open, passes (alice is registered)
+	ran = false
+	if res, _ := guarded(ctxWithSession("", "p1", "sX"), call(map[string]any{"as": "alice"})); res != nil && res.IsError {
+		t.Fatalf("unknown session should fail open: %s", res.Content[0].(mcp.TextContent).Text)
+	}
+	if !ran {
+		t.Fatal("write from an unbound session should proceed (fail-open)")
+	}
+}
+
 // TestGuardInstalledOnMutatingTools confirms toolRegistry now wraps every
 // mutating tool with the identity gate (no opt-in flag): an unidentified
 // send_message is rejected, while a bootstrap tool like create_project is not

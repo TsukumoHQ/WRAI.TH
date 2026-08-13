@@ -179,6 +179,18 @@ func (h *Handlers) guardIdentity(next server.ToolHandlerFunc) server.ToolHandler
 		if agent == nil {
 			return mcp.NewToolResultError(fmt.Sprintf("agent %q is not registered in project %q — call register_agent first.", from, project)), nil
 		}
+		// Identity binding (best-effort, fail-open): if this MCP connection's
+		// session is provably bound to a DIFFERENT agent in the project, the
+		// caller is acting under a name that is not theirs — reject. When the
+		// session is unknown (unbound, or the in-memory registry was cleared by a
+		// restart), we cannot prove impersonation, so the write proceeds — the
+		// relay is the fleet's SSOT and must never drop a legitimate write on a
+		// guess. Bulletproof anti-theft would need a per-agent secret token.
+		if sess := sessionFromContext(ctx); sess != nil {
+			if owner, ok := h.registry.AgentForSession(project, sess.SessionID()); ok && owner != from {
+				return mcp.NewToolResultError(fmt.Sprintf("identity mismatch: this connection is registered as %q in project %q and cannot act as %q — use your own identity (or register_agent as %q).", owner, project, from, from)), nil
+			}
+		}
 		return next(ctx, req)
 	}
 }
