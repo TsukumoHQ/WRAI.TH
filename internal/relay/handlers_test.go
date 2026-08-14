@@ -387,6 +387,176 @@ func TestSendMessageMissingTo(t *testing.T) {
 	expectError(t, res)
 }
 
+// --- Unknown Recipient Tests (reject-unknown-recipient) ---
+
+// TestSendMessageUnknownRecipientRejected is the core guarantee: a 'to' that
+// was never registered must come back as an error, not a delivered message-id
+// that silently goes nowhere.
+func TestSendMessageUnknownRecipientRejected(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-z", "content": "hello",
+	}))
+	msg := expectError(t, res)
+	if !strings.Contains(msg, "bot-z") {
+		t.Errorf("expected error to mention unknown recipient 'bot-z', got: %s", msg)
+	}
+}
+
+// TestSendMessageUnknownRecipientSuggestion covers the CTO's actual incident:
+// a near-miss name (typo/close variant) should be offered as a "did you mean"
+// hint so the sender catches it immediately instead of losing an hour.
+func TestSendMessageUnknownRecipientSuggestion(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "backend-lead"}))
+
+	// "backend-leadd" is one edit away from the registered "backend-lead".
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "backend-leadd", "content": "hello",
+	}))
+	msg := expectError(t, res)
+	if !strings.Contains(msg, "Did you mean") || !strings.Contains(msg, "backend-lead") {
+		t.Errorf("expected a 'Did you mean: backend-lead' hint, got: %s", msg)
+	}
+}
+
+// TestSendMessageUnknownRecipientTokenInsertionSuggestion is the CTO's exact
+// incident pair — 'frontend-lead' vs the registered 'frontend-tech-lead' —
+// which is 5 Levenshtein edits apart (misses the edit-distance heuristic
+// entirely) but is exactly the target's tokens with 'tech' inserted in the
+// middle. The token-aware heuristic must catch it: same first token
+// ('frontend'), target tokens a subsequence of the candidate's tokens.
+func TestSendMessageUnknownRecipientTokenInsertionSuggestion(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "frontend-tech-lead"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "frontend-lead", "content": "hello",
+	}))
+	msg := expectError(t, res)
+	if !strings.Contains(msg, "Did you mean") || !strings.Contains(msg, "frontend-tech-lead") {
+		t.Errorf("expected a 'Did you mean: frontend-tech-lead' hint, got: %s", msg)
+	}
+}
+
+// TestSendMessageUnknownRecipientNoSuggestionUnrelatedName is the true
+// "nothing close" case: neither the edit-distance heuristic nor the
+// token-aware heuristic should fire for a name that shares no tokens and no
+// near-spelling with anything on the roster.
+func TestSendMessageUnknownRecipientNoSuggestionUnrelatedName(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "backend-lead"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "frontend-tech-lead"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "paymentbot", "content": "hello",
+	}))
+	msg := expectError(t, res)
+	if !strings.Contains(msg, "paymentbot") {
+		t.Errorf("expected error to mention 'paymentbot', got: %s", msg)
+	}
+	if strings.Contains(msg, "Did you mean") {
+		t.Errorf("expected no suggestion for a wholly unrelated name, got: %s", msg)
+	}
+}
+
+// TestSendMessageKnownRecipientStillSucceeds is the no-regression check: a
+// valid, registered recipient must still go through.
+func TestSendMessageKnownRecipientStillSucceeds(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b", "role": "qa"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "hello",
+	}))
+	if res.IsError {
+		t.Fatalf("expected success for a registered recipient: %s", expectError(t, res))
+	}
+}
+
+// TestSendMessageSleepingRecipientAccepted: sleeping is a re-bindable status,
+// not a rejection — the identity is real and delivery queues legitimately.
+func TestSendMessageSleepingRecipientAccepted(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b", "role": "qa"}))
+	_, _ = h.HandleSleepAgent(ctx, call(map[string]any{"project": "p1", "as": "bot-b"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "hello",
+	}))
+	if res.IsError {
+		t.Fatalf("expected sleeping recipient to still be accepted: %s", expectError(t, res))
+	}
+}
+
+// TestSendMessageInactiveRecipientAccepted mirrors the sleeping case for the
+// 'inactive' status (auto-marked stale, also re-bindable).
+func TestSendMessageInactiveRecipientAccepted(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-c", "role": "qa"}))
+	_, _ = h.HandleDeactivateAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-c"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-c", "content": "hello",
+	}))
+	if res.IsError {
+		t.Fatalf("expected inactive recipient to still be accepted: %s", expectError(t, res))
+	}
+}
+
+// TestSendMessageDeletedRecipientRejected: unlike sleeping/inactive, a
+// soft-deleted agent is gone for good — messaging it must be rejected same
+// as an unregistered name.
+func TestSendMessageDeletedRecipientRejected(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-d", "role": "qa"}))
+	_, _ = h.HandleDeleteAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-d"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-d", "content": "hello",
+	}))
+	msg := expectError(t, res)
+	if !strings.Contains(msg, "bot-d") {
+		t.Errorf("expected error to mention deleted recipient 'bot-d', got: %s", msg)
+	}
+}
+
+// TestSendCrossProjectUnknownRecipientRejected checks the sendCrossProject
+// symmetry: a 'to' that doesn't exist in the TARGET project must be rejected
+// the same way a local unknown recipient is, and a valid executive target
+// must still succeed (no regression).
+func TestSendCrossProjectUnknownRecipientRejected(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "alice", "is_executive": true}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p2", "name": "bob", "is_executive": true}))
+
+	// Unknown target in p2 → rejected, error names the target project.
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "alice", "target_project": "p2", "to": "carol", "content": "hi",
+	}))
+	msg := expectError(t, res)
+	if !strings.Contains(msg, "carol") || !strings.Contains(msg, "p2") {
+		t.Errorf("expected error to mention unknown recipient 'carol' in project 'p2', got: %s", msg)
+	}
+
+	// Known executive target in p2 → still succeeds.
+	res2, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "alice", "target_project": "p2", "to": "bob", "content": "hi",
+	}))
+	if res2.IsError {
+		t.Fatalf("expected cross-project send to a known executive to succeed: %s", expectError(t, res2))
+	}
+}
+
 // TestDMReplyPathGrant is the TSU-75 guarantee: receiving a DM opens a scoped
 // reply-path back to the sender, so an agent can always answer a message even
 // across the team auth-wall — and the grant does NOT open it to anyone else.
