@@ -345,8 +345,14 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 
 	// Validate target exists and is executive
 	target, err := h.db.GetAgent(dstProject, to)
-	if err != nil || target == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("target '%s' not found in project '%s'", to, dstProject)), nil
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to resolve target '%s' in project '%s': %v", to, dstProject, err)), nil
+	}
+	// Same guard as the local send path: a target that was never registered
+	// (or was soft-deleted) in the destination project is rejected rather than
+	// silently accepted — see unknownCrossProjectRecipientError.
+	if target == nil || target.Status == "deleted" {
+		return mcp.NewToolResultError(h.unknownCrossProjectRecipientError(dstProject, to)), nil
 	}
 	if !target.IsExecutive {
 		return mcp.NewToolResultError(fmt.Sprintf("cross-project messaging requires target '%s' in project '%s' to be is_executive=true", to, dstProject)), nil

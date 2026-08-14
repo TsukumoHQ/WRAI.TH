@@ -95,6 +95,23 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		return mcp.NewToolResultError("to is required (or provide conversation_id)"), nil
 	}
 
+	// Reject an unknown recipient up front — this must run regardless of
+	// hasTeams (unlike the permission check below), because an unregistered
+	// 'to' is otherwise accepted silently: a message-id comes back, zero
+	// deliveries happen, nobody is ever alerted. Only a name that was never
+	// registered, or was soft-deleted, is rejected — 'sleeping'/'inactive'
+	// agents are re-bindable identities and their delivery legitimately
+	// queues.
+	if conversationID == nil && to != "*" && to != "user" && !strings.HasPrefix(to, "team:") {
+		recipient, err := h.db.GetAgent(project, to)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to resolve recipient '%s': %v", to, err)), nil
+		}
+		if recipient == nil || recipient.Status == "deleted" {
+			return mcp.NewToolResultError(h.unknownRecipientError(project, to)), nil
+		}
+	}
+
 	// Permission check: only enforce when teams are configured (bypass for "user" — always reachable)
 	if conversationID == nil && to != "*" && to != "user" && !strings.HasPrefix(to, "team:") {
 		hasTeams, _ := h.db.HasTeams(project)
