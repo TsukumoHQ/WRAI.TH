@@ -92,6 +92,13 @@ func validProjectName(name string) bool {
 	if len(name) == 0 || len(name) > 64 {
 		return false
 	}
+	// "default" is a retired reserved word — the former silent catch-all. Names
+	// are normalized (lowercased) before they reach here, so a case-insensitive
+	// literal check suffices to stop anyone re-creating the catch-all as a real
+	// project through the front door.
+	if strings.ToLower(name) == "default" {
+		return false
+	}
 	seenAt := false
 	for i, r := range name {
 		isAlnum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')

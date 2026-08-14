@@ -943,10 +943,19 @@ func migrate(conn *sql.DB) error {
 	// NormalizeProject) so an upgrade doesn't split existing namespaces.
 	migrateNormalizeProjects(conn)
 
-	// Purge the retired 'default' catch-all project and its data. Runs after
-	// normalization so any 'Default'/'DEFAULT' spellings have already folded to
-	// 'default'. Idempotent: once purged the deletes match nothing.
-	migratePurgeDefaultProject(conn)
+	// Purge the retired 'default' catch-all project and its data — ONE-SHOT,
+	// guarded by a settings marker. Must NOT run on every boot: 'default' is not
+	// a reserved storage key, and REST/DB paths that have not yet been migrated
+	// off their own = "default" fallback can still write rows there at runtime;
+	// an every-boot purge would silently delete such live data on the next
+	// restart. Runs once on upgrade (after normalization folds any 'Default'
+	// spellings), cleaning the legacy catch-all, then never again.
+	var purgedDefault string
+	_ = conn.QueryRow("SELECT value FROM settings WHERE key = 'purge_default_project'").Scan(&purgedDefault)
+	if purgedDefault == "" {
+		migratePurgeDefaultProject(conn)
+		_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES ('purge_default_project', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'")
+	}
 
 	return nil
 }

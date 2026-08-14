@@ -142,6 +142,14 @@ func TestRegisterAgentRejectsInvalidProjectName(t *testing.T) {
 			t.Errorf("%q must be invalid", bad)
 		}
 	}
+
+	// "default" is a retired reserved word — the former silent catch-all — and
+	// must never be re-creatable as a real project through registration.
+	for _, reserved := range []string{"default", "Default", "DEFAULT"} {
+		if validProjectName(reserved) {
+			t.Errorf("reserved project name %q must be invalid", reserved)
+		}
+	}
 }
 
 // TestRegisterAgentRateLimit reproduces the runaway classify-loop incident: the

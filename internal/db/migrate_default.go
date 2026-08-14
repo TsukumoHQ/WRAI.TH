@@ -14,8 +14,14 @@ import (
 //
 // Tables are discovered live from sqlite_master (any table carrying a `project`
 // column), so future tables are covered without editing this migration. The
-// projects registry itself keys on `name`. Runs on every boot; idempotent —
-// once purged the WHERE clauses match nothing.
+// projects registry itself keys on `name`.
+//
+// Called ONCE, gated by the 'purge_default_project' settings marker in migrate()
+// — deliberately NOT on every boot: until every non-MCP path (REST, connectors)
+// is migrated off its own = "default" fallback, a row can still be written to
+// 'default' at runtime, and an every-boot purge would silently delete it on the
+// next restart. The function itself is idempotent (a re-run matches nothing), so
+// it is also safe to call directly in tests.
 //
 // Internal pseudo-projects (names starting with '_', e.g. the vault's '_relay')
 // are never touched. This only ever targets the literal 'default'.
