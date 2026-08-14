@@ -18,7 +18,10 @@ func TestMigrateNormalizeProjects(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	now := time.Now().UTC().Format(time.RFC3339)
-	seed := []struct{ q string; args []any }{
+	seed := []struct {
+		q    string
+		args []any
+	}{
 		// Old spellings.
 		{"INSERT INTO projects (name, planet_type, created_at) VALUES (?, ?, ?)", []any{"testDuSoir", "ice/1", now}},
 		{"INSERT INTO agents (id, name, role, registered_at, last_seen, project) VALUES ('a1','bot','', ?, ?, 'testDuSoir')", []any{now, now}},
