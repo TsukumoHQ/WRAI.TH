@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"agent-relay/internal/config"
 	"agent-relay/internal/db"
 	"agent-relay/internal/ingest"
+	"agent-relay/internal/logging"
 	"agent-relay/internal/relay"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -75,15 +77,15 @@ func main() {
 // MCP registry). Exposes the same tools as the HTTP server; logs go to stderr so
 // they never corrupt the JSON-RPC stream on stdout. Blocks until the client closes.
 func startStdioMCP() {
-	log.SetFlags(0)
-	log.SetOutput(os.Stderr)
+	logging.Setup()
 
 	cfg := config.Load()
 	cfg.Version = Version
 
 	database, err := db.New()
 	if err != nil {
-		log.Fatalf("failed to init database: %v", err)
+		slog.Error("failed to init database", "err", err)
+		os.Exit(1)
 	}
 	defer func() { _ = database.Close() }()
 
@@ -104,7 +106,8 @@ func startStdioMCP() {
 		},
 	})
 	if err != nil {
-		log.Fatalf("failed to init ingester: %v", err)
+		slog.Error("failed to init ingester", "err", err)
+		os.Exit(1)
 	}
 	defer ingester.Stop()
 
@@ -112,12 +115,13 @@ func startStdioMCP() {
 	r.Version = Version
 
 	if err := server.ServeStdio(r.MCPServer); err != nil {
-		log.Fatalf("stdio MCP server error: %v", err)
+		slog.Error("stdio MCP server error", "err", err)
+		os.Exit(1)
 	}
 }
 
 func startServer() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
+	logging.Setup()
 
 	cfg := config.Load()
 	cfg.Version = Version
@@ -127,7 +131,9 @@ func startServer() {
 	// teams when a stray launchd relay came up on the same database).
 	if dbPath, perr := db.DBPath(); perr == nil {
 		if release, lerr := acquireServeLock(dbPath + ".lock"); lerr != nil {
-			log.Fatalf("another agent-relay is already serving %s — refusing to start a second writer (it corrupts the DB). Stop the other instance first.", dbPath)
+			slog.Error("another agent-relay is already serving this DB — refusing to start a second writer (it corrupts the DB); stop the other instance first",
+				"db", dbPath, "err", lerr)
+			os.Exit(1)
 		} else {
 			defer release()
 		}
@@ -135,7 +141,8 @@ func startServer() {
 
 	database, err := db.New()
 	if err != nil {
-		log.Fatalf("failed to init database: %v", err)
+		slog.Error("failed to init database", "err", err)
+		os.Exit(1)
 	}
 	defer func() { _ = database.Close() }()
 
@@ -156,7 +163,8 @@ func startServer() {
 		},
 	})
 	if err != nil {
-		log.Fatalf("failed to init ingester: %v", err)
+		slog.Error("failed to init ingester", "err", err)
+		os.Exit(1)
 	}
 	defer ingester.Stop()
 
@@ -178,7 +186,9 @@ func startServer() {
 	// Refuse to expose a non-loopback bind without authentication — otherwise the
 	// entire API/MCP surface is open to everything on the network.
 	if !isLoopbackHost(host) && cfg.APIKey == "" {
-		log.Fatalf("refusing to bind %s without auth: set RELAY_API_KEY to expose on a non-loopback address, or unset RELAY_BIND to bind 127.0.0.1", addr)
+		slog.Error("refusing to bind without auth: set RELAY_API_KEY to expose on a non-loopback address, or unset RELAY_BIND to bind 127.0.0.1",
+			"addr", addr)
+		os.Exit(1)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -244,10 +254,12 @@ func startServer() {
 	select {
 	case err := <-serveErr:
 		if isAddrInUse(err) {
-			log.Fatalf("cannot bind %s: address already in use — another agent-relay is still running. "+
-				"Stop it first: lsof -ti tcp:%s | xargs kill -9", addr, port)
+			slog.Error("cannot bind: address already in use — another agent-relay is still running; stop it first: lsof -ti tcp:<port> | xargs kill -9",
+				"addr", addr, "port", port)
+			os.Exit(1)
 		}
-		log.Fatalf("server failed: %v", err)
+		slog.Error("server failed", "err", err)
+		os.Exit(1)
 	case <-ctx.Done():
 	}
 	close(cleanupDone)
