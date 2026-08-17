@@ -239,6 +239,23 @@ func (d *DB) AcknowledgeDeliveryByMessage(messageID, agentName, project string) 
 	return err
 }
 
+// AcknowledgeConversationDeliveries acks every still-open delivery to an agent
+// for messages in a conversation. mark_read(conversation_id) writes
+// conversation_reads but historically never touched deliveries, so a
+// conversation's messages stayed queued/surfaced and kept re-surfacing until an
+// explicit ack_delivery (WRAITH-2). Acking here makes mark_read a real clear for
+// conversation messages, matching what the message_ids branch already does.
+func (d *DB) AcknowledgeConversationDeliveries(conversationID, agentName, project string) error {
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
+	_, err := d.conn.Exec(
+		`UPDATE deliveries SET state = 'acknowledged', acknowledged_at = ?
+		 WHERE to_agent = ? AND project = ? AND state IN ('queued', 'surfaced')
+		   AND message_id IN (SELECT id FROM messages WHERE conversation_id = ?)`,
+		now, agentName, project, conversationID,
+	)
+	return err
+}
+
 // ExpireDeliveries marks deliveries for expired messages.
 func (d *DB) ExpireDeliveries() (int, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
