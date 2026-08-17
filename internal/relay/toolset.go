@@ -103,6 +103,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: listTeamsTool(), Handler: h.HandleListTeams}, "teams"},
 		{server.ServerTool{Tool: addTeamMemberTool(), Handler: h.HandleAddTeamMember}, "teams"},
 		{server.ServerTool{Tool: removeTeamMemberTool(), Handler: h.HandleRemoveTeamMember}, "teams"},
+		{server.ServerTool{Tool: deleteTeamTool(), Handler: h.HandleDeleteTeam}, "teams"},
 		{server.ServerTool{Tool: addNotifyChannelTool(), Handler: h.HandleAddNotifyChannel}, "teams"},
 
 		// File locks disabled: worktree isolation + merge conflicts replace
@@ -146,7 +147,7 @@ var mutatingTools = map[string]bool{
 	"register_profile": true,
 	"deactivate_agent": true, "delete_agent": true, "sleep_agent": true,
 	"create_org": true, "create_team": true, "add_team_member": true,
-	"remove_team_member": true, "add_notify_channel": true,
+	"remove_team_member": true, "delete_team": true, "add_notify_channel": true,
 	"create_conversation": true, "invite_to_conversation": true,
 	"leave_conversation": true, "archive_conversation": true,
 	// create_project is intentionally absent: it is a bootstrap tool. Requiring a

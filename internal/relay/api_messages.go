@@ -72,6 +72,28 @@ func (r *Relay) apiGetAgentHealth(w http.ResponseWriter, req *http.Request) {
 	writeJSON(w, data)
 }
 
+// apiGetUnreadCount is the HTTP equivalent of the get_inbox unread count so a
+// poller can check for new mail without an MCP round-trip and without draining
+// the inbox (non-mutating — no deliveries are marked surfaced). Issue #17.
+// Path: GET /api/inbox/unread-count?agent=<name>&project=<p>
+func (r *Relay) apiGetUnreadCount(w http.ResponseWriter, req *http.Request) {
+	agent := strings.ToLower(req.URL.Query().Get("agent"))
+	if agent == "" {
+		apiError(w, http.StatusBadRequest, "agent query param required", nil)
+		return
+	}
+	project := req.URL.Query().Get("project")
+	if project == "" {
+		project = "default"
+	}
+	n, err := r.DB.UnreadCountForAgent(project, agent)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to get unread count", err)
+		return
+	}
+	writeJSON(w, map[string]any{"agent": agent, "project": project, "unread": n})
+}
+
 // apiPostMessage is the plain-REST send endpoint (owner directive: dokan scripts
 // notify the relay over REST, never the /mcp JSON-RPC call_tool dispatcher). It
 // reuses the same delivery primitives as send_message for the cases a notifier

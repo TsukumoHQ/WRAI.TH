@@ -78,19 +78,19 @@ func runInit(args []string) {
 
 	// Check if file already exists
 	if _, err := os.Stat(mcpPath); err == nil {
-		// File exists — try to merge
+		// File exists — merge losslessly. Existing entries are kept as raw JSON so
+		// stdio-style servers (command/args/env) and any other keys survive the
+		// round-trip; typing them into the narrow http-only struct would drop
+		// those fields and corrupt the user's config (issue #20).
 		existing, err := os.ReadFile(mcpPath)
 		if err == nil {
-			var cfg mcpConfig
-			if json.Unmarshal(existing, &cfg) == nil {
-				if entry, exists := cfg.MCPServers["agent-relay"]; exists {
+			if root, already, existingURL, ok := mergeRelayServer(existing, url); ok {
+				if already {
 					fmt.Printf("agent-relay already configured in %s\n", mcpPath)
-					fmt.Printf("  url: %s\n", entry.URL)
+					fmt.Printf("  url: %s\n", existingURL)
 					return
 				}
-				// Add agent-relay to existing config
-				cfg.MCPServers["agent-relay"] = mcpServerEntry{Type: "http", URL: url}
-				writeConfig(mcpPath, cfg)
+				writeConfig(mcpPath, root)
 				fmt.Printf("added agent-relay to existing %s\n", mcpPath)
 				fmt.Printf("  url: %s\n", url)
 				return
@@ -127,7 +127,36 @@ func runInit(args []string) {
 	fmt.Println("  3. Call register_agent() to announce your presence")
 }
 
-func writeConfig(path string, cfg mcpConfig) {
+// mergeRelayServer adds the agent-relay entry to an existing .mcp.json without
+// disturbing anything else. Existing servers are kept as raw JSON so stdio-style
+// entries (command/args/env) and any unknown top-level keys survive the
+// round-trip — the http-only struct would silently drop those fields (issue #20).
+// ok=false means the input wasn't parseable JSON (caller falls back to a fresh
+// config). already=true means agent-relay was present; existingURL is its url.
+func mergeRelayServer(existing []byte, url string) (root map[string]json.RawMessage, already bool, existingURL string, ok bool) {
+	if json.Unmarshal(existing, &root) != nil {
+		return nil, false, "", false
+	}
+	var servers map[string]json.RawMessage
+	if raw, has := root["mcpServers"]; has {
+		_ = json.Unmarshal(raw, &servers)
+	}
+	if servers == nil {
+		servers = map[string]json.RawMessage{}
+	}
+	if raw, exists := servers["agent-relay"]; exists {
+		var entry mcpServerEntry
+		_ = json.Unmarshal(raw, &entry)
+		return root, true, entry.URL, true
+	}
+	entryJSON, _ := json.Marshal(mcpServerEntry{Type: "http", URL: url})
+	servers["agent-relay"] = entryJSON
+	serversJSON, _ := json.Marshal(servers)
+	root["mcpServers"] = serversJSON
+	return root, false, "", true
+}
+
+func writeConfig(path string, cfg any) {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

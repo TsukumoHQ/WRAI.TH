@@ -286,31 +286,84 @@ func (d *DB) SetAgentCwd(project, name, cwd string) error {
 	return nil
 }
 
-// RebindSessionByCwd points the agent bound to cwd at a new session_id (Claude
-// Code rotates session_id on /clear; cwd is stable). Returns the agent's project
-// and name, and found=false when no active agent owns that cwd. cwd is globally
-// unique (one agent = one worktree), so no project scoping is needed.
-func (d *DB) RebindSessionByCwd(cwd, sessionID string) (project, name string, found bool, err error) {
-	if cwd == "" {
-		return "", "", false, nil
+// RebindSession points an agent at a new session_id (Claude Code rotates
+// session_id on /clear; cwd is stable). Identity is resolved in this order:
+//
+//  1. agentName, when non-empty — the launcher forwarded RELAY_AGENT and knows
+//     exactly which agent it is starting. cwd, when present, scopes the project
+//     so a name reused across projects stays distinct. This is the correct path
+//     for fleets that deliberately share one worktree.
+//  2. cwd alone — only safe when cwd uniquely identifies an agent. If more than
+//     one non-deleted agent shares cwd the key is AMBIGUOUS: the function refuses
+//     to guess (found=false, ambiguous=true) rather than bind a wrong identity
+//     and detach a correctly-bound session. A silent miss is recoverable; a
+//     confident wrong identity is not.
+//
+// The session_id UPDATE only fires on a unique match, so an ambiguous cwd can
+// never overwrite (and thus mis-attribute) another agent's live binding.
+func (d *DB) RebindSession(cwd, agentName, sessionID string) (project, name string, found, ambiguous bool, err error) {
+	if cwd == "" && agentName == "" {
+		return "", "", false, false, nil
 	}
-	row := d.ro().QueryRow(
-		"SELECT project, name FROM agents WHERE cwd = ? AND status != 'deleted' LIMIT 1",
-		cwd,
-	)
+
+	var row *sql.Row
+	switch {
+	case agentName != "" && cwd != "":
+		row = d.ro().QueryRow(
+			"SELECT project, name FROM agents WHERE name = ? AND cwd = ? AND status != 'deleted' LIMIT 1",
+			agentName, cwd)
+	case agentName != "":
+		row = d.ro().QueryRow(
+			"SELECT project, name FROM agents WHERE name = ? AND status != 'deleted' LIMIT 1",
+			agentName)
+	default:
+		// cwd-only fallback: refuse ambiguous keys.
+		var n int
+		if e := d.ro().QueryRow(
+			"SELECT COUNT(*) FROM agents WHERE cwd = ? AND status != 'deleted'", cwd,
+		).Scan(&n); e != nil {
+			return "", "", false, false, fmt.Errorf("rebind session: count by cwd: %w", e)
+		}
+		if n > 1 {
+			return "", "", false, true, nil // ambiguous — caller logs, binds nothing
+		}
+		row = d.ro().QueryRow(
+			"SELECT project, name FROM agents WHERE cwd = ? AND status != 'deleted' LIMIT 1", cwd)
+	}
+
 	switch e := row.Scan(&project, &name); {
 	case e == sql.ErrNoRows:
-		return "", "", false, nil
+		return "", "", false, false, nil
 	case e != nil:
-		return "", "", false, fmt.Errorf("rebind session by cwd: %w", e)
+		return "", "", false, false, fmt.Errorf("rebind session: %w", e)
 	}
 	if _, e := d.conn.Exec(
 		"UPDATE agents SET session_id = ? WHERE project = ? AND name = ?",
 		sessionID, project, name,
 	); e != nil {
-		return "", "", false, fmt.Errorf("rebind session by cwd: %w", e)
+		return "", "", false, false, fmt.Errorf("rebind session: update: %w", e)
 	}
-	return project, name, true, nil
+	return project, name, true, false, nil
+}
+
+// AgentNamesByCwd lists the non-deleted agents sharing a cwd — used to name the
+// colliding agents in the warning logged when a cwd rebind key is ambiguous.
+func (d *DB) AgentNamesByCwd(cwd string) ([]string, error) {
+	rows, err := d.ro().Query(
+		"SELECT name FROM agents WHERE cwd = ? AND status != 'deleted' ORDER BY name", cwd)
+	if err != nil {
+		return nil, fmt.Errorf("agent names by cwd: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var names []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return nil, fmt.Errorf("agent names by cwd: scan: %w", err)
+		}
+		names = append(names, n)
+	}
+	return names, rows.Err()
 }
 
 // GetOrgTree returns all active agents ordered for tree display (managers first).

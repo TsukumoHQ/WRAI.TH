@@ -124,6 +124,103 @@ func TestIngestSessionStartUnknownCwd(t *testing.T) {
 	}
 }
 
+// Issue #153: N agents deliberately share one worktree. cwd alone cannot
+// identify one, so the relay must refuse to guess rather than bind an arbitrary
+// agent (which mis-attributes token usage and injects a wrong identity).
+func TestIngestSessionStartAmbiguousCwdBindsNothing(t *testing.T) {
+	r := testRelay(t)
+	for _, n := range []string{"frontend", "documentor"} {
+		if _, _, err := r.DB.RegisterAgent("proj", n, "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{}); err != nil {
+			t.Fatalf("register %s: %v", n, err)
+		}
+		if err := r.DB.SetAgentCwd("proj", n, "/wt/shared"); err != nil {
+			t.Fatalf("set cwd %s: %v", n, err)
+		}
+	}
+
+	w := doAPI(r, "POST", "/ingest/session-start", `{"session_id":"unseen","cwd":"/wt/shared","source":"startup"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := decodeJSON(t, w)
+	if resp["bound"] != false {
+		t.Fatalf("expected bound=false on ambiguous cwd, got %v", resp["bound"])
+	}
+	if _, hasAgent := resp["agent"]; hasAgent {
+		t.Errorf("ambiguous cwd must not name an agent, got %v", resp["agent"])
+	}
+	// No agent's session_id may have been touched.
+	for _, n := range []string{"frontend", "documentor"} {
+		a, err := r.DB.GetAgent("proj", n)
+		if err != nil || a == nil {
+			t.Fatalf("get %s: %v", n, err)
+		}
+		if a.SessionID != nil {
+			t.Errorf("%s session_id must stay unbound, got %v", n, *a.SessionID)
+		}
+	}
+}
+
+// Issue #153: an explicit agent (RELAY_AGENT) is authoritative and resolves the
+// shared-worktree case with zero inference.
+func TestIngestSessionStartExplicitAgentWinsOverAmbiguousCwd(t *testing.T) {
+	r := testRelay(t)
+	for _, n := range []string{"frontend", "documentor"} {
+		if _, _, err := r.DB.RegisterAgent("proj", n, "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{}); err != nil {
+			t.Fatalf("register %s: %v", n, err)
+		}
+		if err := r.DB.SetAgentCwd("proj", n, "/wt/shared"); err != nil {
+			t.Fatalf("set cwd %s: %v", n, err)
+		}
+	}
+
+	w := doAPI(r, "POST", "/ingest/session-start", `{"session_id":"doc-session","cwd":"/wt/shared","agent":"documentor"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp := decodeJSON(t, w); resp["bound"] != true || resp["agent"] != "documentor" {
+		t.Fatalf("expected bound documentor, got %v", resp)
+	}
+	doc, _ := r.DB.GetAgent("proj", "documentor")
+	if doc.SessionID == nil || *doc.SessionID != "doc-session" {
+		t.Errorf("documentor session_id not bound, got %v", doc.SessionID)
+	}
+	fe, _ := r.DB.GetAgent("proj", "frontend")
+	if fe.SessionID != nil {
+		t.Errorf("frontend must be untouched, got %v", *fe.SessionID)
+	}
+}
+
+// Issue #17: HTTP unread-count endpoint mirrors the get_inbox count without an
+// MCP round-trip and without draining the inbox.
+func TestAPIUnreadCount(t *testing.T) {
+	r := testRelay(t)
+	if _, _, err := r.DB.RegisterAgent("proj", "bob", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	w := doAPI(r, "GET", "/inbox/unread-count?agent=bob&project=proj", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if resp := decodeJSON(t, w); resp["unread"].(float64) != 0 {
+		t.Fatalf("expected 0 unread, got %v", resp["unread"])
+	}
+
+	if _, err := r.DB.InsertMessageWithDeliveries("proj", "alice", "bob", "note", "hi", "body", "", "normal", 0, nil, nil, []string{"bob"}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	w = doAPI(r, "GET", "/inbox/unread-count?agent=bob&project=proj", "")
+	if resp := decodeJSON(t, w); resp["unread"].(float64) != 1 {
+		t.Fatalf("expected 1 unread, got %v", resp["unread"])
+	}
+
+	// Missing agent param → 400.
+	if w := doAPI(r, "GET", "/inbox/unread-count?project=proj", ""); w.Code != http.StatusBadRequest {
+		t.Errorf("expected 400 without agent, got %d", w.Code)
+	}
+}
+
 func TestIngestActivityNilIngesterIsNoOp(t *testing.T) {
 	r := testRelay(t) // Ingester is nil in the test harness
 	w := doAPI(r, "POST", "/ingest/activity", `{"session_id":"s","type":"tool_start","tool":"Edit"}`)

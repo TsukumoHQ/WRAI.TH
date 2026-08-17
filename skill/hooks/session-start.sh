@@ -13,8 +13,11 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // ""')
 SRC=$(printf '%s' "$INPUT" | jq -r '.source // ""')
 TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // ""')
 [ -z "$SID" ] && exit 0
-PAYLOAD=$(jq -nc --arg s "$SID" --arg c "$CWD" --arg src "$SRC" --arg tp "$TP" \
-  '{session_id:$s, cwd:$c, source:$src, transcript_path:$tp}')
+# RELAY_AGENT (set by the launcher when it knows which agent it is starting) is
+# the authoritative identity key. It removes the guess for fleets that share one
+# worktree, where cwd alone is ambiguous. Empty → relay falls back to cwd.
+PAYLOAD=$(jq -nc --arg s "$SID" --arg c "$CWD" --arg a "${RELAY_AGENT:-}" --arg src "$SRC" --arg tp "$TP" \
+  '{session_id:$s, cwd:$c, agent:$a, source:$src, transcript_path:$tp}')
 RESP=$(curl -fsS -m 3 -X POST "$RELAY_URL/api/ingest/session-start" \
   ${RELAY_API_KEY:+-H "Authorization: Bearer $RELAY_API_KEY"} \
   -H "Content-Type: application/json" -d "$PAYLOAD" 2>/dev/null)

@@ -3,6 +3,7 @@ package relay
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -37,6 +38,7 @@ type ingestTokensReq struct {
 type ingestSessionStartReq struct {
 	SessionID      string `json:"session_id"`
 	Cwd            string `json:"cwd"`
+	Agent          string `json:"agent,omitempty"`  // explicit identity (RELAY_AGENT); wins over cwd inference
 	Source         string `json:"source,omitempty"` // startup | resume | clear | compact
 	TranscriptPath string `json:"transcript_path,omitempty"`
 }
@@ -110,15 +112,24 @@ func (r *Relay) handleIngestSessionStart(w http.ResponseWriter, req *http.Reques
 		apiError(w, http.StatusBadRequest, "invalid json", err)
 		return
 	}
-	if body.SessionID == "" || body.Cwd == "" {
-		apiError(w, http.StatusBadRequest, "session_id and cwd required", nil)
+	if body.SessionID == "" || (body.Cwd == "" && body.Agent == "") {
+		apiError(w, http.StatusBadRequest, "session_id and (cwd or agent) required", nil)
 		return
 	}
 
-	project, name, found, err := r.DB.RebindSessionByCwd(body.Cwd, body.SessionID)
+	project, name, found, ambiguous, err := r.DB.RebindSession(body.Cwd, body.Agent, body.SessionID)
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "rebind failed", err)
 		return
+	}
+	if ambiguous {
+		// N agents share this cwd and no explicit agent was forwarded — the key
+		// cannot identify one. Bind nothing (a wrong identity is worse than none)
+		// and name the collision so the operator can forward RELAY_AGENT or give
+		// each agent a distinct cwd. See issue #153.
+		names, _ := r.DB.AgentNamesByCwd(body.Cwd)
+		log.Printf("session-start: ambiguous cwd %q shared by %d agents %v — not binding session %s; forward RELAY_AGENT to disambiguate",
+			body.Cwd, len(names), names, body.SessionID)
 	}
 
 	// Mark the session active in the detector so the board reflects it immediately.

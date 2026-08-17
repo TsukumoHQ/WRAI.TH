@@ -124,6 +124,24 @@ func (h *Handlers) HandleAddTeamMember(ctx context.Context, req mcp.CallToolRequ
 	})
 }
 
+func (h *Handlers) HandleDeleteTeam(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	teamSlug := req.GetString("team", "")
+
+	if teamSlug == "" {
+		return mcp.NewToolResultError("team is required"), nil
+	}
+
+	if err := h.db.DeleteTeam(project, teamSlug); err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to delete team: %v", err)), nil
+	}
+
+	return h.resultJSONTracked(project, "", "delete_team", map[string]any{
+		"team":    teamSlug,
+		"deleted": true,
+	})
+}
+
 func (h *Handlers) HandleRemoveTeamMember(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	teamSlug := req.GetString("team", "")
