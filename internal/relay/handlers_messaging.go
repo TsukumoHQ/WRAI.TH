@@ -428,6 +428,10 @@ func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) 
 		if err := h.db.MarkConversationRead(convID, agent); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to mark conversation read: %v", err)), nil
 		}
+		// Also acknowledge the deliveries for this conversation's messages —
+		// otherwise they stay queued/surfaced and keep re-surfacing (and, before
+		// WRAITH-2, re-waking) until an explicit ack_delivery. Best-effort.
+		_ = h.db.AcknowledgeConversationDeliveries(convID, agent, project)
 		return h.resultJSONTracked(project, agent, "mark_read", map[string]any{
 			"conversation_id": convID,
 			"marked_read":     true,

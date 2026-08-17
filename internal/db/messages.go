@@ -123,19 +123,28 @@ func (d *DB) GetInbox(project, agentName string, unreadOnly bool, limit int, fil
 	return d.getInboxLegacy(project, agentName, unreadOnly, limit, f)
 }
 
-// UnreadCountForAgent returns how many unread messages an agent has, without
-// mutating delivery state (unlike GetInbox, which marks queued deliveries
-// surfaced). This backs the HTTP unread-count endpoint (issue #17) so a poller
-// can cheaply check for new mail without draining the inbox.
+// UnreadCountForAgent returns how many NEW (unseen) messages an agent has —
+// deliveries still 'queued', i.e. never surfaced by get_inbox. It is the wake
+// signal behind the HTTP unread-count endpoint (issue #17): a poller checks it
+// to decide whether to wake the agent. It is non-mutating (unlike GetInbox,
+// which marks queued deliveries surfaced) and deliberately excludes 'surfaced'
+// deliveries so an already-seen message never re-wakes the agent (WRAITH-2).
 func (d *DB) UnreadCountForAgent(project, agentName string) (int, error) {
 	if d.HasDeliveries() {
 		var n int
+		// Count only 'queued' — deliveries the agent has NOT yet been shown. Once
+		// a delivery is 'surfaced' (returned by get_inbox at least once) the agent
+		// has seen it, so it must not keep re-triggering a wake-up on every poll;
+		// it stays visible in the inbox's unread view until an explicit ack. This
+		// is the wake signal, deliberately narrower than the get_inbox unread view
+		// (queued+surfaced), and is what stops a pile of long-surfaced broadcasts
+		// from waking the whole fleet forever (WRAITH-2).
 		err := d.ro().QueryRow(`
 			SELECT COUNT(*)
 			FROM deliveries d
 			JOIN messages m ON d.message_id = m.id
 			WHERE d.project = ? AND d.to_agent = ?
-			  AND d.state IN ('queued', 'surfaced')
+			  AND d.state = 'queued'
 			  AND m.expired_at IS NULL
 			  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 		`, project, agentName).Scan(&n)
