@@ -418,6 +418,54 @@ func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest)
 	})
 }
 
+// HandleGetMessage returns one message by ID with its full, untruncated content
+// — the escape hatch for the ~300-char previews in get_inbox / get_thread /
+// get_session_context (WRAITH-3). Read-only, non-mutating: it never surfaces or
+// acks a delivery, so fetching a full body cannot alter the unread view.
+func (h *Handlers) HandleGetMessage(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	id := req.GetString("id", "")
+	if id == "" {
+		return mcp.NewToolResultError("id is required"), nil
+	}
+
+	msg, err := h.db.GetMessage(id)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to get message: %v", err)), nil
+	}
+	if msg == nil {
+		// Not a full ID — try to resolve an unambiguous prefix.
+		full, ferr := h.db.FindMessageByPrefix(id)
+		if ferr != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("no message with id %q: %v", id, ferr)), nil
+		}
+		if msg, err = h.db.GetMessage(full); err != nil || msg == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("no message with id %q", id)), nil
+		}
+	}
+
+	entry := map[string]any{
+		"id":         msg.ID,
+		"from":       msg.From,
+		"to":         msg.To,
+		"type":       msg.Type,
+		"subject":    msg.Subject,
+		"content":    msg.Content, // full, untruncated — the whole point of this tool
+		"created_at": msg.CreatedAt,
+		"priority":   msg.Priority,
+	}
+	if msg.ReplyTo != nil {
+		entry["reply_to"] = *msg.ReplyTo
+	}
+	if msg.ConversationID != nil {
+		entry["conversation_id"] = *msg.ConversationID
+	}
+	if msg.Metadata != "" && msg.Metadata != "{}" {
+		entry["metadata"] = msg.Metadata
+	}
+	return h.resultJSONTracked(project, "", "get_message", entry)
+}
+
 func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
