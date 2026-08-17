@@ -171,6 +171,40 @@ func (d *DB) GetTeamByID(teamID string) (*models.Team, error) {
 	return &t, nil
 }
 
+// DeleteTeam removes a team and its membership + inbox rows in one transaction.
+// Retiring a channel must be a real operation: leaving a team memberless keeps
+// the slug addressable, so a send to it is accepted but delivered to nobody
+// (issue #150). Delivered messages themselves are untouched — only the team's
+// inbox references drop. Returns an error if no team with that slug exists.
+func (d *DB) DeleteTeam(project, slug string) error {
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var teamID string
+	err = tx.QueryRow("SELECT id FROM teams WHERE project = ? AND slug = ?", project, slug).Scan(&teamID)
+	if err == sql.ErrNoRows {
+		return fmt.Errorf("team %q not found in project %q", slug, project)
+	}
+	if err != nil {
+		return fmt.Errorf("delete team: lookup: %w", err)
+	}
+
+	// Children first (junction tables), then the team row.
+	if _, err := tx.Exec("DELETE FROM team_inbox WHERE team_id = ?", teamID); err != nil {
+		return fmt.Errorf("delete team inbox: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM team_members WHERE team_id = ?", teamID); err != nil {
+		return fmt.Errorf("delete team members: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM teams WHERE id = ?", teamID); err != nil {
+		return fmt.Errorf("delete team row: %w", err)
+	}
+	return tx.Commit()
+}
+
 // --- Team Members ---
 
 func (d *DB) AddTeamMember(teamID, agentName, project, role string) error {

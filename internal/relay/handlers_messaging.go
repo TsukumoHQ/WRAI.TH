@@ -119,6 +119,17 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 
 		// Resolve team recipients first, then insert message + deliveries atomically.
 		members, _ := h.db.GetTeamMemberNames(team.ID)
+
+		// An empty (or all-inactive) team is a silent black hole: the send would
+		// look successful yet reach nobody. Fail loudly so the condition is
+		// observable to the sender rather than swallowed (issue #150). A team
+		// whose only member is the sender is NOT this case — the message still
+		// lands in the team inbox as a record.
+		if len(members) == 0 {
+			return mcp.NewToolResultError(fmt.Sprintf(
+				"team '%s' has no members — message not sent (it would reach nobody). Add members with add_team_member, or delete_team to retire the channel.", teamSlug)), nil
+		}
+
 		var recipients []string
 		for _, member := range members {
 			if member != from {

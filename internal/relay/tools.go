@@ -34,7 +34,7 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithBoolean("is_executive", mcp.Description("Executive flag (crown in UI)")),
 		mcp.WithString("profile_slug", mcp.Description("Profile archetype this agent runs")),
 		mcp.WithString("session_id", mcp.Description("Claude Code session ID ($CLAUDE_SESSION_ID) for activity tracking")),
-		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: lets a SessionStart hook re-bind the rotated session_id after /clear.")),
+		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: lets a SessionStart hook re-bind the rotated session_id after /clear. MUST be unique per agent — the cwd re-bind is only correct one-agent-per-worktree. If a fleet shares one tree, give each agent a distinct cwd (or forward RELAY_AGENT to the hook); an ambiguous cwd binds nothing rather than guess.")),
 		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering (e.g. '[\"database\",\"auth\"]')")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
 	)
@@ -783,6 +783,16 @@ func removeTeamMemberTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("team", mcp.Description("Team slug"), mcp.Required()),
 		mcp.WithString("agent_name", mcp.Description("Agent to remove"), mcp.Required()),
+	)
+}
+
+func deleteTeamTool() mcp.Tool {
+	return mcp.NewTool(
+		"delete_team",
+		mcp.WithDescription("Retire a team: removes the team, its memberships, and its inbox refs. Use this to deprecate a channel — leaving a team memberless keeps its slug addressable, and a send to it reaches nobody. Delivered messages are untouched."),
+		asParam,
+		projectParam,
+		mcp.WithString("team", mcp.Description("Team slug"), mcp.Required()),
 	)
 }
 

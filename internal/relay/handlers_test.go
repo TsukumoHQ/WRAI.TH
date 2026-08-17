@@ -1232,6 +1232,39 @@ func TestTeamInbox(t *testing.T) {
 	}
 }
 
+// Issue #150: a send to a team with no members must fail loudly, not return a
+// success receipt for a message that reaches nobody.
+func TestSendToEmptyTeamErrors(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleCreateTeam(ctx, call(map[string]any{"project": "p1", "name": "Ghost", "slug": "ghost"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "team:ghost", "content": "anyone?",
+	}))
+	expectError(t, res)
+}
+
+// Issue #150: delete_team retires the channel so it is no longer addressable.
+func TestDeleteTeamHandler(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleCreateTeam(ctx, call(map[string]any{"project": "p1", "name": "Dev", "slug": "dev"}))
+
+	res, _ := h.HandleDeleteTeam(ctx, call(map[string]any{"project": "p1", "team": "dev"}))
+	if d := parseJSON(t, res); d["deleted"] != true {
+		t.Fatalf("expected deleted=true, got %v", d)
+	}
+
+	// Gone from listing.
+	listRes, _ := h.HandleListTeams(ctx, call(map[string]any{"project": "p1"}))
+	if data := parseJSON(t, listRes); data["count"].(float64) != 0 {
+		t.Errorf("expected 0 teams after delete, got %v", data["count"])
+	}
+	// Deleting again errors.
+	res2, _ := h.HandleDeleteTeam(ctx, call(map[string]any{"project": "p1", "team": "dev"}))
+	expectError(t, res2)
+}
+
 func TestTeamInboxMissingTeam(t *testing.T) {
 	h := testHandlers(t)
 	res, _ := h.HandleGetTeamInbox(ctx, call(map[string]any{"project": "p1"}))

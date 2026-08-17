@@ -123,6 +123,36 @@ func (d *DB) GetInbox(project, agentName string, unreadOnly bool, limit int, fil
 	return d.getInboxLegacy(project, agentName, unreadOnly, limit, f)
 }
 
+// UnreadCountForAgent returns how many unread messages an agent has, without
+// mutating delivery state (unlike GetInbox, which marks queued deliveries
+// surfaced). This backs the HTTP unread-count endpoint (issue #17) so a poller
+// can cheaply check for new mail without draining the inbox.
+func (d *DB) UnreadCountForAgent(project, agentName string) (int, error) {
+	if d.HasDeliveries() {
+		var n int
+		err := d.ro().QueryRow(`
+			SELECT COUNT(*)
+			FROM deliveries d
+			JOIN messages m ON d.message_id = m.id
+			WHERE d.project = ? AND d.to_agent = ?
+			  AND d.state IN ('queued', 'surfaced')
+			  AND m.expired_at IS NULL
+			  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
+		`, project, agentName).Scan(&n)
+		if err != nil {
+			return 0, fmt.Errorf("unread count for agent: %w", err)
+		}
+		return n, nil
+	}
+	// Legacy DBs (no deliveries table): reuse the read query, which is
+	// non-mutating, and count. Legacy inboxes are small and rare.
+	msgs, err := d.getInboxLegacy(project, agentName, true, 100000, InboxFilter{})
+	if err != nil {
+		return 0, err
+	}
+	return len(msgs), nil
+}
+
 // getInboxLegacy is the original inbox query for DBs without deliveries.
 func (d *DB) getInboxLegacy(project, agentName string, unreadOnly bool, limit int, f InboxFilter) ([]models.Message, error) {
 	if limit <= 0 {

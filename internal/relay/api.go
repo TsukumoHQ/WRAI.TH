@@ -63,6 +63,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetConversations(w, req)
 	case strings.HasPrefix(path, "/conversations/") && strings.HasSuffix(path, "/messages") && req.Method == http.MethodGet:
 		r.apiGetConversationMessages(w, path)
+	case path == "/inbox/unread-count" && req.Method == http.MethodGet:
+		r.apiGetUnreadCount(w, req)
 	case path == "/messages" && req.Method == http.MethodGet:
 		r.apiGetAllMessages(w, req)
 	case path == "/messages" && req.Method == http.MethodPost:
