@@ -59,9 +59,10 @@ func TestResolveProjectBindsToRegistration(t *testing.T) {
 	}
 }
 
-// TestResolveProjectAmbiguousStaysDefault: a name registered in two projects
-// must not be guessed — better the visible default than a silent misroute.
-func TestResolveProjectAmbiguousStaysDefault(t *testing.T) {
+// TestResolveProjectAmbiguousStaysUnresolved: a name registered in two projects
+// must not be guessed — it resolves to "" (unresolved), and the write boundary
+// then rejects it, rather than silently misrouting into a shared bucket.
+func TestResolveProjectAmbiguousStaysUnresolved(t *testing.T) {
 	h := testHandlers(t)
 	for _, p := range []string{"proj-a", "proj-b"} {
 		if _, err := h.HandleRegisterAgent(context.Background(), call(map[string]any{
@@ -70,8 +71,8 @@ func TestResolveProjectAmbiguousStaysDefault(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := h.resolveProject(context.Background(), call(map[string]any{"as": "cto"})); got != "default" {
-		t.Errorf("ambiguous binding = %q, want default", got)
+	if got := h.resolveProject(context.Background(), call(map[string]any{"as": "cto"})); got != "" {
+		t.Errorf("ambiguous binding = %q, want \"\" (unresolved)", got)
 	}
 }
 

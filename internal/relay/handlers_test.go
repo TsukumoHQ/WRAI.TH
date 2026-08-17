@@ -142,6 +142,14 @@ func TestRegisterAgentRejectsInvalidProjectName(t *testing.T) {
 			t.Errorf("%q must be invalid", bad)
 		}
 	}
+
+	// "default" is a retired reserved word — the former silent catch-all — and
+	// must never be re-creatable as a real project through registration.
+	for _, reserved := range []string{"default", "Default", "DEFAULT"} {
+		if validProjectName(reserved) {
+			t.Errorf("reserved project name %q must be invalid", reserved)
+		}
+	}
 }
 
 // TestRegisterAgentRateLimit reproduces the runaway classify-loop incident: the
@@ -1350,20 +1358,25 @@ func TestTaskSubtaskCompletion(t *testing.T) {
 
 // --- Validation Tests (cross-cutting) ---
 
-func TestResolveProjectDefault(t *testing.T) {
+// TestResolveProjectUnresolved: with no project param, no ?project= context, and
+// no single-project registration, the project is unresolved ("") — there is no
+// "default" catch-all. The write boundary rejects it.
+func TestResolveProjectUnresolved(t *testing.T) {
 	h := testHandlers(t)
 	ctx := context.Background()
 	req := call(map[string]any{})
-	if p := h.resolveProject(ctx, req); p != "default" {
-		t.Errorf("expected 'default', got %s", p)
+	if p := h.resolveProject(ctx, req); p != "" {
+		t.Errorf("expected \"\" (unresolved), got %s", p)
 	}
 }
 
-func TestResolveAgentDefault(t *testing.T) {
+// TestResolveAgentUnidentified: with no `as` param and no ?agent= context, the
+// agent is unidentified ("") — the "anonymous" fallback was removed.
+func TestResolveAgentUnidentified(t *testing.T) {
 	ctx := context.Background()
 	req := call(map[string]any{})
-	if a := resolveAgent(ctx, req); a != "anonymous" {
-		t.Errorf("expected 'anonymous', got %s", a)
+	if a := resolveAgent(ctx, req); a != "" {
+		t.Errorf("expected \"\" (unidentified), got %s", a)
 	}
 }
 

@@ -70,7 +70,6 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	events := NewEventBus()
 	registry := NewSessionRegistry(mcpSrv)
 	handlers := NewHandlers(database, registry, ingester, events)
-	handlers.requireRegistered = cfg.RequireRegistered
 
 	// Federation registry — shared between the send path (Handlers) and the
 	// inbound REST route (Relay). Empty peer list => disabled, no behavior change.

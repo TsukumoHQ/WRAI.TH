@@ -37,10 +37,6 @@ type Handlers struct {
 	budgetMu      sync.Mutex
 	budgetAlerted map[string]time.Time
 
-	// requireRegistered gates mutating tools behind a registered acting agent
-	// (RELAY_REQUIRE_REGISTERED). Set from config in relay.New before dispatch.
-	requireRegistered bool
-
 	// registerLimiters throttles register_agent per (project, name) identity so a
 	// runaway client loop (e.g. a headless job re-registering on every tick) can't
 	// flood the agents table. Keyed lazily, swept on a timer like the HTTP-layer
@@ -94,6 +90,13 @@ func (h *Handlers) sweepRegisterLimiters() {
 // every remote registration.
 func validProjectName(name string) bool {
 	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	// "default" is a retired reserved word — the former silent catch-all. Names
+	// are normalized (lowercased) before they reach here, so a case-insensitive
+	// literal check suffices to stop anyone re-creating the catch-all as a real
+	// project through the front door.
+	if strings.ToLower(name) == "default" {
 		return false
 	}
 	seenAt := false

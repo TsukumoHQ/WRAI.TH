@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"net/http"
+	"strings"
 )
 
 type contextKey string
@@ -27,14 +28,12 @@ const (
 // in either mode (see toolsModeFilter), so clients that invoke tools directly
 // keep working under the default.
 func HTTPContextFunc(ctx context.Context, r *http.Request) context.Context {
-	agent := r.URL.Query().Get("agent")
-	if agent == "" {
-		agent = "anonymous"
-	}
+	// No silent fallbacks: an unset agent/project stays empty and is rejected
+	// at the write boundary (guardIdentity). The legacy "anonymous" agent and
+	// "default" project catch-alls were removed — they let unidentified calls
+	// and untargeted writes collapse into shared namespaces nobody owned.
+	agent := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("agent")))
 	project := NormalizeProject(r.URL.Query().Get("project"))
-	if project == "" {
-		project = "default"
-	}
 	if r.URL.Query().Get("tools") == ToolsModeFull {
 		ctx = context.WithValue(ctx, toolsModeKey, ToolsModeFull)
 	}
@@ -42,20 +41,24 @@ func HTTPContextFunc(ctx context.Context, r *http.Request) context.Context {
 	return context.WithValue(ctx, projectKey, project)
 }
 
-// AgentFromContext retrieves the agent name from the context.
+// AgentFromContext retrieves the agent name from the context, or "" when the
+// connection carried no ?agent= identity. Callers that mutate state must reject
+// an empty identity rather than substitute a placeholder.
 func AgentFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(agentNameKey).(string); ok {
 		return v
 	}
-	return "anonymous"
+	return ""
 }
 
-// ProjectFromContext retrieves the project name from the context.
+// ProjectFromContext retrieves the project name from the context, or "" when
+// the connection carried no ?project=. An empty project is unresolved, not a
+// catch-all — resolveProject / guardIdentity turn it into an error on writes.
 func ProjectFromContext(ctx context.Context) string {
 	if v, ok := ctx.Value(projectKey).(string); ok {
 		return v
 	}
-	return "default"
+	return ""
 }
 
 // ToolsModeFromContext retrieves the tool exposure mode from the context.

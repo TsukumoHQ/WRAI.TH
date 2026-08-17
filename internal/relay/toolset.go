@@ -115,15 +115,16 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: createProjectTool(), Handler: h.HandleCreateProject}, "projects"},
 		{server.ServerTool{Tool: deleteProjectTool(), Handler: h.HandleDeleteProject}, "projects"},
 	}
-	// When RELAY_REQUIRE_REGISTERED is on, wrap the actor-attributed write tools
-	// so an unregistered/anonymous identity is rejected before the write. Reads
-	// and the bootstrap tools (register_agent, whoami, get_session_context …)
-	// are never wrapped, so an agent can always register and orient first.
-	if h.requireRegistered {
-		for i := range tools {
-			if mutatingTools[tools[i].Tool.Name] {
-				tools[i].Handler = h.guardRegistered(tools[i].Handler)
-			}
+	// Identity is mandatory on every actor-attributed write: a call with no
+	// resolvable agent or project is rejected before the write. Reads and the
+	// bootstrap tools (register_agent, create_project, whoami,
+	// get_session_context …) are never wrapped, so an agent can always create
+	// its project, register, and orient first. This replaces the opt-in
+	// RELAY_REQUIRE_REGISTERED gate — there is no longer an anonymous/default
+	// path to fall back to.
+	for i := range tools {
+		if mutatingTools[tools[i].Tool.Name] {
+			tools[i].Handler = h.guardIdentity(tools[i].Handler)
 		}
 	}
 	return tools
@@ -148,25 +149,47 @@ var mutatingTools = map[string]bool{
 	"remove_team_member": true, "add_notify_channel": true,
 	"create_conversation": true, "invite_to_conversation": true,
 	"leave_conversation": true, "archive_conversation": true,
-	"create_project": true, "delete_project": true,
+	// create_project is intentionally absent: it is a bootstrap tool. Requiring a
+	// registered identity in a project that does not exist yet is a chicken-and-egg
+	// lock (you cannot register under a project before creating it).
+	"delete_project": true,
 }
 
-// guardRegistered wraps a tool handler to reject calls whose acting agent is
-// anonymous or not registered in the project. Only installed when
-// RELAY_REQUIRE_REGISTERED is on (see toolRegistry).
-func (h *Handlers) guardRegistered(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+// guardIdentity wraps a mutating tool handler to reject any write that cannot
+// be attributed to a real agent in a real project. It enforces three things,
+// in order: a resolvable project, a resolvable agent identity, and that the
+// agent is actually registered in that project. Installed on every mutating
+// tool (see toolRegistry) — there is no anonymous/default path to fall through
+// to, so an untargeted or unidentified write fails loudly instead of silently
+// landing in a shared bucket.
+func (h *Handlers) guardIdentity(next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		project := h.resolveProject(ctx, req)
+		if project == "" {
+			return mcp.NewToolResultError("no project resolved: pass project=<name> (or connect with ?project=<name>) — the 'default' catch-all was removed."), nil
+		}
 		from := strings.ToLower(resolveAgent(ctx, req))
-		project := ProjectFromContext(ctx)
-		if from == "" || from == "anonymous" {
-			return mcp.NewToolResultError("RELAY_REQUIRE_REGISTERED is on: no agent identity. Set ?agent=<name> on the MCP URL (or pass `as`) after calling register_agent."), nil
+		if from == "" {
+			return mcp.NewToolResultError("no agent identity: pass `as`=<name> (or connect with ?agent=<name>) after register_agent — the 'anonymous' fallback was removed."), nil
 		}
 		agent, err := h.db.GetAgent(project, from)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
 		}
 		if agent == nil {
-			return mcp.NewToolResultError(fmt.Sprintf("RELAY_REQUIRE_REGISTERED is on: agent %q is not registered in project %q — call register_agent first.", from, project)), nil
+			return mcp.NewToolResultError(fmt.Sprintf("agent %q is not registered in project %q — call register_agent first.", from, project)), nil
+		}
+		// Identity binding (best-effort, fail-open): if this MCP connection's
+		// session is provably bound to a DIFFERENT agent in the project, the
+		// caller is acting under a name that is not theirs — reject. When the
+		// session is unknown (unbound, or the in-memory registry was cleared by a
+		// restart), we cannot prove impersonation, so the write proceeds — the
+		// relay is the fleet's SSOT and must never drop a legitimate write on a
+		// guess. Bulletproof anti-theft would need a per-agent secret token.
+		if sess := sessionFromContext(ctx); sess != nil {
+			if owner, ok := h.registry.AgentForSession(project, sess.SessionID()); ok && owner != from {
+				return mcp.NewToolResultError(fmt.Sprintf("identity mismatch: this connection is registered as %q in project %q and cannot act as %q — use your own identity (or register_agent as %q).", owner, project, from, from)), nil
+			}
 		}
 		return next(ctx, req)
 	}

@@ -21,29 +21,27 @@ func NormalizeProject(p string) string {
 // resolveProject returns the project for a tool call, most explicit first:
 //
 //  1. the `project` tool parameter;
-//  2. the HTTP session default (?project= URL param);
+//  2. the HTTP session project (?project= URL param);
 //  3. the calling agent's own registration, when it names exactly ONE
-//     project — an agent whose MCP connection carries no project used to
-//     fall into the "default" catch-all here, and its messages (e.g. a
-//     CTO reporting to its founder) landed in a namespace nobody reads;
-//  4. "default", only when nothing above resolves.
+//     project — an agent whose MCP connection carries no project would
+//     otherwise be unresolved even though it belongs to exactly one.
 //
-// A context project of "default" is treated as unset for step 3: it is the
-// compiled fallback of ProjectFromContext, not something a caller chose.
+// Returns "" when nothing resolves. There is no "default" catch-all: an
+// unresolved project is an error at the write boundary (guardIdentity), not a
+// shared bucket that silently collects untargeted writes.
 func (h *Handlers) resolveProject(ctx context.Context, req mcp.CallToolRequest) string {
 	if p := req.GetString("project", ""); p != "" {
 		return NormalizeProject(p)
 	}
-	ctxProject := ProjectFromContext(ctx)
-	if ctxProject != "" && ctxProject != "default" {
+	if ctxProject := ProjectFromContext(ctx); ctxProject != "" {
 		return NormalizeProject(ctxProject)
 	}
-	if agent := resolveAgent(ctx, req); agent != "" && agent != "anonymous" {
+	if agent := resolveAgent(ctx, req); agent != "" {
 		if projects, err := h.db.ProjectsOfAgent(agent); err == nil && len(projects) == 1 {
 			return NormalizeProject(projects[0])
 		}
 	}
-	return "default"
+	return ""
 }
 
 // suggestProject returns the closest existing project name to `miss`
