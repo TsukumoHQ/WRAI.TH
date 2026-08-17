@@ -48,8 +48,13 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # Only the cross-compiled Linux targets need these packages. The native
+      # linux/amd64 build uses the runner's own gcc (matrix.cc == 'gcc') and must
+      # NOT run apt here — it doesn't need the packages, and the apt step is a
+      # flaky hang point (mirror stalls with no timeout) that was blocking the
+      # release on the one job that gains nothing from it.
       - name: Install cross-compilers (Linux)
-        if: runner.os == 'Linux'
+        if: runner.os == 'Linux' && matrix.cc != 'gcc'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu gcc-mingw-w64-x86-64
