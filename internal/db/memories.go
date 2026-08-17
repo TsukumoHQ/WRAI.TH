@@ -579,7 +579,8 @@ func (d *DB) GetMemoriesByLayer(project, agentName, layer string) ([]models.Memo
 		 FROM memories
 		 WHERE archived_at IS NULL AND layer = ?
 		   AND (scope = 'global' OR (project = ? AND (scope = 'project' OR (scope = 'agent' AND agent_name = ?))))
-		 ORDER BY updated_at DESC`,
+		 ORDER BY updated_at DESC
+		 LIMIT 500`,
 		layer, project, agentName,
 	)
 }
