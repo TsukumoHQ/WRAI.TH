@@ -29,6 +29,9 @@ func TestMigratePurgeDefaultProject(t *testing.T) {
 		{"INSERT INTO projects (name, planet_type, created_at) VALUES ('trovex-growth','forest/1',?)", []any{now}},
 		{"INSERT INTO agents (id, name, role, registered_at, last_seen, project) VALUES ('a2','cmo','',?,?,'trovex-growth')", []any{now, now}},
 		{"INSERT INTO messages (id, from_agent, to_agent, type, subject, content, created_at, project) VALUES ('m2','cmo','user','notification','','y',?,'trovex-growth')", []any{now}},
+		// A GLOBAL notification rule (project='default' = wildcard, not catch-all)
+		// — must survive: purging it would silently disable global notifications.
+		{"INSERT INTO notification_rules (id, project, name, event, action, created_at, updated_at) VALUES ('r1','default','global-rule','task.dispatched','log',?,?)", []any{now, now}},
 	}
 	for _, s := range seed {
 		if _, err := d.conn.Exec(s.q, s.args...); err != nil {
@@ -56,6 +59,8 @@ func TestMigratePurgeDefaultProject(t *testing.T) {
 	assertOne("SELECT COUNT(*) FROM projects WHERE name = 'trovex-growth'", 1)
 	assertOne("SELECT COUNT(*) FROM agents WHERE project = 'trovex-growth'", 1)
 	assertOne("SELECT COUNT(*) FROM messages WHERE project = 'trovex-growth'", 1)
+	// global notification rule survives — 'default' there is the wildcard, not the catch-all.
+	assertOne("SELECT COUNT(*) FROM notification_rules WHERE project = 'default'", 1)
 
 	// Idempotent: a second pass changes nothing and does not error.
 	migratePurgeDefaultProject(d.conn)

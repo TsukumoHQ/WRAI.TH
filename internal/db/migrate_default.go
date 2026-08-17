@@ -48,6 +48,14 @@ func migratePurgeDefaultProject(conn *sql.DB) {
 	}
 	_ = rows.Close()
 
+	// Tables where 'default' is NOT the retired catch-all but a load-bearing
+	// sentinel with its own meaning — never purge these. In notification_rules a
+	// rule with project='default' is the GLOBAL rule (the evaluator fires it for
+	// every project, see relay/notifications.go), not a rule that landed in the
+	// catch-all. Deleting them would silently disable the global/autonomy
+	// notification rules.
+	skip := map[string]bool{"notification_rules": true}
+
 	total := int64(0)
 	del := func(table, col string) bool {
 		res, err := tx.Exec("DELETE FROM " + table + " WHERE " + col + " = 'default'") //nolint:gosec // table/col are internal identifiers, never user input
@@ -62,6 +70,9 @@ func migratePurgeDefaultProject(conn *sql.DB) {
 	}
 
 	for _, t := range tables {
+		if skip[t] {
+			continue
+		}
 		if !del(t, "project") {
 			return
 		}
