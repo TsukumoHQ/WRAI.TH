@@ -797,7 +797,9 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	if profileSlug != nil && *profileSlug != "" {
 		profile, err := h.db.GetProfile(project, *profileSlug)
 		if err == nil && profile != nil {
-			result["profile"] = profile
+			// Skills is an unbounded raw JSON array; project it so a large profile
+			// can't dominate the boot payload (WRAITH-1).
+			result["profile"] = projectProfile(profile)
 		}
 	}
 
@@ -828,12 +830,17 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 		result["unread_omitted"] = len(unread) - len(projected)
 	}
 
-	// Active conversations
+	// Active conversations — capped in count and title bytes; v1.9.0 injected
+	// these raw (30 rows, no byte cap), a primary source of oversized payloads.
 	convs, err := h.db.ListConversations(project, agentName)
 	if err != nil || convs == nil {
 		convs = []models.ConversationSummary{}
 	}
-	result["active_conversations"] = convs
+	projectedConvs := projectConversations(convs, sessionConversationMax)
+	result["active_conversations"] = projectedConvs
+	if len(projectedConvs) < len(convs) {
+		result["active_conversations_omitted"] = len(convs) - len(projectedConvs)
+	}
 
 	// Relevant memories — cross-scope boot view (global + project + own
 	// agent-scope; plain ListMemories filters agent_name on all scopes and
@@ -873,6 +880,11 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	}
 
 	// Vault/doc context is served externally (the doc-context host), not injected here.
+
+	// Last-resort ceiling: if a P0 flood bypassed the per-section budgets and the
+	// whole payload still exceeds the tool token cap, collapse conversations and
+	// flag it — the "boot in one call" tool must never blow the cap (WRAITH-1).
+	enforceSessionPayloadCeiling(result)
 
 	return result
 }

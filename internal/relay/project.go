@@ -51,6 +51,112 @@ const memValuePreview = 400
 // out of boot).
 const sessionMemoryBudget = 6000
 
+// Session-context caps for the sections v1.9.0 injected RAW — the primary
+// contributors to an oversized boot payload (WRAITH-1).
+const (
+	// sessionConversationMax caps active_conversations rows in boot; the rest
+	// are reported via active_conversations_omitted and fetched with
+	// list_conversations. (Previously LIMIT 30 rows, no byte cap, no truncation.)
+	sessionConversationMax = 12
+	// convTitlePreview caps a single conversation title's bytes.
+	convTitlePreview = 120
+	// profileSkillsBudget caps a profile's Skills JSON (an unbounded raw array
+	// injected verbatim) in boot, keeping whole skill entries.
+	profileSkillsBudget = 2000
+	// sessionPayloadCeiling is the hard byte ceiling on the whole session_context
+	// payload — a last-resort net above the per-section budgets, so the "boot in
+	// one call" tool can never exceed the MCP token cap (WRAITH-1).
+	sessionPayloadCeiling = 60000
+)
+
+// projectConversations bounds active_conversations: caps the row count and
+// truncates each title. The caller reports the remainder via
+// active_conversations_omitted.
+func projectConversations(convs []models.ConversationSummary, max int) []models.ConversationSummary {
+	if len(convs) > max {
+		convs = convs[:max]
+	}
+	out := make([]models.ConversationSummary, len(convs))
+	for i, c := range convs {
+		c.Title, _ = truncatePreview(c.Title, convTitlePreview)
+		out[i] = c
+	}
+	return out
+}
+
+// projectProfile renders a profile for boot with its Skills JSON bounded to
+// profileSkillsBudget bytes (whole entries kept). Skills is otherwise an
+// unbounded raw JSON array injected verbatim.
+func projectProfile(p *models.Profile) map[string]any {
+	m := map[string]any{
+		"id":         p.ID,
+		"slug":       p.Slug,
+		"name":       p.Name,
+		"role":       p.Role,
+		"project":    p.Project,
+		"created_at": p.CreatedAt,
+		"updated_at": p.UpdatedAt,
+	}
+	if p.OrgID != nil {
+		m["org_id"] = *p.OrgID
+	}
+	skills, capped := capJSONArray(p.Skills, profileSkillsBudget)
+	m["skills"] = json.RawMessage(skills)
+	if capped {
+		m["skills_capped"] = true
+	}
+	return m
+}
+
+// capJSONArray trims a JSON array string to at most maxBytes, keeping whole
+// elements. Returns the (possibly trimmed) array and whether trimming occurred.
+// On any parse error it returns "[]" so the payload stays valid JSON.
+func capJSONArray(arr string, maxBytes int) (string, bool) {
+	if len(arr) <= maxBytes {
+		return arr, false
+	}
+	var items []json.RawMessage
+	if err := json.Unmarshal([]byte(arr), &items); err != nil {
+		return "[]", true
+	}
+	kept := make([]json.RawMessage, 0, len(items))
+	size := 2 // the surrounding "[]"
+	for _, it := range items {
+		size += len(it) + 1 // element + comma
+		if size > maxBytes {
+			break
+		}
+		kept = append(kept, it)
+	}
+	out, err := json.Marshal(kept)
+	if err != nil {
+		return "[]", true
+	}
+	return string(out), len(kept) < len(items)
+}
+
+// enforceSessionPayloadCeiling is the last-resort guard: if the assembled
+// session_context still exceeds sessionPayloadCeiling bytes (e.g. a P0 flood
+// that legitimately bypasses the per-section soft budgets), collapse the softest
+// section — active_conversations — to a count and flag payload_capped. The
+// higher-priority sections (tasks, unread P0s, constraints, decisions) are left
+// intact; they are already hard-capped and must survive boot.
+func enforceSessionPayloadCeiling(result map[string]any) {
+	over := func() bool {
+		b, err := json.Marshal(result)
+		return err == nil && len(b) > sessionPayloadCeiling
+	}
+	if !over() {
+		return
+	}
+	if convs, ok := result["active_conversations"].([]models.ConversationSummary); ok && len(convs) > 0 {
+		prev, _ := result["active_conversations_omitted"].(int)
+		result["active_conversations_omitted"] = prev + len(convs)
+		result["active_conversations"] = []models.ConversationSummary{}
+	}
+	result["payload_capped"] = true
+}
+
 // truncatePreview cuts s to at most max bytes without splitting a UTF-8 rune
 // (byte slicing on French text can cut an accent mid-sequence and produce
 // invalid JSON payloads). Returns the cut string and whether truncation occurred.
