@@ -102,6 +102,17 @@ func getThreadTool() mcp.Tool {
 	)
 }
 
+func getMessageTool() mcp.Tool {
+	return mcp.NewTool(
+		"get_message",
+		mcp.WithDescription("Fetch a single message by ID with its FULL, untruncated content — the escape hatch when a preview in get_inbox / get_thread / get_session_context cut off the body. Accepts a full ID or an unambiguous ID prefix."),
+		asParam,
+		projectParam,
+		mcp.WithString("id", mcp.Description("Message ID (full or an unambiguous prefix)"), mcp.Required()),
+		formatParam,
+	)
+}
+
 func listAgentsTool() mcp.Tool {
 	return mcp.NewTool(
 		"list_agents",
