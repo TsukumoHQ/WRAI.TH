@@ -1012,11 +1012,25 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 	priorHolder := strVal(task.LeaseHolder)
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
+	// Reassignment recomputes profile_slug from the NEW assignee's registered
+	// profile so display + skill-routing follow the hand-off (T3). Guard: only
+	// when the new assignee actually has a non-empty registered slug — an empty
+	// lookup must never blank the task's existing profile_slug.
+	newSlug, hasSlug := d.profileSlugForAgent(project, agent)
+	setCols := "assigned_to = ?, claimed_by = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ?"
+	args := []any{agent, agent, agent, expires, now, now}
+	if hasSlug {
+		setCols += ", profile_slug = ?"
+		args = append(args, newSlug)
+	}
+	args = append(args, taskID, project)
 	if _, err = d.conn.Exec(
-		"UPDATE tasks SET assigned_to = ?, claimed_by = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ? WHERE id = ? AND project = ?",
-		agent, agent, agent, expires, now, now, taskID, project,
+		"UPDATE tasks SET "+setCols+" WHERE id = ? AND project = ?", args...,
 	); err != nil {
 		return nil, fmt.Errorf("reassign task: %w", err)
+	}
+	if hasSlug {
+		task.ProfileSlug = newSlug
 	}
 	task.AssignedTo = &agent
 	task.ClaimedBy = &agent
@@ -1029,4 +1043,58 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 		d.auditLeaseTransfer(project, taskID, agent, transfer)
 	}
 	return task, nil
+}
+
+// profileSlugForAgent returns an agent's registered profile_slug and whether it
+// is usable (a registered agent with a NON-EMPTY slug). Reassignment recomputes
+// a task's profile_slug from its new assignee so display + skill routing follow
+// the hand-off (T3); the bool lets callers skip the update when the new assignee
+// has no registered profile, so an empty result never blanks an existing slug.
+// Names are stored lowercase (migrateLowercaseAgentNames), so the lookup lowers.
+func (d *DB) profileSlugForAgent(project, agent string) (string, bool) {
+	var slug sql.NullString
+	err := d.ro().QueryRow(
+		"SELECT profile_slug FROM agents WHERE name = ? AND project = ?",
+		strings.ToLower(strings.TrimSpace(agent)), project,
+	).Scan(&slug)
+	if err != nil || !slug.Valid || slug.String == "" {
+		return "", false
+	}
+	return slug.String, true
+}
+
+// BackfillTaskProfileSlugs is a one-time, idempotent repair (T3): for every
+// active task whose assignee has a registered, non-empty profile_slug that
+// differs from the task's stored profile_slug, it recomputes profile_slug from
+// the current assignee. Additive + guarded — no schema change, no destructive
+// write — and re-running is a no-op once rows are consistent. Fixes rows made
+// stale before ReassignTask learned to recompute. Returns the rows changed.
+// The join is case-insensitive so a differently-cased assigned_to still matches.
+func (d *DB) BackfillTaskProfileSlugs() (int, error) {
+	return backfillTaskProfileSlugs(d.conn)
+}
+
+// backfillTaskProfileSlugs is the single SQL source shared by the exported
+// method (tests / manual re-run) and the one-shot migrate() call — so the
+// recompute predicate can never drift between the two.
+func backfillTaskProfileSlugs(conn *sql.DB) (int, error) {
+	res, err := conn.Exec(`
+		UPDATE tasks
+		SET profile_slug = (
+			SELECT a.profile_slug FROM agents a
+			WHERE LOWER(a.name) = LOWER(tasks.assigned_to) AND a.project = tasks.project
+		)
+		WHERE assigned_to IS NOT NULL AND assigned_to <> ''
+		  AND archived_at IS NULL
+		  AND EXISTS (
+			SELECT 1 FROM agents a
+			WHERE LOWER(a.name) = LOWER(tasks.assigned_to) AND a.project = tasks.project
+			  AND a.profile_slug IS NOT NULL AND a.profile_slug <> ''
+			  AND a.profile_slug <> tasks.profile_slug
+		  )`)
+	if err != nil {
+		return 0, fmt.Errorf("backfill task profile_slug: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
 }

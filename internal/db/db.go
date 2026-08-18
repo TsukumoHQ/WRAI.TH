@@ -975,6 +975,19 @@ func migrate(conn *sql.DB) error {
 		_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES ('purge_default_project', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'")
 	}
 
+	// One-shot backfill of task.profile_slug stale rows (T3), guarded by a
+	// settings marker so it runs once on the upgrade boot (when the agents that
+	// own the tasks are present) and never again — the live recompute in
+	// ReassignTask keeps rows correct thereafter. Idempotent regardless.
+	var backfilledSlugs string
+	_ = conn.QueryRow("SELECT value FROM settings WHERE key = 'backfill_task_profile_slug'").Scan(&backfilledSlugs)
+	if backfilledSlugs == "" {
+		if n, err := backfillTaskProfileSlugs(conn); err == nil && n > 0 {
+			log.Printf("migrate: backfilled profile_slug on %d reassigned task(s) from current assignee (T3)", n)
+		}
+		_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES ('backfill_task_profile_slug', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'")
+	}
+
 	return nil
 }
 
