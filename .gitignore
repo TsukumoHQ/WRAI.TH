@@ -38,3 +38,6 @@ test.txt
 .fastembed_cache/
 vault/
 .worktrees/
+
+# Local MCP config: copy .mcp.json.example -> .mcp.json (git-ignored; may hold machine-local tokens).
+.mcp.json

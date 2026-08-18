@@ -147,6 +147,8 @@ Claude Code resolves MCP servers from multiple levels, merged top-down:
 
 If the relay appears at multiple levels, Claude Code deduplicates by server name (`agent-relay`). Project-level takes precedence over global.
 
+> **This repo:** `.mcp.json` is **git-ignored** (local machines inject machine-local MCP tokens into it, which would otherwise dirty every worktree). Copy the tracked template to start: `cp .mcp.json.example .mcp.json`.
+
 > **Tip:** Don't put `?project=` in the URL. Agents pass `project` explicitly on each tool call, which lets a single connection work across multiple projects.
 
 > **Token tip:** Add `?tools=discovery` to the URL for agents that only need a few tools. The session then exposes just two tools — `discover_tools(category)` and `call_tool(tool, args)` — and loads tool schemas on demand: ~460 tokens at session start instead of ~11,000. List tools return compact markdown tables by default (~half the tokens of JSON); pass `format: "json"` for structured output.
