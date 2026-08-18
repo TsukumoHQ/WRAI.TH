@@ -122,8 +122,8 @@ func TestResourceUnscopedReturnsHint(t *testing.T) {
 // Registration is additive and read-only: RegisterResources wires all four
 // catalogs onto a server that advertises resource capability.
 func TestRegisterResourcesWiresCatalogs(t *testing.T) {
-	if len(resourceCatalogURIs) != 4 {
-		t.Fatalf("expected 4 catalog URIs, got %d", len(resourceCatalogURIs))
+	if len(resourceCatalogURIs) != 5 {
+		t.Fatalf("expected 5 catalog URIs, got %d", len(resourceCatalogURIs))
 	}
 	h := testHandlers(t)
 	srv := server.NewMCPServer("test", "0.0.1", server.WithResourceCapabilities(false, false))

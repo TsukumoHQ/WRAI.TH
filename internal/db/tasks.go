@@ -200,6 +200,39 @@ func (d *DB) GetTaskByPR(project string, prNumber int, repo string) (*models.Tas
 	return &t, nil
 }
 
+// ListPRReconcileCandidates returns tasks with a linked, still-open PR whose
+// task is non-terminal — the set an EXTERNAL poller (niwa, which owns gh) GETs
+// to catch a missed pull_request webhook and converge (PR-link S3-relay). The
+// relay stays INBOUND-only for GitHub (no outbound client / token); it only
+// exposes WHO to reconcile, never reaches out itself. Bounded to keep the read
+// small.
+func (d *DB) ListPRReconcileCandidates(project string, limit int) ([]models.Task, error) {
+	if limit <= 0 {
+		limit = 200
+	}
+	rows, err := d.ro().Query(
+		"SELECT "+taskColumns+" FROM tasks "+
+			"WHERE project = ? AND archived_at IS NULL "+
+			"AND pr_number IS NOT NULL AND pr_state = 'open' "+
+			"AND status NOT IN ('done','cancelled') "+
+			"ORDER BY last_activity_at DESC LIMIT ?",
+		project, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []models.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // ForcePRTransition applies a PR-driven state change as the supervisor, with a
 // NO-RESURRECT guard: a terminal task (done/cancelled) is never moved back by a
 // late/duplicate webhook, and an already-in-target task is a no-op. Runs the

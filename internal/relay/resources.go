@@ -23,11 +23,13 @@ import (
 // bounded index (ids + a little metadata), not full record dumps. An agent reads
 // the index, then uses the existing tools for detail/actions.
 const (
-	resourceTasksURI   = "relay://tasks"
-	resourceAgentsURI  = "relay://agents"
-	resourceBoardsURI  = "relay://boards"
-	resourceMemoryURI  = "relay://memory"
-	resourceCatalogCap = 100 // per-catalog row cap keeps a resource read bounded
+	resourceTasksURI     = "relay://tasks"
+	resourceAgentsURI    = "relay://agents"
+	resourceBoardsURI    = "relay://boards"
+	resourceMemoryURI    = "relay://memory"
+	resourcePRReconcile  = "relay://pr-reconcile"
+	resourceCatalogCap   = 100 // per-catalog row cap keeps a resource read bounded
+	resourceReconcileCap = 200 // reconcile candidate cap
 )
 
 // RegisterResources wires the read-only catalog resources onto the MCP server.
@@ -53,6 +55,11 @@ func (h *Handlers) RegisterResources(srv *server.MCPServer) {
 			mcp.WithResourceDescription("Read-only index of the project's accepted decisions (full) plus a compact memory index (key/scope/layer/updated_at, no values). Scoped to ?project=."),
 			mcp.WithMIMEType("application/json")),
 		h.resourceMemory)
+	srv.AddResource(
+		mcp.NewResource(resourcePRReconcile, "PR reconcile candidates",
+			mcp.WithResourceDescription("Read-only set of tasks with a linked, still-open GitHub PR whose task is non-terminal — the candidates an external poller (which owns gh) GETs to catch a missed pull_request webhook. The relay is inbound-only: it exposes WHO to reconcile, never reaches GitHub itself. Scoped to ?project=."),
+			mcp.WithMIMEType("application/json")),
+		h.resourcePRReconcile)
 }
 
 // jsonResource marshals a catalog payload into a single JSON text resource. A
@@ -211,7 +218,43 @@ func (h *Handlers) resourceMemory(ctx context.Context, req mcp.ReadResourceReque
 	})
 }
 
+func (h *Handlers) resourcePRReconcile(ctx context.Context, req mcp.ReadResourceRequest) ([]mcp.ResourceContents, error) {
+	project := ProjectFromContext(ctx)
+	if project == "" {
+		return unscopedCatalog(req.Params.URI)
+	}
+	tasks, err := h.db.ListPRReconcileCandidates(project, resourceReconcileCap)
+	if err != nil {
+		return nil, fmt.Errorf("list pr reconcile candidates: %w", err)
+	}
+	rows := make([]map[string]any, 0, len(tasks))
+	for _, t := range tasks {
+		row := map[string]any{
+			"task_id": t.ID,
+			"status":  t.Status,
+		}
+		if t.PRNumber != nil {
+			row["pr_number"] = *t.PRNumber
+		}
+		if t.PRRepo != nil {
+			row["pr_repo"] = *t.PRRepo
+		}
+		if t.PRState != nil {
+			row["pr_state"] = *t.PRState
+		}
+		if t.PRURL != nil {
+			row["pr_url"] = *t.PRURL
+		}
+		rows = append(rows, row)
+	}
+	return jsonResource(req.Params.URI, map[string]any{
+		"project":    project,
+		"count":      len(rows),
+		"candidates": rows,
+	})
+}
+
 // resourceCatalogURIs is the set of catalog URIs, for tests and docs.
 var resourceCatalogURIs = []string{
-	resourceTasksURI, resourceAgentsURI, resourceBoardsURI, resourceMemoryURI,
+	resourceTasksURI, resourceAgentsURI, resourceBoardsURI, resourceMemoryURI, resourcePRReconcile,
 }
