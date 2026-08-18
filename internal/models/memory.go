@@ -29,4 +29,11 @@ type Memory struct {
 	ValidUntil     *string `json:"valid_until,omitempty"`
 	Status         string  `json:"status"` // "live" | "stale" | "archived"
 	ArchivedReason *string `json:"archived_reason,omitempty"`
+
+	// Importance is a DERIVED salience score in [0,1] (MemPalace slice 1). It is
+	// a pure read-time function of existing columns (layer, confidence, recency,
+	// version) — NOT a stored column and NOT a write. Callers use it to rank
+	// which memories matter most; ranked recall (slice 2) composites it with FTS
+	// relevance. Stamped by scanMemory alongside Status, so every read carries it.
+	Importance float64 `json:"importance"`
 }

@@ -916,6 +916,7 @@ func scanMemory(row rowScanner, now string) (*models.Memory, error) {
 		return nil, fmt.Errorf("scan memory: %w", err)
 	}
 	m.Status = effectiveStatus(&m, now)
+	m.Importance = scoreImportance(&m, now, activeImportanceWeights())
 	return &m, nil
 }
 

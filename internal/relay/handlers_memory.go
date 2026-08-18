@@ -5,9 +5,16 @@ import (
 	"agent-relay/internal/models"
 	"context"
 	"fmt"
+	"math"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// roundImportance trims the derived salience score to 3 decimals so compact
+// list/search rows stay token-light (the raw float can run 17 digits).
+func roundImportance(v float64) float64 {
+	return math.Round(v*1000) / 1000
+}
 
 func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
@@ -179,6 +186,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 			"updated_at": m.UpdatedAt,
 			"conflict":   m.ConflictWith != nil,
 			"status":     m.Status,
+			"importance": roundImportance(m.Importance),
 		}
 		if m.ValidUntil != nil {
 			row["valid_until"] = *m.ValidUntil
@@ -236,6 +244,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 			"updated_at": m.UpdatedAt,
 			"conflict":   m.ConflictWith != nil,
 			"status":     m.Status,
+			"importance": roundImportance(m.Importance),
 		}
 		if m.ValidUntil != nil {
 			row["valid_until"] = *m.ValidUntil
