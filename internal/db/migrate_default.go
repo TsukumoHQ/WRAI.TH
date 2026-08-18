@@ -69,17 +69,64 @@ func migratePurgeDefaultProject(conn *sql.DB) {
 		return true
 	}
 
+	// ID-linked child tables that carry no `project` column of their own, so the
+	// sqlite_master discovery above cannot see them. Scope each to 'default' via
+	// its parent and purge FIRST — otherwise the parent's deletion below strands
+	// them as orphans (no enforced FK catches it; the link is a bare TEXT id).
+	for _, q := range []string{
+		"DELETE FROM conversation_members WHERE conversation_id IN (SELECT id FROM conversations WHERE project = 'default')",
+		"DELETE FROM conversation_reads WHERE conversation_id IN (SELECT id FROM conversations WHERE project = 'default')",
+		"DELETE FROM team_inbox WHERE team_id IN (SELECT id FROM teams WHERE project = 'default')",
+		"DELETE FROM message_reads WHERE message_id IN (SELECT id FROM messages WHERE project = 'default')",
+	} {
+		res, err := tx.Exec(q)
+		if err != nil {
+			log.Printf("purge default: junction delete failed: %v", err)
+			return
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			total += n
+		}
+	}
+
+	// The 'mauvais waterfall': the ONLY enforced FK among project-column tables is
+	// deliveries.message_id -> messages(id) (RESTRICT, no ON DELETE CASCADE, see
+	// db.go:380). sqlite_master discovery order is table-CREATION order, which
+	// lists `messages` BEFORE `deliveries`, so a naive in-order purge deletes the
+	// parent first and fails with "FOREIGN KEY constraint failed", aborting the
+	// whole purge. Defer the FK parents to a trailing pass so every child is gone
+	// first. All other project-column tables carry no enforced FK and are
+	// order-independent.
+	deferred := map[string]bool{"messages": true}
 	for _, t := range tables {
-		if skip[t] {
+		if skip[t] || deferred[t] {
 			continue
 		}
 		if !del(t, "project") {
 			return
 		}
 	}
+	for _, t := range tables {
+		if deferred[t] && !del(t, "project") {
+			return
+		}
+	}
 	// The projects registry keys the project on `name`, not `project`.
 	if !del("projects", "name") {
 		return
+	}
+
+	// FTS shadow tables are trigger-synced on every base-row DELETE, so the purges
+	// above already removed the matching index rows; this defensive rebuild
+	// guarantees no dangling index row survives (e.g. from a row ever removed out
+	// of band). Only the two content-backed FTS tables exist — memories_fts and
+	// vault_docs_fts; messages/tasks/conversations have no FTS. Cheap here: the
+	// retired 'default' data is small and this migration runs once.
+	for _, fts := range []string{"memories_fts", "vault_docs_fts"} {
+		if _, err := tx.Exec("INSERT INTO " + fts + "(" + fts + ") VALUES('rebuild')"); err != nil { //nolint:gosec // fts is an internal identifier, never user input
+			log.Printf("purge default: %s rebuild failed: %v", fts, err)
+			return
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
