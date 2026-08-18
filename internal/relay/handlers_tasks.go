@@ -5,11 +5,24 @@ import (
 	"agent-relay/internal/models"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
+
+// typedTaskError renders a *db.TaskError as a structured tool error whose body is
+// {"error": <code>, "message": <msg>} so a caller can branch on a stable code
+// (park on TASK_LEASE_HELD, treat TASK_STATE_CONFLICT as a lost race) instead of
+// pattern-matching a prose string — the "no infinite-retry path" contract.
+func typedTaskError(te *db.TaskError) *mcp.CallToolResult {
+	b, err := json.Marshal(map[string]string{"error": te.Code, "message": te.Msg})
+	if err != nil {
+		return mcp.NewToolResultError(te.Error())
+	}
+	return mcp.NewToolResultError(string(b))
+}
 
 // missingTicketFields returns which of goal / acceptance_criteria / dod are
 // absent, in dispatch order. acceptanceCriteria is the raw wire value (a JSON
@@ -210,6 +223,49 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
 	pushStatusAsync(h.getConnector(), task, "accepted", nil)
 	return h.resultJSONTracked(project, agent, "claim_task", task)
+}
+
+// HandleReclaimTask takes over a DEAD holder's task — the primitive niwa's
+// resume-protocol part 3 (supervisor-driven re-claim + ack) stands on. It
+// refuses a live holder's task with TASK_LEASE_HELD and a lost CAS race with
+// TASK_STATE_CONFLICT, both as typed structured errors so the caller parks
+// rather than hot-loops. On success the task is 'accepted' under the caller with
+// a fresh lease, and a task.lease_transferred event carries {from,to,reason}.
+func (h *Handlers) HandleReclaimTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	if taskID == "" {
+		return mcp.NewToolResultError("task_id is required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
+
+	task, err := h.db.ReclaimTask(taskID, agent, project)
+	if err != nil {
+		var te *db.TaskError
+		if errors.As(err, &te) {
+			return typedTaskError(te), nil
+		}
+		return mcp.NewToolResultError(fmt.Sprintf("failed to reclaim task: %v", err)), nil
+	}
+
+	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
+	// The lease holder changed — announce the transfer (SSE + audit already
+	// written by the DB layer) so a subscriber sees the hand-off and its reason
+	// before the ordinary claimed event.
+	if task.LeaseTransfer != nil {
+		emitTaskEvent(h.events, "task.lease_transferred", "claim", project, task, map[string]any{
+			"from":   task.LeaseTransfer.From,
+			"to":     task.LeaseTransfer.To,
+			"reason": task.LeaseTransfer.Reason,
+		})
+	}
+	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
+	pushStatusAsync(h.getConnector(), task, "accepted", nil)
+	return h.resultJSONTracked(project, agent, "reclaim_task", task)
 }
 
 func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

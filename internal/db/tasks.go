@@ -65,7 +65,8 @@ const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, descri
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
 	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
 	"git_branch, git_worktree, git_target, " +
-	"goal, acceptance_criteria, dod, refusal_notified_at"
+	"goal, acceptance_criteria, dod, refusal_notified_at, " +
+	"lease_holder, lease_expires_at, lease_heartbeat_at"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -77,7 +78,8 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
 		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
 		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
-		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.RefusalNotifiedAt)
+		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.RefusalNotifiedAt,
+		&t.LeaseHolder, &t.LeaseExpiresAt, &t.LeaseHeartbeatAt)
 	return t, err
 }
 
@@ -200,6 +202,16 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 			}
 		}
 		if !valid {
+			// A claim (→accepted) on a task that has already left 'pending' is not
+			// a malformed request — it is a LOST claim race (a concurrent claimer,
+			// or a reclaim, already took it). Surface the typed TASK_STATE_CONFLICT
+			// so the caller parks instead of hot-looping on a bare-string error.
+			// This makes every double-claim loser get the typed code regardless of
+			// whether it read the pre- or post-commit state.
+			if newStatus == "accepted" && task.Status != "pending" {
+				return nil, newTaskError(CodeTaskStateConflict,
+					"task %s already claimed (status %q) before claim by %q could apply", taskID, task.Status, agentName)
+			}
 			return nil, fmt.Errorf("invalid transition: %s → %s", task.Status, newStatus)
 		}
 	}
@@ -212,6 +224,10 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	// compare-and-swap guard (AND status = oldStatus) so the write only lands if
 	// the row hasn't changed since GetTask read it.
 	oldStatus := task.Status
+	// priorHolder is the lease holder before this transition — captured so a
+	// releasing transition (done/blocked/cancelled/pending) can report who gave
+	// the lease up (task.lease_transferred, reason voluntary).
+	priorHolder := strVal(task.LeaseHolder)
 
 	// Build update. Every transition auto-stamps its temporal trail with zero
 	// manual input.
@@ -328,12 +344,60 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	// instead of returning a task the caller never actually transitioned. This is
 	// what stops two agents double-claiming the same task.
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
-		return nil, fmt.Errorf("concurrent transition on task %s: status changed from %q before %q could apply", taskID, oldStatus, newStatus)
+		return nil, newTaskError(CodeTaskStateConflict,
+			"status changed from %q before %q could apply on task %s", oldStatus, newStatus, taskID)
 	}
 	// A transition is activity — reset the stale clock.
 	_, _ = d.conn.Exec("UPDATE tasks SET last_activity_at = ? WHERE id = ? AND project = ?", now, taskID, project)
 	task.LastActivityAt = &now
+
+	// Lease bookkeeping runs in the same single-writer critical section, right
+	// after the status CAS landed, so no other writer interleaves between the two.
+	d.applyLeaseOnTransition(task, newStatus, agentName, priorHolder, now)
 	return task, nil
+}
+
+// applyLeaseOnTransition maintains the task lease as a side effect of a status
+// transition, mutating the in-memory task and its row in lockstep:
+//   - accepted/in-progress/in-review by the working agent → hold + push expiry
+//     (implicit heartbeat: any forward transition by the holder extends it);
+//   - done/blocked/cancelled/pending → RELEASE (clear holder + expiry). If a
+//     holder existed, stamp task.LeaseTransfer{from,to:"",reason:voluntary} so
+//     the handler can emit task.lease_transferred, and record it to the audit
+//     trail (nothing leaves a holder without a trace).
+//
+// Writes are best-effort follow-ups: the status transition already committed, so
+// a lease write failure must not fail the transition — it only degrades the
+// lease's freshness, self-heals on the next transition, and the expiry backstop
+// still bounds a stale holder.
+func (d *DB) applyLeaseOnTransition(task *models.Task, newStatus, agentName, priorHolder, now string) {
+	switch newStatus {
+	case "accepted", "in-progress", "in-review":
+		expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
+		if _, err := d.conn.Exec(
+			"UPDATE tasks SET lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ? WHERE id = ? AND project = ?",
+			agentName, expires, now, task.ID, task.Project,
+		); err == nil {
+			task.LeaseHolder = &agentName
+			task.LeaseExpiresAt = &expires
+			hb := now
+			task.LeaseHeartbeatAt = &hb
+		}
+	case "done", "blocked", "cancelled", "pending":
+		if _, err := d.conn.Exec(
+			"UPDATE tasks SET lease_holder = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL WHERE id = ? AND project = ?",
+			task.ID, task.Project,
+		); err == nil {
+			task.LeaseHolder = nil
+			task.LeaseExpiresAt = nil
+			task.LeaseHeartbeatAt = nil
+		}
+		if priorHolder != "" {
+			transfer := &models.LeaseTransfer{From: priorHolder, To: "", Reason: "voluntary"}
+			task.LeaseTransfer = transfer
+			d.auditLeaseTransfer(task.Project, task.ID, agentName, transfer)
+		}
+	}
 }
 
 func (d *DB) GetTask(taskID, project string) (*models.Task, error) {
@@ -942,13 +1006,27 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 	if task.Source == "linear" {
 		return nil, errLinearReadOnly
 	}
+	// An orchestrator reassign is an authoritative (voluntary) hand-off: it moves
+	// the lease to the new agent too, so the lease never dangles on the prior
+	// holder after the task has been handed on.
+	priorHolder := strVal(task.LeaseHolder)
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
 	if _, err = d.conn.Exec(
-		"UPDATE tasks SET assigned_to = ?, claimed_by = ? WHERE id = ? AND project = ?",
-		agent, agent, taskID, project,
+		"UPDATE tasks SET assigned_to = ?, claimed_by = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ? WHERE id = ? AND project = ?",
+		agent, agent, agent, expires, now, now, taskID, project,
 	); err != nil {
 		return nil, fmt.Errorf("reassign task: %w", err)
 	}
 	task.AssignedTo = &agent
 	task.ClaimedBy = &agent
+	task.LeaseHolder = &agent
+	task.LeaseExpiresAt = &expires
+	task.LeaseHeartbeatAt = &now
+	if priorHolder != agent {
+		transfer := &models.LeaseTransfer{From: priorHolder, To: agent, Reason: "voluntary"}
+		task.LeaseTransfer = transfer
+		d.auditLeaseTransfer(project, taskID, agent, transfer)
+	}
 	return task, nil
 }

@@ -481,6 +481,16 @@ func cancelTaskTool() mcp.Tool {
 	)
 }
 
+func reclaimTaskTool() mcp.Tool {
+	return mcp.NewTool(
+		"reclaim_task",
+		mcp.WithDescription("Take over a DEAD holder's task (supervisor re-claim). Succeeds only when the current lease has expired OR its holder is deregistered/inactive; a live holder's task refuses with TASK_LEASE_HELD. On success the task moves to 'accepted' under the caller with a fresh lease, and a task.lease_transferred event fires."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+	)
+}
+
 func getTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"get_task",

@@ -26,6 +26,7 @@ func TestClaimTask_NoDoubleClaim(t *testing.T) {
 		mu       sync.Mutex
 		winners  []string
 		failures int
+		typed    int
 	)
 	start := make(chan struct{})
 	for i := 0; i < racers; i++ {
@@ -41,6 +42,12 @@ func TestClaimTask_NoDoubleClaim(t *testing.T) {
 				winners = append(winners, agent)
 			} else {
 				failures++
+				// Every loser must get the TYPED conflict — whether it lost the CAS
+				// (read pending) or read the post-commit state — so a client parks
+				// on a stable code, never a bare string.
+				if te, ok := err.(*TaskError); ok && te.Code == CodeTaskStateConflict {
+					typed++
+				}
 			}
 		}()
 	}
@@ -52,6 +59,9 @@ func TestClaimTask_NoDoubleClaim(t *testing.T) {
 	}
 	if failures != racers-1 {
 		t.Fatalf("want %d losers to get a conflict error, got %d", racers-1, failures)
+	}
+	if typed != racers-1 {
+		t.Fatalf("want all %d losers to get typed %s, got %d", racers-1, CodeTaskStateConflict, typed)
 	}
 
 	// The persisted row must reflect the single winner.

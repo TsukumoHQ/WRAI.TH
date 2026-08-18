@@ -475,6 +475,20 @@ func migrate(conn *sql.DB) error {
 		// idle-since-dispatch — a heads-down lead on a multi-hour build isn't stale.
 		"last_activity_at": "TEXT",
 
+		// --- Lease zone (T1) — atomic ownership. lease_holder is the agent that
+		// currently owns the task; lease_expires_at is when the lease lapses
+		// (claim/start/review by the holder sets now + lease TTL; complete/block/
+		// cancel clear both). lease_heartbeat_at records the instant the lease was
+		// last extended — the implicit heartbeat is any forward transition by the
+		// holder, so heartbeat_at is that transition's timestamp (distinct from
+		// expires_at = that timestamp + TTL). A dead holder's task is re-claimable
+		// only once the lease has expired or the holder is deregistered/inactive.
+		// Additive + nullable: an older fleet DB with no lease columns reads as
+		// "unheld", so a newer binary and an old DB both boot.
+		"lease_holder":       "TEXT",
+		"lease_expires_at":   "TEXT",
+		"lease_heartbeat_at": "TEXT",
+
 		// --- Git zone (review gate) — branch/worktree/target of the work,
 		// set at review_task time so an external supervisor can merge it.
 		"git_branch":   "TEXT",

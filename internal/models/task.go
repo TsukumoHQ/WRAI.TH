@@ -49,6 +49,27 @@ type Task struct {
 	// measures idle from here, not from dispatch.
 	LastActivityAt *string `json:"last_activity_at,omitempty"`
 
+	// --- Lease zone (T1, atomic ownership) — who currently holds the task and
+	// until when. A claim/start/review by the working agent sets the holder and
+	// pushes LeaseExpiresAt = now + lease TTL (implicit heartbeat: any forward
+	// transition by the holder extends it). complete/block/cancel RELEASE the
+	// lease (both cleared). A dead holder's task may be re-claimed only once the
+	// lease has expired or the holder is deregistered/inactive; a live holder's
+	// lease refuses transfer (TASK_LEASE_HELD). Additive, nullable — an old row
+	// with no lease reads as "unheld".
+	LeaseHolder    *string `json:"lease_holder,omitempty"`
+	LeaseExpiresAt *string `json:"lease_expires_at,omitempty"`
+	// LeaseHeartbeatAt is the instant the lease was last extended (the holder's
+	// most recent forward transition — the implicit heartbeat). Distinct from
+	// LeaseExpiresAt, which is that instant + TTL; kept for audit/observability.
+	LeaseHeartbeatAt *string `json:"lease_heartbeat_at,omitempty"`
+
+	// LeaseTransfer is a TRANSIENT, computed field (never persisted, never
+	// scanned): when a transition changed the lease holder, the DB layer stamps
+	// it so the handler can emit task.lease_transferred (SSE) without re-reading
+	// prior state. nil when the transition left the holder unchanged.
+	LeaseTransfer *LeaseTransfer `json:"lease_transfer,omitempty"`
+
 	// --- Git zone (review gate) — where the work physically lives, so an
 	// external supervisor (e.g. niwa's Q&A gate) can review and merge it.
 	// Set by the doer at review_task time; never interpreted by the relay.
@@ -74,6 +95,17 @@ type Task struct {
 	RefusalNotifiedAt *string `json:"refusal_notified_at,omitempty"`
 
 	Subtasks []Task `json:"subtasks,omitempty"`
+}
+
+// LeaseTransfer describes a change of a task's lease holder, carried on the
+// task.lease_transferred event (SSE) and the audit trail. Reason is one of
+// "expired" | "deregistered" (dead-holder re-claim), or "voluntary" (the holder
+// released via complete/block/cancel, or an orchestrator reassign). To is empty
+// on a pure release (holder → none).
+type LeaseTransfer struct {
+	From   string `json:"from"`
+	To     string `json:"to,omitempty"`
+	Reason string `json:"reason"`
 }
 
 // AuditEntry is one logged orchestrator/agent action against a resource — the
