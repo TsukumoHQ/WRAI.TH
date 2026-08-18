@@ -95,11 +95,22 @@ func ackDeliveryTool() mcp.Tool {
 func deliveryStatusTool() mcp.Tool {
 	return mcp.NewTool(
 		"delivery_status",
-		mcp.WithDescription("Read the delivery/ack state of a message (queued|surfaced|acknowledged|expired) — who it reached and whether they saw it. Pass message_id OR agent. Read-only."),
+		mcp.WithDescription("Read a message's delivery/ack state (queued|surfaced|acknowledged|expired). Pass message_id OR agent. Read-only."),
 		asParam,
 		projectParam,
-		mcp.WithString("message_id", mcp.Description("List all deliveries of this message")),
-		mcp.WithString("agent", mcp.Description("List this recipient's deliveries (defaults to caller if message_id omitted)")),
+		mcp.WithString("message_id", mcp.Description("All deliveries of this message")),
+		mcp.WithString("agent", mcp.Description("This recipient's deliveries")),
+	)
+}
+
+func deadletterTool() mcp.Tool {
+	return mcp.NewTool(
+		"deadletter",
+		mcp.WithDescription("List messages that TTL-expired while still unread (so a P0/P1 never vanishes silently). Read-only; defaults to caller."),
+		asParam,
+		projectParam,
+		mcp.WithString("agent", mcp.Description("Recipient (default caller)")),
+		mcp.WithNumber("limit", mcp.Description("Max rows (default 50)")),
 	)
 }
 

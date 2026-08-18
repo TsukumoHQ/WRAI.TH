@@ -383,6 +383,26 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_deliveries_agent_state ON deliveries(to_agent, project, state)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_deliveries_state ON deliveries(state)`)
 
+	// Deadletter (T6): a durable journal of expired-UNREAD deliveries. The
+	// message-retention GC (PurgeExpiredMessages) hard-deletes expired messages +
+	// their deliveries, so an unread P0/P1 that TTL-expires would otherwise vanish
+	// with no trace. This table is captured at expiry time (ExpireDeliveries) and
+	// is NOT touched by the GC, so the record survives. UNIQUE(message_id,to_agent)
+	// makes the capture idempotent.
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS deadletter (
+		id          TEXT PRIMARY KEY,
+		message_id  TEXT NOT NULL,
+		to_agent    TEXT NOT NULL,
+		from_agent  TEXT NOT NULL,
+		priority    TEXT NOT NULL DEFAULT 'P2',
+		subject     TEXT NOT NULL DEFAULT '',
+		project     TEXT NOT NULL DEFAULT 'default',
+		created_at  TEXT NOT NULL,
+		expired_at  TEXT NOT NULL,
+		UNIQUE(message_id, to_agent)
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_deadletter_agent ON deadletter(to_agent, project, expired_at)`)
+
 	// Backfill deliveries for existing messages
 	migrateDeliveries(conn)
 

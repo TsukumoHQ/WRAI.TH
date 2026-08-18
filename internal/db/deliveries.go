@@ -357,7 +357,30 @@ func (d *DB) AcknowledgeConversationDeliveries(conversationID, agentName, projec
 // ExpireDeliveries marks deliveries for expired messages.
 func (d *DB) ExpireDeliveries() (int, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	result, err := d.conn.Exec(
+
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("expire deliveries begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// T6: journal every expiring UNREAD delivery to the durable deadletter FIRST,
+	// so a TTL-expired P0/P1 leaves a queryable record even after the retention GC
+	// hard-deletes the message + delivery. INSERT OR IGNORE keeps it idempotent
+	// across repeated sweeps (UNIQUE message_id,to_agent). Same predicate as the
+	// expiry UPDATE below, so exactly the rows being expired are journaled.
+	if _, err := tx.Exec(
+		`INSERT OR IGNORE INTO deadletter
+		   (id, message_id, to_agent, from_agent, priority, subject, project, created_at, expired_at)
+		 SELECT lower(hex(randomblob(16))), d.message_id, d.to_agent, m.from_agent, m.priority, m.subject, d.project, m.created_at, ?
+		 FROM deliveries d JOIN messages m ON d.message_id = m.id
+		 WHERE d.state IN ('queued', 'surfaced') AND m.expired_at IS NOT NULL`,
+		now,
+	); err != nil {
+		return 0, fmt.Errorf("journal deadletter: %w", err)
+	}
+
+	result, err := tx.Exec(
 		`UPDATE deliveries SET state = 'expired', expired_at = ?
 		 WHERE state IN ('queued', 'surfaced')
 		   AND message_id IN (SELECT id FROM messages WHERE expired_at IS NOT NULL)`,
@@ -366,8 +389,44 @@ func (d *DB) ExpireDeliveries() (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("expire deliveries: %w", err)
 	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("expire deliveries commit: %w", err)
+	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+// Deadletter lists journaled expired-unread messages (T6) for a project,
+// optionally filtered to one recipient. Newest-expired first. This is the
+// queryable record that guarantees a TTL-expired P0/P1 never vanishes silently.
+func (d *DB) Deadletter(project, agent string, limit int) ([]models.DeadletterRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	where := "project = ?"
+	args := []any{project}
+	if agent != "" {
+		where += " AND to_agent = ?"
+		args = append(args, strings.ToLower(strings.TrimSpace(agent)))
+	}
+	args = append(args, limit)
+	rows, err := d.ro().Query(
+		"SELECT message_id, to_agent, from_agent, priority, subject, created_at, expired_at "+
+			"FROM deadletter WHERE "+where+" ORDER BY expired_at DESC LIMIT ?", args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("deadletter: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []models.DeadletterRow
+	for rows.Next() {
+		var r models.DeadletterRow
+		if err := rows.Scan(&r.MessageID, &r.ToAgent, &r.From, &r.Priority, &r.Subject, &r.CreatedAt, &r.ExpiredAt); err != nil {
+			return nil, fmt.Errorf("scan deadletter: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // HasDeliveries returns true if the deliveries table has any rows.

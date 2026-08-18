@@ -34,3 +34,15 @@ type DeliveryStatusRow struct {
 	SurfacedAt     *string `json:"surfaced_at,omitempty"`
 	AcknowledgedAt *string `json:"acknowledged_at,omitempty"`
 }
+
+// DeadletterRow is one journaled expired-unread message (T6): the durable record
+// that a TTL-expired P0/P1 never vanishes silently even after retention GC.
+type DeadletterRow struct {
+	MessageID string `json:"message_id"`
+	ToAgent   string `json:"to_agent"`
+	From      string `json:"from"`
+	Priority  string `json:"priority"`
+	Subject   string `json:"subject"`
+	CreatedAt string `json:"created_at"`
+	ExpiredAt string `json:"expired_at"`
+}

@@ -61,7 +61,7 @@ type registeredTool struct {
 // for display; keep summaries to one line — they are the discovery-mode index.
 var toolCategories = []struct{ name, summary string }{
 	{"session", "identity + boot: whoami, register_agent, get_session_context, query_context"},
-	{"messaging", "send/receive: send_message, get_inbox, get_message, ack_delivery, delivery_status, get_thread, mark_read, get_team_inbox"},
+	{"messaging", "send/receive: send_message, get_inbox, get_message, ack_delivery, delivery_status, deadletter, get_thread, mark_read, get_team_inbox"},
 	{"conversations", "multi-agent threads: create, list, get messages, invite, leave, archive"},
 	{"tasks", "task lifecycle: dispatch, claim, start, review, complete, block, resume, cancel, get, list, update, move, archive, batch ops"},
 	{"boards", "task boards: create, list, archive, delete"},
@@ -86,6 +86,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: getInboxTool(), Handler: h.HandleGetInbox}, "messaging"},
 		{server.ServerTool{Tool: ackDeliveryTool(), Handler: h.HandleAckDelivery}, "messaging"},
 		{server.ServerTool{Tool: deliveryStatusTool(), Handler: h.HandleDeliveryStatus}, "messaging"},
+		{server.ServerTool{Tool: deadletterTool(), Handler: h.HandleDeadletter}, "messaging"},
 		{server.ServerTool{Tool: getThreadTool(), Handler: h.HandleGetThread}, "messaging"},
 		{server.ServerTool{Tool: getMessageTool(), Handler: h.HandleGetMessage}, "messaging"},
 		{server.ServerTool{Tool: markReadTool(), Handler: h.HandleMarkRead}, "messaging"},

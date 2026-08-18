@@ -382,6 +382,30 @@ func (h *Handlers) HandleDeliveryStatus(ctx context.Context, req mcp.CallToolReq
 	})
 }
 
+// HandleDeadletter lists expired-unread messages (T6) — the durable record that
+// a TTL-expired P0/P1 left behind. Read-only. Defaults to the caller.
+func (h *Handlers) HandleDeadletter(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	target := req.GetString("agent", "")
+	if target == "" {
+		target = agent
+	}
+	limit := clampLimit(req.GetInt("limit", 50))
+	rows, err := h.db.Deadletter(project, target, limit)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to list deadletter: %v", err)), nil
+	}
+	if rows == nil {
+		rows = []models.DeadletterRow{}
+	}
+	return h.resultJSONTracked(project, agent, "deadletter", map[string]any{
+		"agent":      target,
+		"count":      len(rows),
+		"deadletter": rows,
+	})
+}
+
 func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	messageID := req.GetString("message_id", "")
 	if messageID == "" {
