@@ -82,8 +82,12 @@ func (h *Handlers) HandleWhoami(ctx context.Context, req mcp.CallToolRequest) (*
 func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	name := strings.ToLower(req.GetString("name", ""))
-	if name == "" {
-		return mcp.NewToolResultError("name is required"), nil
+	// Founder decision (e2f5ad14 #5): NO anonymous agents. Refuse an unnamed /
+	// "anonymous" registration, and refuse the retired 'default' catch-all
+	// project, with a TYPED code — BEFORE any DB write, so an anon/default
+	// registration never takes the single-writer lock and can't wedge it.
+	if name == "" || name == "anonymous" || project == "default" {
+		return anonymousRefusedError(name, project), nil
 	}
 	if !validProjectName(project) {
 		return mcp.NewToolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", project)), nil

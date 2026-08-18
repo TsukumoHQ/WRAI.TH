@@ -29,6 +29,28 @@ func senderInactiveError(agent, project, reason string) *mcp.CallToolResult {
 	return mcp.NewToolResultError(string(b))
 }
 
+// anonymousRefusedError is the TYPED refusal for register_agent when the actor
+// is anonymous/unnamed or targets the retired 'default' catch-all project
+// (founder decision: no anonymous agents). Returned BEFORE any DB write, so the
+// anon/default path never takes the single-writer lock. Carries a stable machine
+// code so a client can branch instead of parsing prose.
+func anonymousRefusedError(name, project string) *mcp.CallToolResult {
+	reason := "name is required"
+	if name == "anonymous" {
+		reason = "reserved name 'anonymous'"
+	} else if name != "" {
+		reason = "default-project registration not allowed"
+	}
+	b, _ := json.Marshal(map[string]any{
+		"code":    "ANONYMOUS_REGISTRATION_REFUSED",
+		"reason":  reason,
+		"name":    name,
+		"project": project,
+		"message": "anonymous agents are not allowed: register with a real name and an explicit non-default project.",
+	})
+	return mcp.NewToolResultError(string(b))
+}
+
 // registeredTool pairs a ServerTool with the category used by discover_tools.
 type registeredTool struct {
 	server.ServerTool
