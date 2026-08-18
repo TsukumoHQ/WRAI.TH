@@ -79,6 +79,12 @@ func (r *Relay) apiGitHubWebhook(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, `{"error":"persist event"}`, http.StatusInternalServerError)
 		return
 	}
+	// PR-link S2: drive the linked task's state off pull_request events. Best-
+	// effort — a sync failure never fails the webhook (the reconcile poll is the
+	// backstop); the delivery is already durably journaled above.
+	if ghEvent == "pull_request" {
+		r.syncPullRequestToTask(project, raw)
+	}
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(map[string]any{"queued": true, "event": eventType})
 }

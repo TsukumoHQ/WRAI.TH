@@ -183,6 +183,53 @@ func (d *DB) SetTaskPR(taskID, project string, prURL *string, prNumber *int, prS
 	return n > 0, nil
 }
 
+// GetTaskByPR resolves a task by its linked GitHub PR (number + repo) within a
+// project (PR-link S2 resolver). Returns nil (no error) when nothing matches.
+func (d *DB) GetTaskByPR(project string, prNumber int, repo string) (*models.Task, error) {
+	row := d.ro().QueryRow(
+		"SELECT "+taskColumns+" FROM tasks WHERE project = ? AND pr_number = ? AND pr_repo = ? AND archived_at IS NULL LIMIT 1",
+		project, prNumber, repo,
+	)
+	t, err := scanTask(row)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// ForcePRTransition applies a PR-driven state change as the supervisor, with a
+// NO-RESURRECT guard: a terminal task (done/cancelled) is never moved back by a
+// late/duplicate webhook, and an already-in-target task is a no-op. Runs the
+// transition on the "user" (force) path so a PR event can move a task along an
+// edge the normal agent lifecycle wouldn't (e.g. pending → in-review on PR
+// opened). Returns (task, changed, err). PR-link S2.
+func (d *DB) ForcePRTransition(project, taskID, target string, reason *string) (*models.Task, bool, error) {
+	task, err := d.GetTask(taskID, project)
+	if err != nil {
+		return nil, false, err
+	}
+	if task == nil {
+		return nil, false, nil
+	}
+	// No-resurrect: a terminal task stays terminal (ignore a stale opened/sync).
+	if task.Status == "done" || task.Status == "cancelled" {
+		if target != task.Status {
+			return task, false, nil
+		}
+	}
+	if task.Status == target {
+		return task, false, nil // idempotent
+	}
+	updated, err := d.transitionTask(taskID, "user", project, target, nil, reason)
+	if err != nil {
+		return nil, false, err
+	}
+	return updated, true, nil
+}
+
 func (d *DB) ResetTask(taskID, agentName, project string) (*models.Task, error) {
 	return d.transitionTask(taskID, agentName, project, "pending", nil, nil)
 }
