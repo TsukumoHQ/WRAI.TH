@@ -1135,13 +1135,31 @@ func migrateMemories(conn *sql.DB) error {
 		updated_at    TEXT NOT NULL,
 		archived_at   TEXT,
 		archived_by   TEXT,
-		layer         TEXT NOT NULL DEFAULT 'behavior'
+		layer         TEXT NOT NULL DEFAULT 'behavior',
+		valid_from    TEXT,
+		valid_until   TEXT,
+		status        TEXT NOT NULL DEFAULT 'live',
+		archived_reason TEXT
 	)`); err != nil {
 		return fmt.Errorf("create memories table: %w", err)
 	}
 
 	// Layer column migration for existing DBs (idempotent).
 	_, _ = conn.Exec(`ALTER TABLE memories ADD COLUMN layer TEXT NOT NULL DEFAULT 'behavior'`)
+
+	// T5 temporal-validity columns for existing DBs (idempotent; ALTER errors if
+	// the column already exists and is ignored). Additive only — no destructive
+	// ALTER, so an older binary reading a migrated DB is unaffected (it never
+	// selects these) and a newer binary always runs this before any query.
+	_, _ = conn.Exec(`ALTER TABLE memories ADD COLUMN valid_from TEXT`)
+	_, _ = conn.Exec(`ALTER TABLE memories ADD COLUMN valid_until TEXT`)
+	_, _ = conn.Exec(`ALTER TABLE memories ADD COLUMN status TEXT NOT NULL DEFAULT 'live'`)
+	_, _ = conn.Exec(`ALTER TABLE memories ADD COLUMN archived_reason TEXT`)
+	// Backfill: valid_from = created_at, status = live (default already), and
+	// mark already-archived rows status='archived' so the effective status is
+	// consistent with the archived_at tombstone.
+	_, _ = conn.Exec(`UPDATE memories SET valid_from = created_at WHERE valid_from IS NULL`)
+	_, _ = conn.Exec(`UPDATE memories SET status = 'archived' WHERE archived_at IS NOT NULL AND status = 'live'`)
 
 	// Indexes (all idempotent)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_memories_key_scope ON memories(project, scope, key) WHERE archived_at IS NULL`)

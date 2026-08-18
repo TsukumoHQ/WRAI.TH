@@ -18,4 +18,15 @@ type Memory struct {
 	ArchivedAt   *string `json:"archived_at,omitempty"`
 	ArchivedBy   *string `json:"archived_by,omitempty"`
 	Layer        string  `json:"layer"` // "constraints", "behavior", "context"
+
+	// Temporal validity windows (T5). Memories DEGRADE, never silently delete.
+	// ValidFrom defaults to created_at; a nil ValidUntil means "no expiry".
+	// Status is the EFFECTIVE state as returned by reads: "live" | "stale" |
+	// "archived". Time-based staleness (past ValidUntil) is derived at read
+	// time, so an expired memory stays stored and searchable, only flagged.
+	// ArchivedReason is the tombstone "why" (archived_by is "who", archived_at "when").
+	ValidFrom      *string `json:"valid_from,omitempty"`
+	ValidUntil     *string `json:"valid_until,omitempty"`
+	Status         string  `json:"status"` // "live" | "stale" | "archived"
+	ArchivedReason *string `json:"archived_reason,omitempty"`
 }

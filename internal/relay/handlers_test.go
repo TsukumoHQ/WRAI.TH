@@ -954,13 +954,31 @@ func TestMemoryDelete(t *testing.T) {
 		t.Error("expected deleted=true")
 	}
 
-	// Should be gone
+	// T5: a deleted memory DEGRADES, it does not vanish. Recall of the key must
+	// surface the archived tombstone (flagged), never an unexplained empty result.
 	getRes, _ := h.HandleGetMemory(ctx, call(map[string]any{
 		"project": "p1", "as": "bot-a", "key": "temp",
 	}))
 	getData := parseJSON(t, getRes)
-	if getData["count"].(float64) != 0 {
-		t.Errorf("expected 0 memories after delete, got %v", getData["count"])
+	if getData["count"].(float64) != 1 {
+		t.Fatalf("expected 1 archived memory surfaced after delete, got %v", getData["count"])
+	}
+	if getData["archived"] != true {
+		t.Errorf("expected archived=true flag on recall of a deleted key")
+	}
+	mems, _ := getData["memories"].([]any)
+	if len(mems) != 1 {
+		t.Fatalf("expected 1 memory in payload, got %d", len(mems))
+	}
+	m0, _ := mems[0].(map[string]any)
+	if m0["status"] != "archived" {
+		t.Errorf("expected status=archived, got %v", m0["status"])
+	}
+	if m0["archived_reason"] != "deleted" {
+		t.Errorf("expected archived_reason=deleted (tombstone why), got %v", m0["archived_reason"])
+	}
+	if m0["archived_by"] != "bot-a" {
+		t.Errorf("expected archived_by=bot-a (tombstone who), got %v", m0["archived_by"])
 	}
 }
 

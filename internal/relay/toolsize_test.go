@@ -9,7 +9,13 @@ import (
 // session start. This budget blocks silent regressions: if a new tool or a
 // fatter description pushes the total over the cap, trim descriptions or
 // raise the cap deliberately in the same PR.
-const toolSchemaBudgetBytes = 48000
+//
+// Raised 48000 -> 49152 (48 KiB): the WRAITH batch added genuinely new tool
+// params — T1 lease fields, T2 sender-eligibility, and T5 temporal-validity
+// (valid_until / include_stale / delete reason). Descriptions were trimmed to
+// the bone first; the remaining growth is real surface, so the cap moves once,
+// deliberately, with ~840 bytes of slack left.
+const toolSchemaBudgetBytes = 49152
 
 // Discovery mode replaces the full list with two tools; their combined
 // schema must stay tiny or the mode loses its point.

@@ -239,6 +239,7 @@ func setMemoryTool() mcp.Tool {
 			mcp.Enum("constraints", "behavior", "context"),
 		),
 		mcp.WithBoolean("upsert", mcp.Description("true (default): overwrite. false: flag a conflict if value differs.")),
+		mcp.WithString("valid_until", mcp.Description("Optional ISO-8601 UTC expiry; past it reads 'stale' (hidden unless include_stale). Empty=none. valid_from optional too.")),
 	)
 }
 
@@ -292,6 +293,7 @@ func searchMemoryTool() mcp.Tool {
 			mcp.Enum("agent", "project", "global"),
 		),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
+		mcp.WithBoolean("include_stale", mcp.Description("Also return expired (stale) memories (default false).")),
 	)
 }
 
@@ -308,6 +310,7 @@ func listMemoriesTool() mcp.Tool {
 		mcp.WithArray("tags", mcp.Description("Filter by tags"), mcp.WithStringItems()),
 		mcp.WithString("agent", mcp.Description("Filter by author")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
+		mcp.WithBoolean("include_stale", mcp.Description("Also list expired (stale) memories (default false).")),
 		formatParam,
 	)
 }
@@ -323,6 +326,7 @@ func deleteMemoryTool() mcp.Tool {
 			mcp.Description("Scope of the memory"),
 			mcp.Enum("agent", "project", "global"),
 		),
+		mcp.WithString("reason", mcp.Description("Tombstone 'why' (with who/when). Default 'deleted'.")),
 	)
 }
 
