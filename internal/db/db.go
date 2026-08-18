@@ -271,6 +271,10 @@ func migrate(conn *sql.DB) error {
 		"interest_tags":     "TEXT NOT NULL DEFAULT '[]'",
 		"max_context_bytes": "INTEGER NOT NULL DEFAULT 16384",
 		"avatar_url":        "TEXT",
+		// is_service marks a system/daemon identity (monitoring/QA) that is always
+		// eligible to send, exempt from the sender-liveness gate (T2). Additive,
+		// default 0; agentColumns/scanAgent scan it as the last agent column.
+		"is_service": "INTEGER NOT NULL DEFAULT 0",
 		// cwd is the stable identity key for hook-based session binding: a Claude
 		// Code session_id rotates on /clear, but the worktree cwd does not. Kept
 		// out of agentColumns/scanAgent on purpose (dedicated queries only).

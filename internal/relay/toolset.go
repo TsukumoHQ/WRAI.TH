@@ -7,9 +7,27 @@ import (
 	"sort"
 	"strings"
 
+	"agent-relay/internal/db"
+
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
+
+// senderInactiveError is the TYPED refusal for the T2 sender-liveness gate. The
+// body is JSON carrying a stable machine code (SENDER_INACTIVE) plus the reason
+// (the agent's status, or "unregistered") so a client can branch on the code and
+// PARK instead of hot-looping a retry that will never succeed — distinct from a
+// transient/plain error string, which a client may reasonably retry.
+func senderInactiveError(agent, project, reason string) *mcp.CallToolResult {
+	b, _ := json.Marshal(map[string]any{
+		"code":    "SENDER_INACTIVE",
+		"reason":  reason,
+		"agent":   agent,
+		"project": project,
+		"message": fmt.Sprintf("sender %q is not eligible to send in project %q (reason: %s) — register/reactivate before retrying, or park. Register a monitoring/QA daemon with is_service=true to stay eligible while workers are down.", agent, project, reason),
+	})
+	return mcp.NewToolResultError(string(b))
+}
 
 // registeredTool pairs a ServerTool with the category used by discover_tools.
 type registeredTool struct {
@@ -27,7 +45,7 @@ var toolCategories = []struct{ name, summary string }{
 	{"boards", "task boards: create, list, archive, delete"},
 	{"memory", "persistent knowledge: set, get, search, list, delete, resolve_conflict"},
 	{"profiles", "role archetypes: register, get, list, find by skill"},
-	{"agents", "agent lifecycle: list, deactivate, delete, sleep"},
+	{"agents", "agent lifecycle: list, is_eligible, deactivate, delete, sleep"},
 	{"teams", "teams + orgs: create, list, members, notify channels"},
 	{"projects", "project lifecycle: create_project, delete_project"},
 }
@@ -95,6 +113,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: findProfilesTool(), Handler: h.HandleFindProfiles}, "profiles"},
 
 		{server.ServerTool{Tool: listAgentsTool(), Handler: h.HandleListAgents}, "agents"},
+		{server.ServerTool{Tool: isEligibleTool(), Handler: h.HandleIsEligible}, "agents"},
 		{server.ServerTool{Tool: deactivateAgentTool(), Handler: h.HandleDeactivateAgent}, "agents"},
 		{server.ServerTool{Tool: deleteAgentTool(), Handler: h.HandleDeleteAgent}, "agents"},
 		{server.ServerTool{Tool: sleepAgentTool(), Handler: h.HandleSleepAgent}, "agents"},
@@ -127,10 +146,23 @@ func (h *Handlers) toolRegistry() []registeredTool {
 	// path to fall back to.
 	for i := range tools {
 		if mutatingTools[tools[i].Tool.Name] {
-			tools[i].Handler = h.guardIdentity(tools[i].Handler)
+			tools[i].Handler = h.guardIdentity(tools[i].Tool.Name, tools[i].Handler)
 		}
 	}
 	return tools
+}
+
+// livenessGatedTools carry the T2 sender-liveness gate: a non-service sender
+// that is unregistered or inactive is refused with the typed SENDER_INACTIVE
+// code so its client PARKS instead of hot-looping a doomed retry (the fiduciaire
+// dead-fleet incident). Deliberately narrow — only the SEND and ACK paths, the
+// ones a stuck client retries in a loop. Other mutating tools keep the plain
+// registered-existence check in guardIdentity. Service identities (is_service)
+// are exempt so a monitoring/QA daemon can post feedback even when every worker
+// is dead. ack_delivery is included for consistency with send (and T4).
+var livenessGatedTools = map[string]bool{
+	"send_message": true,
+	"ack_delivery": true,
 }
 
 // mutatingTools are the write tools gated by RELAY_REQUIRE_REGISTERED — those
@@ -166,7 +198,7 @@ var mutatingTools = map[string]bool{
 // tool (see toolRegistry) — there is no anonymous/default path to fall through
 // to, so an untargeted or unidentified write fails loudly instead of silently
 // landing in a shared bucket.
-func (h *Handlers) guardIdentity(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project := h.resolveProject(ctx, req)
 		if project == "" {
@@ -179,6 +211,16 @@ func (h *Handlers) guardIdentity(next server.ToolHandlerFunc) server.ToolHandler
 		agent, err := h.db.GetAgent(project, from)
 		if err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
+		}
+		// T2 sender-liveness gate (send/ack only): an unregistered or inactive
+		// non-service sender is refused with the TYPED SENDER_INACTIVE code so the
+		// client parks. SenderEligibility(nil) already handles the unregistered
+		// case, so this runs before the generic agent==nil rejection below and the
+		// gated tools always get the typed refusal (not the bare string).
+		if livenessGatedTools[toolName] {
+			if eligible, reason := db.SenderEligibility(agent); !eligible {
+				return senderInactiveError(from, project, reason), nil
+			}
 		}
 		if agent == nil {
 			return mcp.NewToolResultError(fmt.Sprintf("agent %q is not registered in project %q — call register_agent first.", from, project)), nil

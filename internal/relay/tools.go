@@ -32,9 +32,10 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithString("description", mcp.Description("What this agent is currently working on")),
 		mcp.WithString("reports_to", mcp.Description("Manager agent name (org hierarchy)")),
 		mcp.WithBoolean("is_executive", mcp.Description("Executive flag (crown in UI)")),
+		mcp.WithBoolean("is_service", mcp.Description("Service/daemon identity (monitoring/QA): always eligible to send, exempt from the liveness gate, so it posts even when every worker is dead. Preserved when omitted.")),
 		mcp.WithString("profile_slug", mcp.Description("Profile archetype this agent runs")),
 		mcp.WithString("session_id", mcp.Description("Claude Code session ID ($CLAUDE_SESSION_ID) for activity tracking")),
-		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: lets a SessionStart hook re-bind the rotated session_id after /clear. MUST be unique per agent — the cwd re-bind is only correct one-agent-per-worktree. If a fleet shares one tree, give each agent a distinct cwd (or forward RELAY_AGENT to the hook); an ambiguous cwd binds nothing rather than guess.")),
+		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: a SessionStart hook re-binds the rotated session_id after /clear. Must be unique per agent (one agent per worktree) — an ambiguous cwd binds nothing rather than guess.")),
 		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering (e.g. '[\"database\",\"auth\"]')")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
 	)
@@ -119,6 +120,16 @@ func listAgentsTool() mcp.Tool {
 		mcp.WithDescription("List registered agents and their status."),
 		projectParam,
 		formatParam,
+	)
+}
+
+func isEligibleTool() mcp.Tool {
+	return mcp.NewTool(
+		"is_eligible",
+		mcp.WithDescription("Read-only sender-eligibility check: returns {eligible, reason} for an agent WITHOUT sending anything. Same verdict as send_message would give, so a client checks first and PARKS on eligible=false instead of hot-looping a send that would fail with SENDER_INACTIVE. Service identities (is_service) are always eligible."),
+		asParam,
+		projectParam,
+		mcp.WithString("agent", mcp.Description("Agent name to check (default: yourself, i.e. the `as` identity)")),
 	)
 }
 

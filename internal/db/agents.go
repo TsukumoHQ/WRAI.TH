@@ -9,12 +9,40 @@ import (
 	"github.com/google/uuid"
 )
 
-const agentColumns = "id, name, role, description, registered_at, last_seen, project, reports_to, profile_slug, status, deactivated_at, is_executive, session_id, interest_tags, max_context_bytes, avatar_url"
+const agentColumns = "id, name, role, description, registered_at, last_seen, project, reports_to, profile_slug, status, deactivated_at, is_executive, session_id, interest_tags, max_context_bytes, avatar_url, is_service"
 
 func scanAgent(row interface{ Scan(...any) error }) (models.Agent, error) {
 	var a models.Agent
-	err := row.Scan(&a.ID, &a.Name, &a.Role, &a.Description, &a.RegisteredAt, &a.LastSeen, &a.Project, &a.ReportsTo, &a.ProfileSlug, &a.Status, &a.DeactivatedAt, &a.IsExecutive, &a.SessionID, &a.InterestTags, &a.MaxContextBytes, &a.AvatarURL)
+	err := row.Scan(&a.ID, &a.Name, &a.Role, &a.Description, &a.RegisteredAt, &a.LastSeen, &a.Project, &a.ReportsTo, &a.ProfileSlug, &a.Status, &a.DeactivatedAt, &a.IsExecutive, &a.SessionID, &a.InterestTags, &a.MaxContextBytes, &a.AvatarURL, &a.IsService)
 	return a, err
+}
+
+// SenderEligibility decides whether an agent may send (or ack). It is the single
+// source of truth for the T2 sender-liveness gate, shared by the send path, the
+// read-only is_eligible check, and (T4) ack_delivery — so all three agree.
+//
+//   - nil agent (unregistered)        → ineligible, reason "unregistered"
+//   - is_service=true                 → ALWAYS eligible ("service"): a monitoring
+//     or QA daemon must post feedback even when every worker is dead.
+//   - status active | sleeping        → eligible (a live, non-dead participant)
+//   - status inactive | deleted | …   → ineligible (the reason is the status)
+//
+// An ineligible verdict is surfaced to clients as the typed SENDER_INACTIVE
+// refusal so they PARK instead of hot-looping a doomed retry (the fiduciaire
+// dead-fleet incident).
+func SenderEligibility(a *models.Agent) (eligible bool, reason string) {
+	if a == nil {
+		return false, "unregistered"
+	}
+	if a.IsService {
+		return true, "service"
+	}
+	switch a.Status {
+	case "active", "sleeping":
+		return true, a.Status
+	default:
+		return false, a.Status
+	}
 }
 
 // RegisterOptions carries presence flags for identity fields whose absence must be
@@ -28,10 +56,17 @@ type RegisterOptions struct {
 	ProfileSlugSet bool
 	IsExecutiveSet bool
 	SessionIDSet   bool
+	// IsService is the value for the is_service flag; IsServiceSet says it was
+	// actually provided on this call. Carried in opts (not a positional param)
+	// so the many existing RegisterAgent callers stay source-compatible — the
+	// same value+presence pattern the *Set flags already use for optionals.
+	IsService    bool
+	IsServiceSet bool
 }
 
 func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, profileSlug *string, isExecutive bool, sessionID *string, interestTags string, maxContextBytes int, opts RegisterOptions) (*models.Agent, bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
+	isService := opts.IsService
 	if interestTags == "" {
 		interestTags = "[]"
 	}
@@ -59,12 +94,13 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 			SessionID:       sessionID,
 			InterestTags:    interestTags,
 			MaxContextBytes: maxContextBytes,
+			IsService:       isService,
 		}
 		_, err := d.conn.Exec(
-			"INSERT INTO agents ("+agentColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+			"INSERT INTO agents ("+agentColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			agent.ID, agent.Name, agent.Role, agent.Description, agent.RegisteredAt, agent.LastSeen,
 			agent.Project, agent.ReportsTo, agent.ProfileSlug, agent.Status, agent.DeactivatedAt, agent.IsExecutive, agent.SessionID,
-			agent.InterestTags, agent.MaxContextBytes, agent.AvatarURL,
+			agent.InterestTags, agent.MaxContextBytes, agent.AvatarURL, agent.IsService,
 		)
 		if err != nil {
 			return nil, false, fmt.Errorf("insert agent: %w", err)
@@ -94,10 +130,13 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 	if !opts.SessionIDSet {
 		sessionID = a.SessionID
 	}
+	if !opts.IsServiceSet {
+		isService = a.IsService
+	}
 
 	_, err = d.conn.Exec(
-		"UPDATE agents SET role = ?, description = ?, last_seen = ?, reports_to = ?, profile_slug = ?, is_executive = ?, session_id = ?, interest_tags = ?, max_context_bytes = ?, status = 'active', deactivated_at = NULL WHERE name = ? AND project = ?",
-		role, description, now, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, name, project,
+		"UPDATE agents SET role = ?, description = ?, last_seen = ?, reports_to = ?, profile_slug = ?, is_executive = ?, session_id = ?, interest_tags = ?, max_context_bytes = ?, is_service = ?, status = 'active', deactivated_at = NULL WHERE name = ? AND project = ?",
+		role, description, now, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, isService, name, project,
 	)
 	if err != nil {
 		return nil, false, fmt.Errorf("update agent: %w", err)
@@ -111,6 +150,7 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 	a.SessionID = sessionID
 	a.InterestTags = interestTags
 	a.MaxContextBytes = maxContextBytes
+	a.IsService = isService
 	a.Status = "active"
 	a.DeactivatedAt = nil
 	return &a, true, nil
@@ -208,9 +248,13 @@ func (d *DB) GetAgentsByProfile(project, profileSlug string) ([]models.Agent, er
 // FindActiveAgentsBySkill returns active agents whose profile is linked to the given skill.
 func (d *DB) FindActiveAgentsBySkill(project, skillName string) ([]models.Agent, error) {
 	rows, err := d.ro().Query(
+		// Column list MUST stay in lockstep with scanAgent (17 columns): a SELECT
+		// that scans fewer than scanAgent expects errors on every row and the
+		// `continue` below silently drops the whole result set. avatar_url +
+		// is_service were the drift caught fixing T2.
 		`SELECT a.id, a.name, a.role, a.description, a.registered_at, a.last_seen, a.project,
 		 a.reports_to, a.profile_slug, a.status, a.deactivated_at, a.is_executive, a.session_id,
-		 a.interest_tags, a.max_context_bytes
+		 a.interest_tags, a.max_context_bytes, a.avatar_url, a.is_service
 		 FROM agents a
 		 JOIN profiles p ON p.slug = a.profile_slug AND p.project = a.project
 		 JOIN profile_skills ps ON ps.profile_id = p.id

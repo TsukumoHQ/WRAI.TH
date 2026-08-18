@@ -17,4 +17,9 @@ type Agent struct {
 	InterestTags    string  `json:"interest_tags"`
 	MaxContextBytes int     `json:"max_context_bytes"`
 	AvatarURL       *string `json:"avatar_url,omitempty"`
+	// IsService marks a system/daemon identity (monitoring, QA) that must be able
+	// to post even when every worker is dead — always eligible to send, exempt
+	// from the sender-liveness gate (still subject to auth). Preserved across
+	// respawns like IsExecutive. See db.SenderEligibility (T2).
+	IsService bool `json:"is_service"`
 }

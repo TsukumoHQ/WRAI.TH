@@ -99,6 +99,7 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	sessionID := optionalString(req.GetString("session_id", ""))
 	interestTags := req.GetString("interest_tags", "[]")
 	maxContextBytes := req.GetInt("max_context_bytes", 16384)
+	isService := req.GetBool("is_service", false)
 
 	// Detect which identity fields were actually provided. GetString/GetBool conflate an
 	// omitted param with an explicitly-empty one, so presence is read from the raw args.
@@ -108,11 +109,14 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	_, profileSlugSet := args["profile_slug"]
 	_, isExecutiveSet := args["is_executive"]
 	_, sessionIDSet := args["session_id"]
+	_, isServiceSet := args["is_service"]
 	opts := db.RegisterOptions{
 		ReportsToSet:   reportsToSet,
 		ProfileSlugSet: profileSlugSet,
 		IsExecutiveSet: isExecutiveSet,
 		SessionIDSet:   sessionIDSet,
+		IsService:      isService,
+		IsServiceSet:   isServiceSet,
 	}
 
 	agent, isRespawn, err := h.db.RegisterAgent(project, name, role, description, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, opts)
@@ -168,6 +172,34 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		resp["hint"] = "You were auto-added to the 'leadership' admin team (broadcast enabled). Use send_message(to='*') to broadcast."
 	}
 	return h.resultJSONTracked(project, name, "register_agent", resp)
+}
+
+// HandleIsEligible is the read-only sender-eligibility check (T2). A client
+// calls it and PARKS on eligible=false instead of hot-looping a send that would
+// fail with the typed SENDER_INACTIVE refusal. No write, so it is deliberately
+// left off the mutating/guarded tool sets — an unregistered caller can still ask
+// about itself and get {eligible:false, reason:"unregistered"}. Same verdict as
+// the send path, because both call db.SenderEligibility.
+func (h *Handlers) HandleIsEligible(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	name := strings.ToLower(req.GetString("agent", ""))
+	if name == "" {
+		name = strings.ToLower(resolveAgent(ctx, req))
+	}
+	if name == "" {
+		return mcp.NewToolResultError("agent is required — pass agent=<name> (or as=<name> to check yourself)"), nil
+	}
+	agent, err := h.db.GetAgent(project, name)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("eligibility check failed: %v", err)), nil
+	}
+	eligible, reason := db.SenderEligibility(agent)
+	return resultJSON(map[string]any{
+		"agent":    name,
+		"project":  project,
+		"eligible": eligible,
+		"reason":   reason,
+	})
 }
 
 func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

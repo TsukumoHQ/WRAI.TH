@@ -23,7 +23,7 @@ func TestGuardIdentity(t *testing.T) {
 		ran = true
 		return mcp.NewToolResultText("ok"), nil
 	}
-	guarded := h.guardIdentity(next)
+	guarded := h.guardIdentity("update_task", next)
 
 	// no project resolvable → rejected, next never runs
 	res, _ := guarded(ctxWith("", ""), call(nil))
@@ -102,7 +102,7 @@ func TestGuardIdentityBinding(t *testing.T) {
 		ran = true
 		return mcp.NewToolResultText("ok"), nil
 	}
-	guarded := h.guardIdentity(next)
+	guarded := h.guardIdentity("update_task", next)
 
 	// alice acting as herself from her own session → passes
 	ran = false
