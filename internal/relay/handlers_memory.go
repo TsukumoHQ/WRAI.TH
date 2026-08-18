@@ -158,18 +158,12 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 	tags := req.GetStringSlice("tags", nil)
 	limit := clampLimit(req.GetInt("limit", 20))
 	includeStale := req.GetBool("include_stale", false)
-
-	memories, err := h.db.SearchMemory(project, agent, query, tags, scope, limit, includeStale)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
-	}
-	if memories == nil {
-		memories = []models.Memory{}
-	}
+	// rank="mempalace" opts into ranked recall (relevance+recency+importance).
+	// Any other value (incl. default "") keeps the pure-FTS bm25 order.
+	ranked := req.GetString("rank", "") == "mempalace"
 
 	// Truncate values for compact response
-	truncated := make([]map[string]any, len(memories))
-	for i, m := range memories {
+	compact := func(m *models.Memory) map[string]any {
 		val := m.Value
 		if len(val) > 300 {
 			val = val[:300] + "..."
@@ -191,7 +185,40 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 		if m.ValidUntil != nil {
 			row["valid_until"] = *m.ValidUntil
 		}
-		truncated[i] = row
+		return row
+	}
+
+	if ranked {
+		results, err := h.db.SearchMemoryRanked(project, agent, query, tags, scope, limit, includeStale)
+		if err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
+		}
+		rows := make([]map[string]any, len(results))
+		for i := range results {
+			row := compact(&results[i].Memory)
+			row["rank_score"] = roundImportance(results[i].RankScore)
+			rows[i] = row
+		}
+		return h.resultJSONTracked(project, agent, "search_memory", map[string]any{
+			"query":         query,
+			"count":         len(rows),
+			"include_stale": includeStale,
+			"rank":          "mempalace",
+			"memories":      rows,
+		})
+	}
+
+	memories, err := h.db.SearchMemory(project, agent, query, tags, scope, limit, includeStale)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
+	}
+	if memories == nil {
+		memories = []models.Memory{}
+	}
+
+	truncated := make([]map[string]any, len(memories))
+	for i := range memories {
+		truncated[i] = compact(&memories[i])
 	}
 
 	return h.resultJSONTracked(project, agent, "search_memory", map[string]any{

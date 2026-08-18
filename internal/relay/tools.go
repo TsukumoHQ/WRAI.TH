@@ -326,6 +326,7 @@ func searchMemoryTool() mcp.Tool {
 		),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 20)")),
 		mcp.WithBoolean("include_stale", mcp.Description("Also return expired (stale) memories (default false).")),
+		mcp.WithString("rank", mcp.Description("'mempalace' re-ranks by relevance+recency+importance; default is bm25 order.")),
 	)
 }
 

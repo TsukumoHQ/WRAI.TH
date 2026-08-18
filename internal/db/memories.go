@@ -289,6 +289,16 @@ func (d *DB) SearchMemory(project, agentName, query string, tags []string, scope
 		limit = 20
 	}
 	stale := len(includeStale) > 0 && includeStale[0]
+	sql, args := d.buildMemorySearchQuery(project, agentName, query, tags, scope, limit, stale)
+	return d.queryMemories(sql, args...)
+}
+
+// buildMemorySearchQuery assembles the scope/tag/validity-filtered search SQL and
+// its args. Extracted so the default recall (SearchMemory) and ranked recall
+// (SearchMemoryRanked) share ONE filter definition — a scope or validity change
+// can never drift between the two paths. FTS order (bm25 `rank`) is preserved;
+// the ranked path re-orders the returned candidate set in Go.
+func (d *DB) buildMemorySearchQuery(project, agentName, query string, tags []string, scope string, limit int, stale bool) (string, []any) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
 	// Build WHERE clauses for the main table filter
@@ -348,7 +358,7 @@ func (d *DB) SearchMemory(project, agentName, query string, tags []string, scope
 		args = append(args, limit)
 	}
 
-	return d.queryMemories(sql, args...)
+	return sql, args
 }
 
 // ListMemories returns memories matching the given filters. By default it
