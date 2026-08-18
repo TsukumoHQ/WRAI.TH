@@ -18,3 +18,6 @@ skill/**
 # Repo feature reference read from the branch by the review gate (like
 # docs/deployment.md) — kept on disk so the doc ships with the code it documents.
 docs/typed-tickets.md
+# Per-task decision note the review gate (qa-submit) reads from the worktree
+# root and the scribe folds into the feature-doc — must stay a real file on disk.
+.niwa-decision.md
