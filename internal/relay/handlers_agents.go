@@ -125,9 +125,14 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	}
 
 	// Bind the worktree cwd → agent so a SessionStart hook can re-attach a rotated
-	// session_id after /clear (cwd is the stable key; session_id is not).
+	// session_id after /clear (cwd is the stable key; session_id is not). ClaimCwd
+	// makes this agent the SOLE holder of the cwd in the project (displacing a
+	// stale same-cwd sibling, e.g. a zombie predecessor), so the binding stays
+	// unambiguous and wakes resolve — and returns any displaced names so we can
+	// FAIL CLOSED by flagging the collision instead of silently accepting it.
+	var cwdDisplaced []string
 	if cwd := strings.TrimSpace(req.GetString("cwd", "")); cwd != "" {
-		_ = h.db.SetAgentCwd(project, name, cwd)
+		cwdDisplaced, _ = h.db.ClaimCwd(project, name, cwd)
 	}
 
 	// Use the effective (post-merge) executive flag and profile slug so a respawn that
@@ -171,7 +176,46 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		resp["auto_admin_team"] = *autoAdminTeam
 		resp["hint"] = "You were auto-added to the 'leadership' admin team (broadcast enabled). Use send_message(to='*') to broadcast."
 	}
+	if len(cwdDisplaced) > 0 {
+		// Fail-closed signal: this cwd was also bound to other active agents. We
+		// took sole ownership (so wakes resolve to you), but that is an identity
+		// collision worth surfacing — a stale predecessor left registered, or two
+		// live agents on one worktree. The daemon/operator should deactivate the
+		// zombie (per the niwa-ops rule).
+		resp["identity_conflict"] = true
+		resp["displaced_agents"] = cwdDisplaced
+		resp["identity_message"] = fmt.Sprintf("cwd was also bound to %v — those bindings were cleared so wakes resolve to %q (last live registrant wins). If any of those are live, this is an identity collision: deactivate the stale one.", cwdDisplaced, name)
+		h.events.Emit(MCPEvent{Type: "register", Action: "identity_conflict", Agent: name, Project: project, Label: strings.Join(cwdDisplaced, ",")})
+	}
 	return h.resultJSONTracked(project, name, "register_agent", resp)
+}
+
+// HandleIdentityCheck is the read-only identity-integrity check (companion to
+// is_eligible): can this name be reliably woken/addressed, or is it a ghost /
+// cwd-collision that silently drops wakes and messages? Defaults to the caller.
+func (h *Handlers) HandleIdentityCheck(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	caller := resolveAgent(ctx, req)
+	name := strings.ToLower(strings.TrimSpace(req.GetString("agent", "")))
+	if name == "" {
+		name = strings.ToLower(caller)
+	}
+	if name == "" {
+		return mcp.NewToolResultError("agent is required — pass agent=<name> (or as=<name> to check yourself)"), nil
+	}
+	v, err := h.db.IdentityCheck(project, name)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
+	}
+	return h.resultJSONTracked(project, caller, "identity_check", map[string]any{
+		"name":               v.Name,
+		"registered":         v.Registered,
+		"cwd":                v.Cwd,
+		"bound_uniquely":     v.BoundUniquely,
+		"ghost":              v.Ghost,
+		"conflicting_agents": v.ConflictingAgents,
+		"reason":             v.Reason,
+	})
 }
 
 // HandleIsEligible is the read-only sender-eligibility check (T2). A client

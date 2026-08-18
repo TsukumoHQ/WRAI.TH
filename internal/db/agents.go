@@ -410,6 +410,143 @@ func (d *DB) AgentNamesByCwd(cwd string) ([]string, error) {
 	return names, rows.Err()
 }
 
+// ClaimCwd binds cwd to this agent as its SOLE holder in the project: it clears
+// the cwd from any OTHER non-deleted same-project agent that currently holds it
+// (last live registrant wins), then sets it on the claimer — all in one writer
+// tx. This keeps the cwd UNAMBIGUOUS for RebindSession; an ambiguous cwd (two
+// same-project names on one worktree, e.g. a 'foo' zombie + its 'foo-2' respawn)
+// is exactly what makes a daemon wake hit "no local agent" and lose the message.
+// Returns the displaced agent names so the caller fails-closed by FLAGGING the
+// collision instead of silently accepting two live bindings on one cwd. Scoped
+// to the project: a cwd deliberately shared across projects (name-based rebind)
+// is left alone.
+func (d *DB) ClaimCwd(project, name, cwd string) ([]string, error) {
+	if cwd == "" {
+		return nil, nil
+	}
+	tx, err := d.conn.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("claim cwd begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.Query(
+		"SELECT name FROM agents WHERE cwd = ? AND project = ? AND name <> ? AND status != 'deleted'",
+		cwd, project, name,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("claim cwd: find holders: %w", err)
+	}
+	var displaced []string
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("claim cwd: scan: %w", err)
+		}
+		displaced = append(displaced, n)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("claim cwd: rows: %w", err)
+	}
+
+	if len(displaced) > 0 {
+		// cwd is NOT NULL — clear to empty string (unbound), not NULL. An empty
+		// cwd matches no real worktree, so RebindSession/IdentityCheck treat the
+		// displaced agent as unbound (a ghost) rather than a live cwd holder.
+		if _, err := tx.Exec(
+			"UPDATE agents SET cwd = '' WHERE cwd = ? AND project = ? AND name <> ? AND status != 'deleted'",
+			cwd, project, name,
+		); err != nil {
+			return nil, fmt.Errorf("claim cwd: displace: %w", err)
+		}
+	}
+	if _, err := tx.Exec(
+		"UPDATE agents SET cwd = ? WHERE project = ? AND name = ?", cwd, project, name,
+	); err != nil {
+		return nil, fmt.Errorf("claim cwd: bind: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("claim cwd commit: %w", err)
+	}
+	return displaced, nil
+}
+
+// IdentityVerdict is the identity-integrity check result (companion to the T2
+// sender-eligibility verdict): can this name be reliably woken/addressed, or is
+// it a ghost / cwd-collision that will silently drop wakes and messages?
+type IdentityVerdict struct {
+	Name              string   `json:"name"`
+	Registered        bool     `json:"registered"`
+	Cwd               string   `json:"cwd,omitempty"`
+	BoundUniquely     bool     `json:"bound_uniquely"`
+	Ghost             bool     `json:"ghost"`
+	ConflictingAgents []string `json:"conflicting_agents,omitempty"`
+	Reason            string   `json:"reason"`
+}
+
+// IdentityCheck reports whether an agent name is safely resolvable for wakes and
+// delivery (T6 identity fail-closed). Ghost = registered but no cwd bound (or not
+// registered at all) → a daemon wake by pane-name finds "no local agent" and the
+// message is lost. Conflict = more than one active same-project agent shares the
+// cwd → RebindSession refuses the ambiguous key. Read-only.
+func (d *DB) IdentityCheck(project, name string) (IdentityVerdict, error) {
+	v := IdentityVerdict{Name: name}
+	if name == "" {
+		v.Reason = "no name given"
+		return v, nil
+	}
+	var cwd sql.NullString
+	err := d.ro().QueryRow(
+		"SELECT cwd FROM agents WHERE project = ? AND name = ? AND status != 'deleted' LIMIT 1",
+		project, name,
+	).Scan(&cwd)
+	if err == sql.ErrNoRows {
+		v.Ghost = true
+		v.Reason = "unregistered — a wake for this name finds no local agent"
+		return v, nil
+	}
+	if err != nil {
+		return v, fmt.Errorf("identity check: %w", err)
+	}
+	v.Registered = true
+	if !cwd.Valid || cwd.String == "" {
+		v.Ghost = true
+		v.Reason = "registered but no cwd bound — not locally wake-resolvable"
+		return v, nil
+	}
+	v.Cwd = cwd.String
+
+	rows, err := d.ro().Query(
+		"SELECT name FROM agents WHERE cwd = ? AND project = ? AND status != 'deleted' ORDER BY name",
+		cwd.String, project,
+	)
+	if err != nil {
+		return v, fmt.Errorf("identity check: holders: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var n string
+		if err := rows.Scan(&n); err != nil {
+			return v, fmt.Errorf("identity check: scan: %w", err)
+		}
+		if n != name {
+			v.ConflictingAgents = append(v.ConflictingAgents, n)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return v, fmt.Errorf("identity check: rows: %w", err)
+	}
+	if len(v.ConflictingAgents) > 0 {
+		v.Reason = "cwd shared by another active agent — ambiguous binding, wakes may resolve wrong or drop"
+		return v, nil
+	}
+	v.BoundUniquely = true
+	v.Reason = "ok — uniquely bound, wake-resolvable"
+	return v, nil
+}
+
 // GetOrgTree returns all active agents ordered for tree display (managers first).
 func (d *DB) GetOrgTree(project string) ([]models.Agent, error) {
 	rows, err := d.ro().Query(

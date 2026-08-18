@@ -45,7 +45,7 @@ var toolCategories = []struct{ name, summary string }{
 	{"boards", "task boards: create, list, archive, delete"},
 	{"memory", "persistent knowledge: set, get, search, list, delete, resolve_conflict"},
 	{"profiles", "role archetypes: register, get, list, find by skill"},
-	{"agents", "agent lifecycle: list, is_eligible, deactivate, delete, sleep"},
+	{"agents", "agent lifecycle: list, is_eligible, identity_check, deactivate, delete, sleep"},
 	{"teams", "teams + orgs: create, list, members, notify channels"},
 	{"projects", "project lifecycle: create_project, delete_project"},
 }
@@ -115,6 +115,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 
 		{server.ServerTool{Tool: listAgentsTool(), Handler: h.HandleListAgents}, "agents"},
 		{server.ServerTool{Tool: isEligibleTool(), Handler: h.HandleIsEligible}, "agents"},
+		{server.ServerTool{Tool: identityCheckTool(), Handler: h.HandleIdentityCheck}, "agents"},
 		{server.ServerTool{Tool: deactivateAgentTool(), Handler: h.HandleDeactivateAgent}, "agents"},
 		{server.ServerTool{Tool: deleteAgentTool(), Handler: h.HandleDeleteAgent}, "agents"},
 		{server.ServerTool{Tool: sleepAgentTool(), Handler: h.HandleSleepAgent}, "agents"},

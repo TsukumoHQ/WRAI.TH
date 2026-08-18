@@ -10,12 +10,14 @@ import (
 // fatter description pushes the total over the cap, trim descriptions or
 // raise the cap deliberately in the same PR.
 //
-// Raised 48000 -> 49152 (48 KiB): the WRAITH batch added genuinely new tool
-// params — T1 lease fields, T2 sender-eligibility, and T5 temporal-validity
-// (valid_until / include_stale / delete reason). Descriptions were trimmed to
-// the bone first; the remaining growth is real surface, so the cap moves once,
-// deliberately, with ~840 bytes of slack left.
-const toolSchemaBudgetBytes = 49152
+// Raised 48000 -> 49152 -> 51200 (50 KiB) across the WRAITH sprint, which added
+// genuinely new SURFACE (not fat descriptions): reclaim_task (T1), is_eligible
+// (T2), T5 temporal params, delivery_status (T4), deadletter (T6), identity_check
+// (identity-failclosed). Descriptions are trimmed to the bone each time; the
+// growth is real tools the fleet needs, so the cap moves deliberately in-PR.
+// NOTE: this branch and the T6 branch both raise this constant — whichever merges
+// second needs a one-line rebase of THIS value (coordinated, expected).
+const toolSchemaBudgetBytes = 51200
 
 // Discovery mode replaces the full list with two tools; their combined
 // schema must stay tiny or the mode loses its point.
