@@ -830,6 +830,15 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 		result["unread_omitted"] = len(unread) - len(projected)
 	}
 
+	// Cross-project unread rollup (T4): a multi-project/executive agent gets a
+	// compact {project: {unread, p0}} for EVERY other namespace it has mail in,
+	// so a P0 in a third project is visible at boot without a blind search. Counts
+	// only (no bodies) — respects the payload ceiling (WRAITH-1). Omitted when the
+	// agent has no unread elsewhere.
+	if rollup, err := h.db.CrossProjectUnread(agentName, project); err == nil && len(rollup) > 0 {
+		result["cross_project_unread"] = rollup
+	}
+
 	// Active conversations — capped in count and title bytes; v1.9.0 injected
 	// these raw (30 rows, no byte cap), a primary source of oversized payloads.
 	convs, err := h.db.ListConversations(project, agentName)

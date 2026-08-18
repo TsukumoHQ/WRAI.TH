@@ -40,11 +40,12 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 		if verr := h.db.SetMemoryValidity(project, agent, key, mem.Scope, validFrom, validUntil); verr != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to set validity window: %v", verr)), nil
 		}
-		if validFrom != "" {
-			mem.ValidFrom = &validFrom
-		}
-		if validUntil != "" {
-			mem.ValidUntil = &validUntil
+		// Reflect the CANONICAL stored window + effective status by re-reading,
+		// rather than echoing the raw caller input — the DB normalizes valid_from/
+		// valid_until to memoryTimeFmt, so the response must match what was stored
+		// (bf4dc48d). Falls back to the pre-read mem if the re-read finds nothing.
+		if fresh, ferr := h.db.GetMemory(project, agent, key, mem.Scope); ferr == nil && len(fresh) > 0 {
+			mem = &fresh[0]
 		}
 	}
 

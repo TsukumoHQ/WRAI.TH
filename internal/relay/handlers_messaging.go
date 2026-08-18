@@ -358,6 +358,30 @@ func (h *Handlers) HandleAckDelivery(ctx context.Context, req mcp.CallToolReques
 	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "ack_delivery", map[string]any{"acknowledged": deliveryID})
 }
 
+// HandleDeliveryStatus is the read path for the deliveries state machine (T4):
+// list deliveries by message_id OR recipient agent, so "what was surfaced/acked"
+// is auditable — ack_delivery is otherwise effectively write-only. Read-only.
+func (h *Handlers) HandleDeliveryStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	messageID := req.GetString("message_id", "")
+	target := req.GetString("agent", "")
+	if messageID == "" && target == "" {
+		return mcp.NewToolResultError("delivery_status requires message_id or agent"), nil
+	}
+	rows, err := h.db.DeliveryStatus(project, messageID, target)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to get delivery status: %v", err)), nil
+	}
+	if rows == nil {
+		rows = []models.DeliveryStatusRow{}
+	}
+	return h.resultJSONTracked(project, agent, "delivery_status", map[string]any{
+		"count":      len(rows),
+		"deliveries": rows,
+	})
+}
+
 func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	messageID := req.GetString("message_id", "")
 	if messageID == "" {
@@ -402,6 +426,23 @@ func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest)
 		formatted[i] = entry
 	}
 
+	// Attach the caller's own delivery_id per message (T4) so a viewer can ack
+	// straight from a thread read, not only from get_inbox.
+	project := h.resolveProject(ctx, req)
+	if agent := resolveAgent(ctx, req); agent != "" && len(messages) > 0 {
+		ids := make([]string, len(messages))
+		for i, m := range messages {
+			ids[i] = m.ID
+		}
+		if dmap, derr := h.db.DeliveryIDsForAgent(project, agent, ids); derr == nil {
+			for i, m := range messages {
+				if did, ok := dmap[m.ID]; ok {
+					formatted[i]["delivery_id"] = did
+				}
+			}
+		}
+	}
+
 	if f := req.GetString("format", "md"); f == "md" || f == "table" {
 		rows := make([][]string, len(messages))
 		for i, m := range messages {
@@ -409,10 +450,10 @@ func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest)
 			rows[i] = []string{m.ID, m.From, m.To, m.Type, m.Priority, m.CreatedAt, m.Subject, content}
 		}
 		table := renderTable([]string{"id", "from", "to", "type", "priority", "created_at", "subject", "content"}, rows)
-		return h.resultTextTracked(h.resolveProject(ctx, req), "", "get_thread", fmt.Sprintf("%d messages in thread\n%s", len(messages), table))
+		return h.resultTextTracked(project, "", "get_thread", fmt.Sprintf("%d messages in thread\n%s", len(messages), table))
 	}
 
-	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "get_thread", map[string]any{
+	return h.resultJSONTracked(project, "", "get_thread", map[string]any{
 		"count":    len(formatted),
 		"messages": formatted,
 	})
@@ -462,6 +503,14 @@ func (h *Handlers) HandleGetMessage(ctx context.Context, req mcp.CallToolRequest
 	}
 	if msg.Metadata != "" && msg.Metadata != "{}" {
 		entry["metadata"] = msg.Metadata
+	}
+	// Attach the caller's own delivery_id (T4) so the full-body read is ack-able.
+	if agent := resolveAgent(ctx, req); agent != "" {
+		if dmap, derr := h.db.DeliveryIDsForAgent(project, agent, []string{msg.ID}); derr == nil {
+			if did, ok := dmap[msg.ID]; ok {
+				entry["delivery_id"] = did
+			}
+		}
 	}
 	return h.resultJSONTracked(project, "", "get_message", entry)
 }
@@ -557,6 +606,22 @@ func (h *Handlers) HandleGetTeamInbox(ctx context.Context, req mcp.CallToolReque
 			"content":    content,
 			"created_at": m.CreatedAt,
 			"priority":   m.Priority,
+		}
+	}
+
+	// Attach the caller's own delivery_id per message (T4) so a team member can
+	// ack a team message straight from this read.
+	if agent := resolveAgent(ctx, req); agent != "" && len(msgs) > 0 {
+		ids := make([]string, len(msgs))
+		for i, m := range msgs {
+			ids[i] = m.ID
+		}
+		if dmap, derr := h.db.DeliveryIDsForAgent(project, agent, ids); derr == nil {
+			for i, m := range msgs {
+				if did, ok := dmap[m.ID]; ok {
+					formatted[i]["delivery_id"] = did
+				}
+			}
 		}
 	}
 

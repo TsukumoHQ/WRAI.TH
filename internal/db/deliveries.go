@@ -3,6 +3,7 @@ package db
 import (
 	"agent-relay/internal/models"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -226,6 +227,103 @@ func (d *DB) AcknowledgeDelivery(deliveryID string) error {
 		now, deliveryID,
 	)
 	return err
+}
+
+// DeliveryStatus returns the queryable ack state (T4) filtered by message_id OR
+// by recipient agent (at least one required). Read-only — makes surfaced/acked
+// auditable. Rows ordered oldest-first.
+func (d *DB) DeliveryStatus(project, messageID, agent string) ([]models.DeliveryStatusRow, error) {
+	var where string
+	var args []any
+	switch {
+	case messageID != "":
+		where = "message_id = ? AND project = ?"
+		args = []any{messageID, project}
+	case agent != "":
+		where = "to_agent = ? AND project = ?"
+		args = []any{strings.ToLower(strings.TrimSpace(agent)), project}
+	default:
+		return nil, fmt.Errorf("delivery_status requires message_id or agent")
+	}
+	rows, err := d.ro().Query(
+		"SELECT id, message_id, to_agent, state, created_at, surfaced_at, acknowledged_at "+
+			"FROM deliveries WHERE "+where+" ORDER BY created_at, sequence_number", args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("delivery_status: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []models.DeliveryStatusRow
+	for rows.Next() {
+		var r models.DeliveryStatusRow
+		if err := rows.Scan(&r.DeliveryID, &r.MessageID, &r.ToAgent, &r.State, &r.CreatedAt, &r.SurfacedAt, &r.AcknowledgedAt); err != nil {
+			return nil, fmt.Errorf("scan delivery_status: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// CrossProjectUnread rolls up an agent's still-unread deliveries in EVERY
+// project except excludeProject, as {project: {unread, p0}} (T4). Counts only —
+// no bodies — so it respects the session_context payload ceiling (WRAITH-1). A
+// single grouped query; projects with zero unread are omitted.
+func (d *DB) CrossProjectUnread(agent, excludeProject string) (map[string]map[string]int, error) {
+	rows, err := d.ro().Query(`
+		SELECT d.project, COUNT(*) AS unread,
+		       COALESCE(SUM(CASE WHEN m.priority = 'P0' THEN 1 ELSE 0 END), 0) AS p0
+		FROM deliveries d JOIN messages m ON d.message_id = m.id
+		WHERE d.to_agent = ? AND d.project <> ? AND d.state IN ('queued', 'surfaced')
+		GROUP BY d.project`,
+		strings.ToLower(strings.TrimSpace(agent)), excludeProject,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("cross_project_unread: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]map[string]int{}
+	for rows.Next() {
+		var proj string
+		var unread, p0 int
+		if err := rows.Scan(&proj, &unread, &p0); err != nil {
+			return nil, fmt.Errorf("scan cross_project_unread: %w", err)
+		}
+		out[proj] = map[string]int{"unread": unread, "p0": p0}
+	}
+	return out, rows.Err()
+}
+
+// DeliveryIDsForAgent returns {message_id: delivery_id} for the given agent's
+// own deliveries among messageIDs (T4) — lets a message-returning handler attach
+// the caller's delivery_id without threading it through every query. A message
+// with no delivery to this agent is simply absent from the map.
+func (d *DB) DeliveryIDsForAgent(project, agent string, messageIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	if len(messageIDs) == 0 {
+		return out, nil
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(messageIDs)), ",")
+	args := make([]any, 0, len(messageIDs)+2)
+	args = append(args, strings.ToLower(strings.TrimSpace(agent)), project)
+	for _, id := range messageIDs {
+		args = append(args, id)
+	}
+	rows, err := d.ro().Query(
+		"SELECT message_id, id FROM deliveries WHERE to_agent = ? AND project = ? AND message_id IN ("+placeholders+")",
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("delivery_ids_for_agent: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var mid, did string
+		if err := rows.Scan(&mid, &did); err != nil {
+			return nil, fmt.Errorf("scan delivery_ids: %w", err)
+		}
+		out[mid] = did
+	}
+	return out, rows.Err()
 }
 
 // AcknowledgeDeliveryByMessage finds a delivery by message_id + agent and acknowledges it.

@@ -92,6 +92,17 @@ func ackDeliveryTool() mcp.Tool {
 	)
 }
 
+func deliveryStatusTool() mcp.Tool {
+	return mcp.NewTool(
+		"delivery_status",
+		mcp.WithDescription("Read the delivery/ack state of a message (queued|surfaced|acknowledged|expired) — who it reached and whether they saw it. Pass message_id OR agent. Read-only."),
+		asParam,
+		projectParam,
+		mcp.WithString("message_id", mcp.Description("List all deliveries of this message")),
+		mcp.WithString("agent", mcp.Description("List this recipient's deliveries (defaults to caller if message_id omitted)")),
+	)
+}
+
 func getThreadTool() mcp.Tool {
 	return mcp.NewTool(
 		"get_thread",

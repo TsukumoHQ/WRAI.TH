@@ -23,8 +23,8 @@ func TestDiscoverTools(t *testing.T) {
 		t.Errorf("category = %v", data["category"])
 	}
 	tools := data["tools"].([]any)
-	if len(tools) != 7 {
-		t.Errorf("messaging tools = %d, want 7", len(tools))
+	if len(tools) != 8 {
+		t.Errorf("messaging tools = %d, want 8", len(tools))
 	}
 	first := tools[0].(map[string]any)
 	if first["name"] == "" || first["inputSchema"] == nil {
