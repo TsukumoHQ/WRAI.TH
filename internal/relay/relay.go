@@ -62,6 +62,9 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 		"wrai.th",
 		version,
 		server.WithToolCapabilities(false),
+		// CCAR-G2: advertise read-only resources (no subscribe, no listChanged —
+		// the catalogs are read on demand, not pushed).
+		server.WithResourceCapabilities(false, false),
 		server.WithLogging(),
 		server.WithRecovery(),
 		server.WithToolFilter(toolsModeFilter),
@@ -99,6 +102,11 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 		server.ServerTool{Tool: callToolTool(), Handler: handlers.HandleCallTool},
 	)
 	mcpSrv.AddTools(serverTools...)
+
+	// CCAR-G2: read-only content catalogs (task board, roster, boards, memory/
+	// decisions index) as MCP resources so agents see available data at connect
+	// time without an exploratory tool call.
+	handlers.RegisterResources(mcpSrv)
 
 	httpSrv := server.NewStreamableHTTPServer(
 		mcpSrv,
