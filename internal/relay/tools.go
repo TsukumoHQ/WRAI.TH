@@ -539,6 +539,20 @@ func reclaimTaskTool() mcp.Tool {
 	)
 }
 
+func linkPrTool() mcp.Tool {
+	return mcp.NewTool(
+		"link_pr",
+		mcp.WithDescription("Link a GitHub PR to a task (Linear-style). Stores pr_url/pr_number/pr_repo/pr_state on the task so its lifecycle can sync from GitHub. Additive + idempotent: omitted fields keep their current value, so a re-link or a state-only update never wipes the rest."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+		mcp.WithNumber("pr_number", mcp.Description("GitHub PR number (the resolver key)")),
+		mcp.WithString("pr_url", mcp.Description("PR html_url")),
+		mcp.WithString("pr_repo", mcp.Description("Repo as owner/name (a task's PR may live in any repo)")),
+		mcp.WithString("pr_state", mcp.Description("Last observed PR state: open | merged | closed")),
+	)
+}
+
 func getTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"get_task",

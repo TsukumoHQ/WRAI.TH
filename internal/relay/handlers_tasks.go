@@ -355,6 +355,70 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 	return h.resultJSONTracked(project, agent, "resume_task", task)
 }
 
+// HandleLinkPr links a GitHub PR to a task (PR-link S1, DEC-wraith-pr-linking-1).
+// Additive + idempotent: omitted fields keep their stored value (COALESCE in
+// SetTaskPR), so a re-link or a state-only update never wipes the rest. The
+// relay stores the PR zone opaquely — S2's webhook consumer drives status-sync.
+func (h *Handlers) HandleLinkPr(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	if taskID == "" {
+		return toolResultError("task_id is required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+
+	var prNumber *int
+	if n := req.GetInt("pr_number", 0); n > 0 { // GitHub PR numbers start at 1
+		prNumber = &n
+	}
+	prURL := optionalString(req.GetString("pr_url", ""))
+	prRepo := optionalString(req.GetString("pr_repo", ""))
+	prState := optionalString(req.GetString("pr_state", ""))
+	if prState != nil {
+		switch *prState {
+		case "open", "merged", "closed":
+		default:
+			return validationError(CodeInvalidArgument, "pr_state must be one of open|merged|closed"), nil
+		}
+	}
+	if prNumber == nil && prURL == nil && prRepo == nil && prState == nil {
+		return toolResultError("nothing to link: provide at least one of pr_number, pr_url, pr_repo, pr_state"), nil
+	}
+
+	found, err := h.db.SetTaskPR(taskID, project, prURL, prNumber, prState, prRepo)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to link PR: %v", err)), nil
+	}
+	if !found {
+		return validationError(CodeNotFound, fmt.Sprintf("task not found: %s", taskID)), nil
+	}
+
+	task, err := h.db.GetTask(taskID, project)
+	if err != nil || task == nil {
+		return toolResultError(fmt.Sprintf("failed to re-read task: %v", err)), nil
+	}
+	h.events.Emit(MCPEvent{Type: "task", Action: "link_pr", Agent: agent, Project: project, Label: task.Title})
+	prPayload := map[string]any{"doer": agent}
+	if task.PRURL != nil {
+		prPayload["pr_url"] = *task.PRURL
+	}
+	if task.PRNumber != nil {
+		prPayload["pr_number"] = *task.PRNumber
+	}
+	if task.PRState != nil {
+		prPayload["pr_state"] = *task.PRState
+	}
+	if task.PRRepo != nil {
+		prPayload["pr_repo"] = *task.PRRepo
+	}
+	emitTaskEvent(h.events, "task.pr_linked", "link_pr", project, task, prPayload)
+	return h.resultJSONTracked(project, agent, "link_pr", task)
+}
+
 func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)

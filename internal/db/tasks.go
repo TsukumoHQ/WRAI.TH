@@ -65,6 +65,7 @@ const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, descri
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
 	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
 	"git_branch, git_worktree, git_target, " +
+	"pr_url, pr_number, pr_state, pr_repo, " +
 	"goal, acceptance_criteria, dod, refusal_notified_at, " +
 	"lease_holder, lease_expires_at, lease_heartbeat_at"
 
@@ -78,6 +79,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
 		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
 		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
+		&t.PRURL, &t.PRNumber, &t.PRState, &t.PRRepo,
 		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.RefusalNotifiedAt,
 		&t.LeaseHolder, &t.LeaseExpiresAt, &t.LeaseHeartbeatAt)
 	return t, err
@@ -154,6 +156,31 @@ func (d *DB) SetTaskGit(taskID, project string, branch, worktree, target *string
 		branch, worktree, target, taskID, project,
 	)
 	return err
+}
+
+// SetTaskPR records the linked GitHub PR (PR-link S1). Nil args leave the
+// existing column untouched (COALESCE), so a status-only sync that knows just
+// the new pr_state doesn't wipe the url/number/repo recorded at link time, and
+// re-linking is safe. Returns whether the task existed so the caller can report
+// NOT_FOUND rather than silently no-op. Additive, single UPDATE (writer tx).
+func (d *DB) SetTaskPR(taskID, project string, prURL *string, prNumber *int, prState, prRepo *string) (bool, error) {
+	res, err := d.conn.Exec(
+		`UPDATE tasks SET
+			pr_url = COALESCE(?, pr_url),
+			pr_number = COALESCE(?, pr_number),
+			pr_state = COALESCE(?, pr_state),
+			pr_repo = COALESCE(?, pr_repo)
+		 WHERE id = ? AND project = ?`,
+		prURL, prNumber, prState, prRepo, taskID, project,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 func (d *DB) ResetTask(taskID, agentName, project string) (*models.Task, error) {

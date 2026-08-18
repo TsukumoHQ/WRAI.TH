@@ -89,7 +89,7 @@ func (h *Handlers) resourceTasks(ctx context.Context, req mcp.ReadResourceReques
 	}
 	rows := make([]map[string]any, 0, len(tasks))
 	for _, t := range tasks {
-		rows = append(rows, map[string]any{
+		row := map[string]any{
 			"id":          t.ID,
 			"title":       t.Title,
 			"status":      t.Status,
@@ -97,7 +97,19 @@ func (h *Handlers) resourceTasks(ctx context.Context, req mcp.ReadResourceReques
 			"assigned_to": t.AssignedTo,
 			"profile":     t.ProfileSlug,
 			"board_id":    t.BoardID,
-		})
+		}
+		// Surface the linked PR (PR-link S1) when present, so an agent sees a
+		// task's PR in the catalog without a get_task round-trip.
+		if t.PRNumber != nil {
+			row["pr_number"] = *t.PRNumber
+		}
+		if t.PRState != nil {
+			row["pr_state"] = *t.PRState
+		}
+		if t.PRURL != nil {
+			row["pr_url"] = *t.PRURL
+		}
+		rows = append(rows, row)
 	}
 	return jsonResource(req.Params.URI, map[string]any{
 		"project": project,

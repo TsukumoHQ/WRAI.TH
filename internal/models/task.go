@@ -77,6 +77,18 @@ type Task struct {
 	GitWorktree *string `json:"git_worktree,omitempty"`
 	GitTarget   *string `json:"git_target,omitempty"`
 
+	// --- GitHub PR zone (PR-link, DEC-wraith-pr-linking-1) — the linked GitHub
+	// PR this task tracks, Linear-style. Set via the link_pr tool (or the niwa
+	// gate at PR creation) and synced from GitHub pull_request webhooks. All
+	// nullable + additive: a task with no linked PR reads as pr_* = null, so
+	// every existing row and older client keeps working. PRRepo is owner/name so
+	// a task's PR may live in ANY repo (the founder PRs across repos). PRState is
+	// the last observed open|merged|closed.
+	PRURL    *string `json:"pr_url,omitempty"`
+	PRNumber *int    `json:"pr_number,omitempty"`
+	PRState  *string `json:"pr_state,omitempty"`
+	PRRepo   *string `json:"pr_repo,omitempty"`
+
 	// --- Typed ticket zone (V-lifecycle, dispatch time) — the deterministic
 	// left branch of the V. Goal states intent, AcceptanceCriteria is the
 	// per-requirement checklist the review gate verdicts against, Dod is the

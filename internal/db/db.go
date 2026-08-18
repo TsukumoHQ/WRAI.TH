@@ -519,6 +519,16 @@ func migrate(conn *sql.DB) error {
 		"git_worktree": "TEXT",
 		"git_target":   "TEXT",
 
+		// --- GitHub PR zone (PR-link, DEC-wraith-pr-linking-1) — the linked PR
+		// this task tracks. Set via link_pr and synced from pull_request webhooks.
+		// Additive + nullable: a task with no PR reads pr_* = null. pr_repo is
+		// owner/name (a task's PR may live in any repo); pr_state is the last
+		// observed open|merged|closed.
+		"pr_url":    "TEXT",
+		"pr_number": "INTEGER",
+		"pr_state":  "TEXT",
+		"pr_repo":   "TEXT",
+
 		// --- Typed ticket zone (V-lifecycle) — goal / acceptance criteria / dod
 		// stamped at dispatch. Additive with safe defaults so existing rows and
 		// clients that never send a ticket keep working; enforcement is opt-in
