@@ -14,13 +14,13 @@ func (h *Handlers) HandleCreateBoard(ctx context.Context, req mcp.CallToolReques
 	name := req.GetString("name", "")
 	slug := req.GetString("slug", "")
 	if name == "" || slug == "" {
-		return mcp.NewToolResultError("name and slug are required"), nil
+		return toolResultError("name and slug are required"), nil
 	}
 	description := req.GetString("description", "")
 
 	board, err := h.db.CreateBoard(project, name, slug, description, agent)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to create board: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to create board: %v", err)), nil
 	}
 	return h.resultJSONTracked(project, agent, "create_board", board)
 }
@@ -29,7 +29,7 @@ func (h *Handlers) HandleListBoards(ctx context.Context, req mcp.CallToolRequest
 	project := h.resolveProject(ctx, req)
 	boards, err := h.db.ListBoards(project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list boards: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list boards: %v", err)), nil
 	}
 	if boards == nil {
 		boards = []models.Board{}
@@ -41,11 +41,11 @@ func (h *Handlers) HandleArchiveBoard(ctx context.Context, req mcp.CallToolReque
 	project := h.resolveProject(ctx, req)
 	boardID := req.GetString("board_id", "")
 	if boardID == "" {
-		return mcp.NewToolResultError("board_id is required"), nil
+		return toolResultError("board_id is required"), nil
 	}
 
 	if err := h.db.ArchiveBoard(project, boardID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to archive board: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to archive board: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Board %s archived (with all its tasks)", boardID)), nil
 }
@@ -54,11 +54,11 @@ func (h *Handlers) HandleDeleteBoard(ctx context.Context, req mcp.CallToolReques
 	project := h.resolveProject(ctx, req)
 	boardID := req.GetString("board_id", "")
 	if boardID == "" {
-		return mcp.NewToolResultError("board_id is required"), nil
+		return toolResultError("board_id is required"), nil
 	}
 
 	if err := h.db.DeleteBoard(project, boardID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to delete board: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to delete board: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Board %s permanently deleted", boardID)), nil
 }

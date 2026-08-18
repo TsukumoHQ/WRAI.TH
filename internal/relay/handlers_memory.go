@@ -21,11 +21,11 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
-		return mcp.NewToolResultError("key is required"), nil
+		return toolResultError("key is required"), nil
 	}
 	value := req.GetString("value", "")
 	if value == "" {
-		return mcp.NewToolResultError("value is required"), nil
+		return toolResultError("value is required"), nil
 	}
 	scope := req.GetString("scope", "project")
 	confidence := req.GetString("confidence", "stated")
@@ -36,7 +36,7 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 
 	mem, err := h.db.SetMemory(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to set memory: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to set memory: %v", err)), nil
 	}
 
 	// Optional temporal validity window (T5). Stamped after the memory exists so
@@ -45,7 +45,7 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 	validUntil := req.GetString("valid_until", "")
 	if validFrom != "" || validUntil != "" {
 		if verr := h.db.SetMemoryValidity(project, agent, key, mem.Scope, validFrom, validUntil); verr != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to set validity window: %v", verr)), nil
+			return toolResultError(fmt.Sprintf("failed to set validity window: %v", verr)), nil
 		}
 		// Reflect the CANONICAL stored window + effective status by re-reading,
 		// rather than echoing the raw caller input — the DB normalizes valid_from/
@@ -75,13 +75,13 @@ func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest)
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
-		return mcp.NewToolResultError("key is required"), nil
+		return toolResultError("key is required"), nil
 	}
 	scope := req.GetString("scope", "")
 
 	memories, err := h.db.GetMemory(project, agent, key, scope)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get memory: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get memory: %v", err)), nil
 	}
 	if memories == nil {
 		memories = []models.Memory{}
@@ -121,7 +121,7 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 	agent := resolveAgent(ctx, req)
 	decision := req.GetString("decision", "")
 	if decision == "" {
-		return mcp.NewToolResultError("decision is required (the settled rule, one line)"), nil
+		return toolResultError("decision is required (the settled rule, one line)"), nil
 	}
 	rationale := req.GetString("rationale", "")
 	area := req.GetString("area", "")
@@ -130,7 +130,7 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 
 	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to remember decision: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to remember decision: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "memory", Action: "decision", Agent: agent, Project: project, Label: mem.Key})
 	return h.resultJSONTracked(project, agent, "remember", map[string]any{"decision": mem})
@@ -142,7 +142,7 @@ func (h *Handlers) HandleRecallDecisions(ctx context.Context, req mcp.CallToolRe
 	agent := resolveAgent(ctx, req)
 	decs, err := h.db.ListDecisions(project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to recall decisions: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to recall decisions: %v", err)), nil
 	}
 	return h.resultJSONTracked(project, agent, "recall_decisions", map[string]any{"decisions": decs, "count": len(decs)})
 }
@@ -152,7 +152,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 	agent := resolveAgent(ctx, req)
 	query := req.GetString("query", "")
 	if query == "" {
-		return mcp.NewToolResultError("query is required"), nil
+		return toolResultError("query is required"), nil
 	}
 	scope := req.GetString("scope", "")
 	tags := req.GetStringSlice("tags", nil)
@@ -191,7 +191,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 	if ranked {
 		results, err := h.db.SearchMemoryRanked(project, agent, query, tags, scope, limit, includeStale)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
+			return toolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
 		}
 		rows := make([]map[string]any, len(results))
 		for i := range results {
@@ -210,7 +210,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 
 	memories, err := h.db.SearchMemory(project, agent, query, tags, scope, limit, includeStale)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
 	}
 	if memories == nil {
 		memories = []models.Memory{}
@@ -245,7 +245,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 
 	memories, err := h.db.ListMemories(project, scope, agentFilter, tags, limit, includeStale)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list memories: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list memories: %v", err)), nil
 	}
 	if memories == nil {
 		memories = []models.Memory{}
@@ -301,13 +301,13 @@ func (h *Handlers) HandleDeleteMemory(ctx context.Context, req mcp.CallToolReque
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
-		return mcp.NewToolResultError("key is required"), nil
+		return toolResultError("key is required"), nil
 	}
 	scope := req.GetString("scope", "project")
 	reason := req.GetString("reason", "")
 
 	if err := h.db.DeleteMemory(project, agent, key, scope, reason); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to delete memory: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to delete memory: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, agent, "delete_memory", map[string]any{
@@ -324,17 +324,17 @@ func (h *Handlers) HandleResolveConflict(ctx context.Context, req mcp.CallToolRe
 	agent := resolveAgent(ctx, req)
 	key := req.GetString("key", "")
 	if key == "" {
-		return mcp.NewToolResultError("key is required"), nil
+		return toolResultError("key is required"), nil
 	}
 	chosenValue := req.GetString("chosen_value", "")
 	if chosenValue == "" {
-		return mcp.NewToolResultError("chosen_value is required"), nil
+		return toolResultError("chosen_value is required"), nil
 	}
 	scope := req.GetString("scope", "project")
 
 	winner, err := h.db.ResolveConflict(project, agent, key, chosenValue, scope)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to resolve conflict: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to resolve conflict: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "memory", Action: "resolve", Agent: agent, Project: project, Label: key})
 

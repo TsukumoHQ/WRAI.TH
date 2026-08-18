@@ -293,7 +293,7 @@ func splitPeerAddr(to string) (name, label string, ok bool) {
 func (h *Handlers) sendFederated(ctx context.Context, project, from, peerLabel, toName, msgType, subject, content, priority string, ttlSeconds int, replyTo *string) (*mcp.CallToolResult, error) {
 	peer, ok := h.federation.PeerByLabel(peerLabel)
 	if !ok {
-		return mcp.NewToolResultError(fmt.Sprintf("unknown peer relay %q — configure it in RELAY_FEDERATION_PEERS", peerLabel)), nil
+		return toolResultError(fmt.Sprintf("unknown peer relay %q — configure it in RELAY_FEDERATION_PEERS", peerLabel)), nil
 	}
 	targetProject := peer.Project
 	if targetProject == "" {
@@ -313,7 +313,7 @@ func (h *Handlers) sendFederated(ctx context.Context, project, from, peerLabel, 
 		fm.ReplyTo = *replyTo
 	}
 	if err := h.federation.Forward(ctx, peer, fm); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("federated send to %q failed: %v", peerLabel, err)), nil
+		return toolResultError(fmt.Sprintf("federated send to %q failed: %v", peerLabel, err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "message", Action: "federated", Agent: from, Project: project, Target: fmt.Sprintf("%s@%s", fm.To, peerLabel), Label: subject, MsgType: msgType})
 	return h.resultJSONTracked(project, from, "send_message", map[string]any{

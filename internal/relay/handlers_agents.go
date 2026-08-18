@@ -18,15 +18,15 @@ import (
 func (h *Handlers) HandleWhoami(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	salt := req.GetString("salt", "")
 	if salt == "" {
-		return mcp.NewToolResultError("salt is required"), nil
+		return toolResultError("salt is required"), nil
 	}
 	if len(salt) < 5 {
-		return mcp.NewToolResultError("salt too short — use at least 3 random words"), nil
+		return toolResultError("salt too short — use at least 3 random words"), nil
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return mcp.NewToolResultError("cannot determine home dir"), nil
+		return toolResultError("cannot determine home dir"), nil
 	}
 
 	claudeDir := filepath.Join(home, ".claude", "projects")
@@ -66,7 +66,7 @@ func (h *Handlers) HandleWhoami(ctx context.Context, req mcp.CallToolRequest) (*
 	})
 
 	if matchFile == "" {
-		return mcp.NewToolResultError("salt not found in any transcript — make sure you wrote the salt in your conversation before calling whoami"), nil
+		return toolResultError("salt not found in any transcript — make sure you wrote the salt in your conversation before calling whoami"), nil
 	}
 
 	// Extract session ID from filename (UUID.jsonl)
@@ -90,10 +90,10 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		return anonymousRefusedError(name, project), nil
 	}
 	if !validProjectName(project) {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", project)), nil
+		return toolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", project)), nil
 	}
 	if !h.allowRegister(project, name) {
-		return mcp.NewToolResultError("rate limited: too many register_agent calls for this identity, slow down"), nil
+		return toolResultError("rate limited: too many register_agent calls for this identity, slow down"), nil
 	}
 	role := req.GetString("role", "")
 	description := req.GetString("description", "")
@@ -125,7 +125,7 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 
 	agent, isRespawn, err := h.db.RegisterAgent(project, name, role, description, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, opts)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to register agent: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to register agent: %v", err)), nil
 	}
 
 	// Bind the worktree cwd → agent so a SessionStart hook can re-attach a rotated
@@ -205,11 +205,11 @@ func (h *Handlers) HandleIdentityCheck(ctx context.Context, req mcp.CallToolRequ
 		name = strings.ToLower(caller)
 	}
 	if name == "" {
-		return mcp.NewToolResultError("agent is required — pass agent=<name> (or as=<name> to check yourself)"), nil
+		return toolResultError("agent is required — pass agent=<name> (or as=<name> to check yourself)"), nil
 	}
 	v, err := h.db.IdentityCheck(project, name)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
+		return toolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
 	}
 	return h.resultJSONTracked(project, caller, "identity_check", map[string]any{
 		"name":               v.Name,
@@ -235,11 +235,11 @@ func (h *Handlers) HandleIsEligible(ctx context.Context, req mcp.CallToolRequest
 		name = strings.ToLower(resolveAgent(ctx, req))
 	}
 	if name == "" {
-		return mcp.NewToolResultError("agent is required — pass agent=<name> (or as=<name> to check yourself)"), nil
+		return toolResultError("agent is required — pass agent=<name> (or as=<name> to check yourself)"), nil
 	}
 	agent, err := h.db.GetAgent(project, name)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("eligibility check failed: %v", err)), nil
+		return toolResultError(fmt.Sprintf("eligibility check failed: %v", err)), nil
 	}
 	eligible, reason := db.SenderEligibility(agent)
 	return resultJSON(map[string]any{
@@ -255,7 +255,7 @@ func (h *Handlers) HandleListAgents(ctx context.Context, req mcp.CallToolRequest
 
 	agents, err := h.db.ListAgents(project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list agents: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list agents: %v", err)), nil
 	}
 	if agents == nil {
 		agents = []models.Agent{}
@@ -333,11 +333,11 @@ func (h *Handlers) HandleDeactivateAgent(ctx context.Context, req mcp.CallToolRe
 	project := h.resolveProject(ctx, req)
 	name := strings.ToLower(req.GetString("name", ""))
 	if name == "" {
-		return mcp.NewToolResultError("name is required"), nil
+		return toolResultError("name is required"), nil
 	}
 
 	if err := h.db.DeactivateAgent(project, name); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to deactivate agent: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to deactivate agent: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "register", Action: "deactivate", Agent: name, Project: project})
 
@@ -351,11 +351,11 @@ func (h *Handlers) HandleDeleteAgent(ctx context.Context, req mcp.CallToolReques
 	project := h.resolveProject(ctx, req)
 	name := strings.ToLower(req.GetString("name", ""))
 	if name == "" {
-		return mcp.NewToolResultError("name is required"), nil
+		return toolResultError("name is required"), nil
 	}
 
 	if err := h.db.DeleteAgent(project, name); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to delete agent: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to delete agent: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, name, "delete_agent", map[string]any{
@@ -369,7 +369,7 @@ func (h *Handlers) HandleSleepAgent(ctx context.Context, req mcp.CallToolRequest
 	agent := resolveAgent(ctx, req)
 
 	if err := h.db.SleepAgent(project, agent); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to sleep agent: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to sleep agent: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "register", Action: "sleep", Agent: agent, Project: project})
 

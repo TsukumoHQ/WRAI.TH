@@ -35,7 +35,7 @@ func (h *Handlers) HandleQueryContext(ctx context.Context, req mcp.CallToolReque
 	agent := resolveAgent(ctx, req)
 	query := req.GetString("query", "")
 	if query == "" {
-		return mcp.NewToolResultError("query is required"), nil
+		return toolResultError("query is required"), nil
 	}
 	limit := clampLimit(req.GetInt("limit", 10))
 

@@ -12,18 +12,18 @@ func (h *Handlers) HandleRegisterProfile(ctx context.Context, req mcp.CallToolRe
 	project := h.resolveProject(ctx, req)
 	slug := req.GetString("slug", "")
 	if slug == "" {
-		return mcp.NewToolResultError("slug is required"), nil
+		return toolResultError("slug is required"), nil
 	}
 	name := req.GetString("name", "")
 	if name == "" {
-		return mcp.NewToolResultError("name is required"), nil
+		return toolResultError("name is required"), nil
 	}
 	role := req.GetString("role", "")
 	skills := normalizeJSONArrayParam(req, "skills")
 
 	profile, err := h.db.RegisterProfile(project, slug, name, role, skills)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to register profile: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to register profile: %v", err)), nil
 	}
 	return h.resultJSONTracked(project, "", "register_profile", profile)
 }
@@ -32,15 +32,15 @@ func (h *Handlers) HandleGetProfile(ctx context.Context, req mcp.CallToolRequest
 	project := h.resolveProject(ctx, req)
 	slug := req.GetString("slug", "")
 	if slug == "" {
-		return mcp.NewToolResultError("slug is required"), nil
+		return toolResultError("slug is required"), nil
 	}
 
 	profile, err := h.db.GetProfile(project, slug)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get profile: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get profile: %v", err)), nil
 	}
 	if profile == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("profile not found: %s", slug)), nil
+		return toolResultError(fmt.Sprintf("profile not found: %s", slug)), nil
 	}
 	return h.resultJSONTracked(project, "", "get_profile", profile)
 }
@@ -50,7 +50,7 @@ func (h *Handlers) HandleListProfiles(ctx context.Context, req mcp.CallToolReque
 
 	profiles, err := h.db.ListProfiles(project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list profiles: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list profiles: %v", err)), nil
 	}
 	if profiles == nil {
 		profiles = []models.Profile{}
@@ -68,7 +68,7 @@ func (h *Handlers) HandleFindProfiles(ctx context.Context, req mcp.CallToolReque
 	skillName := req.GetString("skill_name", "")
 
 	if tag == "" && skillName == "" {
-		return mcp.NewToolResultError("skill_tag or skill_name is required"), nil
+		return toolResultError("skill_tag or skill_name is required"), nil
 	}
 
 	var profiles []models.Profile
@@ -84,7 +84,7 @@ func (h *Handlers) HandleFindProfiles(ctx context.Context, req mcp.CallToolReque
 	}
 
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to find profiles: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to find profiles: %v", err)), nil
 	}
 	if profiles == nil {
 		profiles = []models.Profile{}

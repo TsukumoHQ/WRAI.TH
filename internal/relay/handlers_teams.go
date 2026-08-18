@@ -15,12 +15,12 @@ func (h *Handlers) HandleCreateOrg(ctx context.Context, req mcp.CallToolRequest)
 	description := req.GetString("description", "")
 
 	if name == "" || slug == "" {
-		return mcp.NewToolResultError("name and slug are required"), nil
+		return toolResultError("name and slug are required"), nil
 	}
 
 	org, err := h.db.CreateOrg(name, slug, description)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to create org: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to create org: %v", err)), nil
 	}
 	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "create_org", org)
 }
@@ -28,7 +28,7 @@ func (h *Handlers) HandleCreateOrg(ctx context.Context, req mcp.CallToolRequest)
 func (h *Handlers) HandleListOrgs(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	orgs, err := h.db.ListOrgs()
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list orgs: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list orgs: %v", err)), nil
 	}
 	if orgs == nil {
 		orgs = []models.Org{}
@@ -46,19 +46,19 @@ func (h *Handlers) HandleCreateTeam(ctx context.Context, req mcp.CallToolRequest
 	parentTeamID := optionalString(req.GetString("parent_team_id", ""))
 
 	if name == "" || slug == "" {
-		return mcp.NewToolResultError("name and slug are required"), nil
+		return toolResultError("name and slug are required"), nil
 	}
 
 	// Validate type
 	switch teamType {
 	case "regular", "admin", "bot":
 	default:
-		return mcp.NewToolResultError("type must be 'regular', 'admin', or 'bot'"), nil
+		return toolResultError("type must be 'regular', 'admin', or 'bot'"), nil
 	}
 
 	team, err := h.db.CreateTeam(name, slug, project, description, teamType, orgID, parentTeamID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to create team: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to create team: %v", err)), nil
 	}
 	return h.resultJSONTracked(project, "", "create_team", team)
 }
@@ -68,7 +68,7 @@ func (h *Handlers) HandleListTeams(ctx context.Context, req mcp.CallToolRequest)
 
 	teams, err := h.db.ListTeams(project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list teams: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list teams: %v", err)), nil
 	}
 	if teams == nil {
 		teams = []models.Team{}
@@ -97,23 +97,23 @@ func (h *Handlers) HandleAddTeamMember(ctx context.Context, req mcp.CallToolRequ
 	role := req.GetString("role", "member")
 
 	if teamSlug == "" || agentName == "" {
-		return mcp.NewToolResultError("team and agent_name are required"), nil
+		return toolResultError("team and agent_name are required"), nil
 	}
 
 	// Validate role
 	switch role {
 	case "admin", "lead", "member", "observer":
 	default:
-		return mcp.NewToolResultError("role must be 'admin', 'lead', 'member', or 'observer'"), nil
+		return toolResultError("role must be 'admin', 'lead', 'member', or 'observer'"), nil
 	}
 
 	team, err := h.db.GetTeam(project, teamSlug)
 	if err != nil || team == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
+		return toolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
 	}
 
 	if err := h.db.AddTeamMember(team.ID, agentName, project, role); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to add member: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to add member: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, "", "add_team_member", map[string]any{
@@ -129,11 +129,11 @@ func (h *Handlers) HandleDeleteTeam(ctx context.Context, req mcp.CallToolRequest
 	teamSlug := req.GetString("team", "")
 
 	if teamSlug == "" {
-		return mcp.NewToolResultError("team is required"), nil
+		return toolResultError("team is required"), nil
 	}
 
 	if err := h.db.DeleteTeam(project, teamSlug); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to delete team: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to delete team: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, "", "delete_team", map[string]any{
@@ -148,16 +148,16 @@ func (h *Handlers) HandleRemoveTeamMember(ctx context.Context, req mcp.CallToolR
 	agentName := strings.ToLower(req.GetString("agent_name", ""))
 
 	if teamSlug == "" || agentName == "" {
-		return mcp.NewToolResultError("team and agent_name are required"), nil
+		return toolResultError("team and agent_name are required"), nil
 	}
 
 	team, err := h.db.GetTeam(project, teamSlug)
 	if err != nil || team == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
+		return toolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
 	}
 
 	if err := h.db.RemoveTeamMember(team.ID, agentName); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to remove member: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to remove member: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, "", "remove_team_member", map[string]any{

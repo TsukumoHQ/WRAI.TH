@@ -23,7 +23,7 @@ func (h *Handlers) HandleClaimFiles(ctx context.Context, req mcp.CallToolRequest
 
 	lock, err := h.db.ClaimFiles(project, agent, filePaths, ttlSeconds)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to claim files: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to claim files: %v", err)), nil
 	}
 
 	// Auto-broadcast steering message
@@ -45,7 +45,7 @@ func (h *Handlers) HandleReleaseFiles(ctx context.Context, req mcp.CallToolReque
 	filePaths := req.GetString("file_paths", "[]")
 
 	if err := h.db.ReleaseFiles(project, agent, filePaths); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to release files: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to release files: %v", err)), nil
 	}
 
 	// Auto-broadcast info message
@@ -61,7 +61,7 @@ func (h *Handlers) HandleListLocks(ctx context.Context, req mcp.CallToolRequest)
 
 	locks, err := h.db.ListFileLocks(project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list locks: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list locks: %v", err)), nil
 	}
 	if locks == nil {
 		locks = []models.FileLock{}

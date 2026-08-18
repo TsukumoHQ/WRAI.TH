@@ -19,7 +19,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	subject := req.GetString("subject", "")
 	content := req.GetString("content", "")
 	if content == "" {
-		return mcp.NewToolResultError("content is required"), nil
+		return toolResultError("content is required"), nil
 	}
 
 	metadata := req.GetString("metadata", "{}")
@@ -37,15 +37,15 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	if project != "default" {
 		if known, err := h.db.GetProject(project); err == nil && known == nil {
 			if sugg := h.suggestProject(project); sugg != "" && sugg != project {
-				return mcp.NewToolResultError(fmt.Sprintf("unknown project %q — did you mean %q? (projects are created by register_agent or create_project)", project, sugg)), nil
+				return toolResultError(fmt.Sprintf("unknown project %q — did you mean %q? (projects are created by register_agent or create_project)", project, sugg)), nil
 			}
-			return mcp.NewToolResultError(fmt.Sprintf("unknown project %q — register_agent or create_project first", project)), nil
+			return toolResultError(fmt.Sprintf("unknown project %q — register_agent or create_project first", project)), nil
 		}
 	}
 
 	// Quota check: messages
 	if qErr := h.db.CheckQuotaError(project, from, "messages"); qErr != "" {
-		return mcp.NewToolResultError(qErr), nil
+		return toolResultError(qErr), nil
 	}
 
 	// Federated DM: recipient addressed as "name@peerlabel" routes to a peer
@@ -64,10 +64,10 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// Both sender and recipient must be registered with is_executive=true.
 	if targetProject != "" && targetProject != project {
 		if to == "" {
-			return mcp.NewToolResultError("target_project requires a 'to' agent name"), nil
+			return toolResultError("target_project requires a 'to' agent name"), nil
 		}
 		if to == "*" || strings.HasPrefix(to, "team:") || conversationID != nil {
-			return mcp.NewToolResultError("cross-project messaging is limited to direct DMs (no broadcast, no team:, no conversation_id)"), nil
+			return toolResultError("cross-project messaging is limited to direct DMs (no broadcast, no team:, no conversation_id)"), nil
 		}
 		return h.sendCrossProject(ctx, project, from, targetProject, to, msgType, subject, content, metadata, replyTo, priority, ttlSeconds)
 	}
@@ -85,14 +85,14 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		// Conversation message — validate membership
 		isMember, err := h.db.IsConversationMember(*conversationID, from)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to check membership: %v", err)), nil
+			return toolResultError(fmt.Sprintf("failed to check membership: %v", err)), nil
 		}
 		if !isMember {
-			return mcp.NewToolResultError("you are not a member of this conversation"), nil
+			return toolResultError("you are not a member of this conversation"), nil
 		}
 		to = "" // no single recipient for conversation messages
 	} else if to == "" {
-		return mcp.NewToolResultError("to is required (or provide conversation_id)"), nil
+		return toolResultError("to is required (or provide conversation_id)"), nil
 	}
 
 	// Permission check: only enforce when teams are configured (bypass for "user" — always reachable)
@@ -101,10 +101,10 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		if hasTeams {
 			allowed, err := h.db.CanMessage(project, from, to)
 			if err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("permission check failed: %v", err)), nil
+				return toolResultError(fmt.Sprintf("permission check failed: %v", err)), nil
 			}
 			if !allowed {
-				return mcp.NewToolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
+				return toolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
 			}
 		}
 	}
@@ -114,7 +114,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		teamSlug := strings.TrimPrefix(to, "team:")
 		team, err := h.db.ResolveTeamSlug(project, teamSlug)
 		if err != nil || team == nil {
-			return mcp.NewToolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
+			return toolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
 		}
 
 		// Resolve team recipients first, then insert message + deliveries atomically.
@@ -126,7 +126,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		// whose only member is the sender is NOT this case — the message still
 		// lands in the team inbox as a record.
 		if len(members) == 0 {
-			return mcp.NewToolResultError(fmt.Sprintf(
+			return toolResultError(fmt.Sprintf(
 				"team '%s' has no members — message not sent (it would reach nobody). Add members with add_team_member, or delete_team to retire the channel.", teamSlug)), nil
 		}
 
@@ -139,7 +139,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 
 		msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
+			return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 		}
 
 		// Best-effort bookkeeping + notifications after the durable write.
@@ -157,7 +157,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		if hasTeams {
 			allowed, _ := h.db.CanMessage(project, from, "*")
 			if !allowed {
-				return mcp.NewToolResultError("broadcast requires membership in an 'admin' type team. Fix: register with is_executive=true (auto-creates admin team), or manually: create_team(type='admin') then add_team_member()"), nil
+				return toolResultError("broadcast requires membership in an 'admin' type team. Fix: register with is_executive=true (auto-creates admin team), or manually: create_team(type='admin') then add_team_member()"), nil
 			}
 		}
 	}
@@ -167,7 +167,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
 	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 	}
 
 	// Push notification
@@ -230,7 +230,7 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 		messages, err = h.db.GetInbox(project, agent, unreadOnly, limit, filter)
 	}
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get inbox: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get inbox: %v", err)), nil
 	}
 	if messages == nil {
 		messages = []models.Message{}
@@ -346,14 +346,14 @@ func (h *Handlers) HandleAckDelivery(ctx context.Context, req mcp.CallToolReques
 			agent := resolveAgent(ctx, req)
 			project := h.resolveProject(ctx, req)
 			if err := h.db.AcknowledgeDeliveryByMessage(msgID, agent, project); err != nil {
-				return mcp.NewToolResultError(fmt.Sprintf("failed to acknowledge delivery by message: %v", err)), nil
+				return toolResultError(fmt.Sprintf("failed to acknowledge delivery by message: %v", err)), nil
 			}
 			return h.resultJSONTracked(project, agent, "ack_delivery", map[string]any{"acknowledged_message_id": msgID})
 		}
-		return mcp.NewToolResultError("delivery_id is required (get it from get_inbox response — each message has a delivery_id field). If you only have the message_id, pass message_id + as + project instead."), nil
+		return toolResultError("delivery_id is required (get it from get_inbox response — each message has a delivery_id field). If you only have the message_id, pass message_id + as + project instead."), nil
 	}
 	if err := h.db.AcknowledgeDelivery(deliveryID); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to acknowledge delivery: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to acknowledge delivery: %v", err)), nil
 	}
 	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "ack_delivery", map[string]any{"acknowledged": deliveryID})
 }
@@ -367,11 +367,11 @@ func (h *Handlers) HandleDeliveryStatus(ctx context.Context, req mcp.CallToolReq
 	messageID := req.GetString("message_id", "")
 	target := req.GetString("agent", "")
 	if messageID == "" && target == "" {
-		return mcp.NewToolResultError("delivery_status requires message_id or agent"), nil
+		return toolResultError("delivery_status requires message_id or agent"), nil
 	}
 	rows, err := h.db.DeliveryStatus(project, messageID, target)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get delivery status: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get delivery status: %v", err)), nil
 	}
 	if rows == nil {
 		rows = []models.DeliveryStatusRow{}
@@ -394,7 +394,7 @@ func (h *Handlers) HandleDeadletter(ctx context.Context, req mcp.CallToolRequest
 	limit := clampLimit(req.GetInt("limit", 50))
 	rows, err := h.db.Deadletter(project, target, limit)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list deadletter: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list deadletter: %v", err)), nil
 	}
 	if rows == nil {
 		rows = []models.DeadletterRow{}
@@ -409,12 +409,12 @@ func (h *Handlers) HandleDeadletter(ctx context.Context, req mcp.CallToolRequest
 func (h *Handlers) HandleGetThread(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	messageID := req.GetString("message_id", "")
 	if messageID == "" {
-		return mcp.NewToolResultError("message_id is required"), nil
+		return toolResultError("message_id is required"), nil
 	}
 
 	messages, err := h.db.GetThread(messageID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get thread: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get thread: %v", err)), nil
 	}
 
 	// Thread can hold up to 200 messages; injecting every full body unbounded
@@ -491,21 +491,21 @@ func (h *Handlers) HandleGetMessage(ctx context.Context, req mcp.CallToolRequest
 	project := h.resolveProject(ctx, req)
 	id := req.GetString("id", "")
 	if id == "" {
-		return mcp.NewToolResultError("id is required"), nil
+		return toolResultError("id is required"), nil
 	}
 
 	msg, err := h.db.GetMessage(id)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get message: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get message: %v", err)), nil
 	}
 	if msg == nil {
 		// Not a full ID — try to resolve an unambiguous prefix.
 		full, ferr := h.db.FindMessageByPrefix(id)
 		if ferr != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("no message with id %q: %v", id, ferr)), nil
+			return toolResultError(fmt.Sprintf("no message with id %q: %v", id, ferr)), nil
 		}
 		if msg, err = h.db.GetMessage(full); err != nil || msg == nil {
-			return mcp.NewToolResultError(fmt.Sprintf("no message with id %q", id)), nil
+			return toolResultError(fmt.Sprintf("no message with id %q", id)), nil
 		}
 	}
 
@@ -547,7 +547,7 @@ func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) 
 	convID := req.GetString("conversation_id", "")
 	if convID != "" {
 		if err := h.db.MarkConversationRead(convID, agent); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to mark conversation read: %v", err)), nil
+			return toolResultError(fmt.Sprintf("failed to mark conversation read: %v", err)), nil
 		}
 		// Also acknowledge the deliveries for this conversation's messages —
 		// otherwise they stay queued/surfaced and keep re-surfacing (and, before
@@ -567,12 +567,12 @@ func (h *Handlers) HandleMarkRead(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 	if len(ids) == 0 {
-		return mcp.NewToolResultError("message_ids (array) or conversation_id is required. Note: the field is plural — pass message_ids:['id1','id2'] not message_id."), nil
+		return toolResultError("message_ids (array) or conversation_id is required. Note: the field is plural — pass message_ids:['id1','id2'] not message_id."), nil
 	}
 
 	count, err := h.db.MarkRead(ids, agent, project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to mark read: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to mark read: %v", err)), nil
 	}
 
 	// mark_read is the explicit clear for the deliveries inbox: acknowledge each
@@ -594,17 +594,17 @@ func (h *Handlers) HandleGetTeamInbox(ctx context.Context, req mcp.CallToolReque
 	limit := clampLimit(req.GetInt("limit", 50))
 
 	if teamSlug == "" {
-		return mcp.NewToolResultError("team is required"), nil
+		return toolResultError("team is required"), nil
 	}
 
 	team, err := h.db.GetTeam(project, teamSlug)
 	if err != nil || team == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
+		return toolResultError(fmt.Sprintf("team '%s' not found", teamSlug)), nil
 	}
 
 	msgs, err := h.db.GetTeamInbox(team.ID, limit)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get team inbox: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get team inbox: %v", err)), nil
 	}
 	if msgs == nil {
 		msgs = []models.Message{}
@@ -672,11 +672,11 @@ func (h *Handlers) HandleAddNotifyChannel(ctx context.Context, req mcp.CallToolR
 	target := strings.ToLower(req.GetString("target", ""))
 
 	if target == "" {
-		return mcp.NewToolResultError("target is required"), nil
+		return toolResultError("target is required"), nil
 	}
 
 	if err := h.db.AddNotifyChannel(agent, project, target); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to add notify channel: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to add notify channel: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, agent, "add_notify_channel", map[string]any{

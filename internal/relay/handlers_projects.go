@@ -11,10 +11,10 @@ import (
 func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name := strings.ToLower(req.GetString("name", ""))
 	if name == "" {
-		return mcp.NewToolResultError("name is required"), nil
+		return toolResultError("name is required"), nil
 	}
 	if !validProjectName(name) {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", name)), nil
+		return toolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", name)), nil
 	}
 	description := req.GetString("description", "")
 	cwd := req.GetString("cwd", "")
@@ -51,11 +51,11 @@ func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequ
 func (h *Handlers) HandleDeleteProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := req.GetString("project", "")
 	if project == "" {
-		return mcp.NewToolResultError("project is required"), nil
+		return toolResultError("project is required"), nil
 	}
 
 	if err := h.db.DeleteProject(project); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to delete project: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to delete project: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "delete_project", map[string]any{

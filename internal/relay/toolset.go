@@ -19,14 +19,11 @@ import (
 // PARK instead of hot-looping a retry that will never succeed — distinct from a
 // transient/plain error string, which a client may reasonably retry.
 func senderInactiveError(agent, project, reason string) *mcp.CallToolResult {
-	b, _ := json.Marshal(map[string]any{
-		"code":    "SENDER_INACTIVE",
-		"reason":  reason,
-		"agent":   agent,
-		"project": project,
-		"message": fmt.Sprintf("sender %q is not eligible to send in project %q (reason: %s) — register/reactivate before retrying, or park. Register a monitoring/QA daemon with is_service=true to stay eligible while workers are down.", agent, project, reason),
-	})
-	return mcp.NewToolResultError(string(b))
+	// Permission-category: the same send keeps failing until the sender
+	// registers/reactivates, so isRetryable=false — park, don't hot-loop.
+	return toolError("SENDER_INACTIVE", CategoryPermission, false,
+		fmt.Sprintf("sender %q is not eligible to send in project %q (reason: %s) — register/reactivate before retrying, or park. Register a monitoring/QA daemon with is_service=true to stay eligible while workers are down.", agent, project, reason),
+		map[string]any{"reason": reason, "agent": agent, "project": project})
 }
 
 // anonymousRefusedError is the TYPED refusal for register_agent when the actor
@@ -41,14 +38,12 @@ func anonymousRefusedError(name, project string) *mcp.CallToolResult {
 	} else if name != "" {
 		reason = "default-project registration not allowed"
 	}
-	b, _ := json.Marshal(map[string]any{
-		"code":    "ANONYMOUS_REGISTRATION_REFUSED",
-		"reason":  reason,
-		"name":    name,
-		"project": project,
-		"message": "anonymous agents are not allowed: register with a real name and an explicit non-default project.",
-	})
-	return mcp.NewToolResultError(string(b))
+	// Permission-category, non-retryable: the same anonymous/default-project
+	// registration keeps being refused until the caller supplies a real name +
+	// explicit project.
+	return toolError("ANONYMOUS_REGISTRATION_REFUSED", CategoryPermission, false,
+		"anonymous agents are not allowed: register with a real name and an explicit non-default project.",
+		map[string]any{"reason": reason, "name": name, "project": project})
 }
 
 // registeredTool pairs a ServerTool with the category used by discover_tools.
@@ -227,15 +222,15 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project := h.resolveProject(ctx, req)
 		if project == "" {
-			return mcp.NewToolResultError("no project resolved: pass project=<name> (or connect with ?project=<name>) — the 'default' catch-all was removed."), nil
+			return toolResultError("no project resolved: pass project=<name> (or connect with ?project=<name>) — the 'default' catch-all was removed."), nil
 		}
 		from := strings.ToLower(resolveAgent(ctx, req))
 		if from == "" {
-			return mcp.NewToolResultError("no agent identity: pass `as`=<name> (or connect with ?agent=<name>) after register_agent — the 'anonymous' fallback was removed."), nil
+			return toolResultError("no agent identity: pass `as`=<name> (or connect with ?agent=<name>) after register_agent — the 'anonymous' fallback was removed."), nil
 		}
 		agent, err := h.db.GetAgent(project, from)
 		if err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
+			return toolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
 		}
 		// T2 sender-liveness gate (send/ack only): an unregistered or inactive
 		// non-service sender is refused with the TYPED SENDER_INACTIVE code so the
@@ -248,7 +243,7 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 			}
 		}
 		if agent == nil {
-			return mcp.NewToolResultError(fmt.Sprintf("agent %q is not registered in project %q — call register_agent first.", from, project)), nil
+			return toolResultError(fmt.Sprintf("agent %q is not registered in project %q — call register_agent first.", from, project)), nil
 		}
 		// Identity binding (best-effort, fail-open): if this MCP connection's
 		// session is provably bound to a DIFFERENT agent in the project, the
@@ -259,7 +254,7 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 		// guess. Bulletproof anti-theft would need a per-agent secret token.
 		if sess := sessionFromContext(ctx); sess != nil {
 			if owner, ok := h.registry.AgentForSession(project, sess.SessionID()); ok && owner != from {
-				return mcp.NewToolResultError(fmt.Sprintf("identity mismatch: this connection is registered as %q in project %q and cannot act as %q — use your own identity (or register_agent as %q).", owner, project, from, from)), nil
+				return toolResultError(fmt.Sprintf("identity mismatch: this connection is registered as %q in project %q and cannot act as %q — use your own identity (or register_agent as %q).", owner, project, from, from)), nil
 			}
 		}
 		return next(ctx, req)
@@ -308,7 +303,7 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 		}
 	}
 	if !valid {
-		return mcp.NewToolResultError(fmt.Sprintf("unknown category %q — call discover_tools without reading its description? Valid: see enum", category)), nil
+		return toolResultError(fmt.Sprintf("unknown category %q — call discover_tools without reading its description? Valid: see enum", category)), nil
 	}
 
 	type toolSchema struct {
@@ -326,7 +321,7 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 
 	b, err := json.Marshal(map[string]any{"category": category, "tools": out})
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("marshal schemas: %v", err)), nil
+		return toolResultError(fmt.Sprintf("marshal schemas: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
 }
@@ -334,7 +329,7 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name := req.GetString("tool", "")
 	if name == "" {
-		return mcp.NewToolResultError("tool is required"), nil
+		return toolResultError("tool is required"), nil
 	}
 
 	var args map[string]any
@@ -343,12 +338,12 @@ func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) 
 		args = raw
 	case string: // tolerate JSON-encoded args from less capable callers
 		if err := json.Unmarshal([]byte(raw), &args); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("args is a string but not valid JSON: %v", err)), nil
+			return toolResultError(fmt.Sprintf("args is a string but not valid JSON: %v", err)), nil
 		}
 	case nil:
 		args = map[string]any{}
 	default:
-		return mcp.NewToolResultError("args must be an object"), nil
+		return toolResultError("args must be an object"), nil
 	}
 
 	for _, rt := range h.toolRegistry() {
@@ -357,7 +352,7 @@ func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) 
 			return rt.Handler(ctx, inner)
 		}
 	}
-	return mcp.NewToolResultError(fmt.Sprintf("unknown tool %q — use discover_tools to browse categories", name)), nil
+	return toolResultError(fmt.Sprintf("unknown tool %q — use discover_tools to browse categories", name)), nil
 }
 
 // toolsModeFilter hides the full toolset behind discover_tools/call_tool when

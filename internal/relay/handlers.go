@@ -250,7 +250,7 @@ func (h *Handlers) RecordTokens(rec db.TokenRecord) {
 func (h *Handlers) resultJSONTracked(project, agent, tool string, data any) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(data)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("json marshal: %v", err)), nil
+		return toolResultError(fmt.Sprintf("json marshal: %v", err)), nil
 	}
 	select {
 	case h.tokenCh <- db.TokenRecord{
@@ -340,19 +340,19 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 	// Validate sender exists and is executive
 	sender, err := h.db.GetAgent(srcProject, from)
 	if err != nil || sender == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("sender '%s' not found in project '%s'", from, srcProject)), nil
+		return toolResultError(fmt.Sprintf("sender '%s' not found in project '%s'", from, srcProject)), nil
 	}
 	if !sender.IsExecutive {
-		return mcp.NewToolResultError("cross-project messaging requires sender to be is_executive=true"), nil
+		return toolResultError("cross-project messaging requires sender to be is_executive=true"), nil
 	}
 
 	// Validate target exists and is executive
 	target, err := h.db.GetAgent(dstProject, to)
 	if err != nil || target == nil {
-		return mcp.NewToolResultError(fmt.Sprintf("target '%s' not found in project '%s'", to, dstProject)), nil
+		return toolResultError(fmt.Sprintf("target '%s' not found in project '%s'", to, dstProject)), nil
 	}
 	if !target.IsExecutive {
-		return mcp.NewToolResultError(fmt.Sprintf("cross-project messaging requires target '%s' in project '%s' to be is_executive=true", to, dstProject)), nil
+		return toolResultError(fmt.Sprintf("cross-project messaging requires target '%s' in project '%s' to be is_executive=true", to, dstProject)), nil
 	}
 
 	// Merge caller-provided metadata with source tracking fields
@@ -370,7 +370,7 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 	// special routing in the read path.
 	msg, err := h.db.InsertMessageWithDeliveries(dstProject, from, to, msgType, subject, content, string(metaBytes), priority, ttlSeconds, replyTo, nil, []string{to})
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to send cross-project message: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to send cross-project message: %v", err)), nil
 	}
 
 	// Push notification if the target has an open session
@@ -423,7 +423,7 @@ func (h *Handlers) resolveTaskID(taskID, project string) (string, error) {
 func resultJSON(data any) (*mcp.CallToolResult, error) {
 	b, err := json.Marshal(data)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("json marshal: %v", err)), nil
+		return toolResultError(fmt.Sprintf("json marshal: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
 }

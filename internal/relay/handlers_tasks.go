@@ -17,11 +17,45 @@ import (
 // (park on TASK_LEASE_HELD, treat TASK_STATE_CONFLICT as a lost race) instead of
 // pattern-matching a prose string — the "no infinite-retry path" contract.
 func typedTaskError(te *db.TaskError) *mcp.CallToolResult {
-	b, err := json.Marshal(map[string]string{"error": te.Code, "message": te.Msg})
-	if err != nil {
-		return mcp.NewToolResultError(te.Error())
+	category, retryable := taskErrorCategory(te.Code)
+	// Keep the legacy "error" alias (= code) alongside the canonical envelope so
+	// any caller keying on "error" still works; new callers read code/category.
+	return toolError(te.Code, category, retryable, te.Msg, map[string]any{"error": te.Code})
+}
+
+// taskOpError routes the error from a task state-machine DB op. A typed
+// *db.TaskError (lost CAS race → TASK_STATE_CONFLICT, live lease → TASK_LEASE_HELD,
+// missing → TASK_NOT_FOUND) becomes the typed envelope with the CORRECT category —
+// crucially a lost race is validation/non-retryable, so a double-claim loser PARKS
+// instead of hot-looping. Anything else is an unclassified internal failure. Use
+// this (never a bare fmt.Sprintf wrap) on every claim/start/review/complete/block/
+// cancel/resume/update path, or a conflict silently reads as retryable.
+func taskOpError(err error, format string, a ...any) *mcp.CallToolResult {
+	var te *db.TaskError
+	if errors.As(err, &te) {
+		return typedTaskError(te)
 	}
-	return mcp.NewToolResultError(string(b))
+	return toolResultError(fmt.Sprintf(format, a...))
+}
+
+// taskErrorCategory maps a task-state code to the uniform taxonomy. EVERY task
+// conflict is isRetryable=FALSE — the contract is "PARK, don't hot-loop":
+//   - TASK_LEASE_HELD: a LIVE holder owns the task. The lease is temporally
+//     transient (it will lapse), but hot-looping the same reclaim now only
+//     spins against a live holder — the caller must park and let the supervisor
+//     path or lease-expiry resolve it, so isRetryable=false despite the
+//     transient category.
+//   - TASK_STATE_CONFLICT / TASK_NOT_FOUND: the state moved or never existed;
+//     the same call as-is keeps failing — re-fetch first. Validation.
+func taskErrorCategory(code string) (category string, retryable bool) {
+	switch code {
+	case db.CodeTaskLeaseHeld:
+		return CategoryTransient, false
+	case db.CodeTaskStateConflict, db.CodeTaskNotFound:
+		return CategoryValidation, false
+	default:
+		return CategoryValidation, false
+	}
 }
 
 // missingTicketFields returns which of goal / acceptance_criteria / dod are
@@ -80,7 +114,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	requiredSkill := req.GetString("required_skill", "")
 	// Quota check: tasks
 	if qErr := h.db.CheckQuotaError(project, agent, "tasks"); qErr != "" {
-		return mcp.NewToolResultError(qErr), nil
+		return toolResultError(qErr), nil
 	}
 
 	// Auto-resolve profile from skill if not specified
@@ -91,11 +125,11 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 	if profile == "" {
-		return mcp.NewToolResultError("profile is required (or provide required_skill)"), nil
+		return toolResultError("profile is required (or provide required_skill)"), nil
 	}
 	title := req.GetString("title", "")
 	if title == "" {
-		return mcp.NewToolResultError("title is required"), nil
+		return toolResultError("title is required"), nil
 	}
 	description := req.GetString("description", "")
 	priority := req.GetString("priority", "P2")
@@ -109,7 +143,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	dod := req.GetString("dod", "")
 	if h.db.ProjectRequiresTypedTicket(project) {
 		if missing := missingTicketFields(goal, acceptanceCriteria, dod); len(missing) > 0 {
-			return mcp.NewToolResultError(ticketRefusal(project, missing)), nil
+			return toolResultError(ticketRefusal(project, missing)), nil
 		}
 	}
 	ticket := db.TypedTicket{Goal: goal, AcceptanceCriteria: acceptanceCriteria, Dod: dod}
@@ -152,7 +186,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 
 	task, err := h.db.DispatchTask(project, profile, agent, title, description, priority, parentTaskID, boardID, ticket)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
 	}
 
 	// Push notification for P0/P1 tasks
@@ -208,16 +242,16 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	task, err := h.db.ClaimTask(taskID, agent, project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to claim task: %v", err)), nil
+		return taskOpError(err, "failed to claim task: %v", err), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
@@ -236,20 +270,16 @@ func (h *Handlers) HandleReclaimTask(ctx context.Context, req mcp.CallToolReques
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	task, err := h.db.ReclaimTask(taskID, agent, project)
 	if err != nil {
-		var te *db.TaskError
-		if errors.As(err, &te) {
-			return typedTaskError(te), nil
-		}
-		return mcp.NewToolResultError(fmt.Sprintf("failed to reclaim task: %v", err)), nil
+		return taskOpError(err, "failed to reclaim task: %v", err), nil
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
@@ -273,16 +303,16 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	task, err := h.db.StartTask(taskID, agent, project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to start task: %v", err)), nil
+		return taskOpError(err, "failed to start task: %v", err), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "start", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.in_progress", "start", project, task)
@@ -299,24 +329,24 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	existing, err := h.db.GetTask(taskID, project)
 	if err != nil || existing == nil {
-		return mcp.NewToolResultError("task not found"), nil
+		return toolResultError("task not found"), nil
 	}
 	if existing.Status != "blocked" {
-		return mcp.NewToolResultError(fmt.Sprintf("task is not blocked (status=%s)", existing.Status)), nil
+		return toolResultError(fmt.Sprintf("task is not blocked (status=%s)", existing.Status)), nil
 	}
 
 	task, err := h.db.StartTask(taskID, agent, project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to resume task: %v", err)), nil
+		return taskOpError(err, "failed to resume task: %v", err), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "resume", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.in_progress", "resume", project, task)
@@ -330,11 +360,11 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	// Git zone: where the work lives, for the external review gate. Written
@@ -345,13 +375,13 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 	gitTarget := optionalString(req.GetString("git_target", ""))
 	if gitBranch != nil || gitWorktree != nil || gitTarget != nil {
 		if err := h.db.SetTaskGit(taskID, project, gitBranch, gitWorktree, gitTarget); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to record git fields: %v", err)), nil
+			return toolResultError(fmt.Sprintf("failed to record git fields: %v", err)), nil
 		}
 	}
 
 	task, err := h.db.ReviewTask(taskID, agent, project)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to mark task in-review: %v", err)), nil
+		return taskOpError(err, "failed to mark task in-review: %v", err), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "review", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
 	// The in_review event carries the git zone + the submitting agent, so a
@@ -388,26 +418,26 @@ func (h *Handlers) HandleComment(ctx context.Context, req mcp.CallToolRequest) (
 	taskID := req.GetString("task_id", "")
 	body := strings.TrimSpace(req.GetString("body", ""))
 	if taskID == "" || body == "" {
-		return mcp.NewToolResultError("task_id and body are required"), nil
+		return toolResultError("task_id and body are required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 	task, err := h.db.GetTask(taskID, project)
 	if err != nil || task == nil {
-		return mcp.NewToolResultError("task not found"), nil
+		return toolResultError("task not found"), nil
 	}
 
 	conn := h.getConnector()
 	if task.Source == "linear" && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
 		if err := conn.Comment(*task.LinearIssueID, body); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("failed to post comment to Linear: %v", err)), nil
+			return toolResultError(fmt.Sprintf("failed to post comment to Linear: %v", err)), nil
 		}
 		return h.resultJSONTracked(project, agent, "comment", map[string]any{"posted": "linear", "task_id": taskID})
 	}
 	if err := h.db.AddProgressNote(taskID, project, agent, body); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to add note: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to add note: %v", err)), nil
 	}
 	return h.resultJSONTracked(project, agent, "comment", map[string]any{"posted": "note", "task_id": taskID})
 }
@@ -417,17 +447,17 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 	result := optionalString(req.GetString("result", ""))
 
 	task, err := h.db.CompleteTask(taskID, agent, project, result)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to complete task: %v", err)), nil
+		return taskOpError(err, "failed to complete task: %v", err), nil
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "complete", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
@@ -469,17 +499,17 @@ func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 	reason := optionalString(req.GetString("reason", ""))
 
 	task, err := h.db.BlockTask(taskID, agent, project, reason)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to block task: %v", err)), nil
+		return taskOpError(err, "failed to block task: %v", err), nil
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "block", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
@@ -514,17 +544,17 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 	reason := optionalString(req.GetString("reason", ""))
 
 	task, err := h.db.CancelTask(taskID, agent, project, reason)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to cancel task: %v", err)), nil
+		return taskOpError(err, "failed to cancel task: %v", err), nil
 	}
 	pushStatusAsync(h.getConnector(), task, "cancelled", reason)
 
@@ -566,11 +596,11 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	title := optionalString(req.GetString("title", ""))
@@ -581,7 +611,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 
 	task, err := h.db.UpdateTaskFields(taskID, project, title, description, priority, boardID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to update task: %v", err)), nil
+		return taskOpError(err, "failed to update task: %v", err), nil
 	}
 
 	if progressNote != "" {
@@ -601,7 +631,7 @@ func (h *Handlers) HandleArchiveTasks(ctx context.Context, req mcp.CallToolReque
 
 	count, err := h.db.ArchiveTasks(project, status, boardID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to archive tasks: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to archive tasks: %v", err)), nil
 	}
 
 	msg := fmt.Sprintf("Archived %d tasks", count)
@@ -619,17 +649,17 @@ func (h *Handlers) HandleMoveTask(ctx context.Context, req mcp.CallToolRequest) 
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil
+		return toolResultError(err.Error()), nil
 	}
 
 	boardID := optionalString(req.GetString("board_id", ""))
 
 	if boardID == nil {
-		return mcp.NewToolResultError("board_id is required"), nil
+		return toolResultError("board_id is required"), nil
 	}
 
 	// Resolve truncated board_id prefix
@@ -645,7 +675,7 @@ func (h *Handlers) HandleMoveTask(ctx context.Context, req mcp.CallToolRequest) 
 
 	task, err := h.db.UpdateTaskFields(taskID, project, nil, nil, nil, boardID)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to move task: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to move task: %v", err)), nil
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "move", Agent: agent, Project: project, Label: task.Title})
@@ -677,11 +707,11 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 		}
 	} else {
 		if err := json.Unmarshal([]byte(tasksJSON), &items); err != nil {
-			return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
+			return toolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
 		}
 	}
 	if len(items) == 0 {
-		return mcp.NewToolResultError("tasks is required — pass tasks:'[{\"task_id\":\"...\",\"result\":\"...\"}]' (JSON string). As a shortcut, task_ids:'[\"id1\",\"id2\"]' is also accepted."), nil
+		return toolResultError("tasks is required — pass tasks:'[{\"task_id\":\"...\",\"result\":\"...\"}]' (JSON string). As a shortcut, task_ids:'[\"id1\",\"id2\"]' is also accepted."), nil
 	}
 
 	var completed []string
@@ -724,10 +754,10 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		Dod                string   `json:"dod"`
 	}
 	if err := json.Unmarshal([]byte(tasksJSON), &items); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
+		return toolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
 	}
 	if len(items) == 0 {
-		return mcp.NewToolResultError("tasks is required — pass tasks:'[{\"profile\":\"...\",\"title\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\"}]' (JSON string). Only profile and title are required per item."), nil
+		return toolResultError("tasks is required — pass tasks:'[{\"profile\":\"...\",\"title\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\"}]' (JSON string). Only profile and title are required per item."), nil
 	}
 
 	// Same per-project typed-ticket enforcement as dispatch_task; a failing item
@@ -781,11 +811,11 @@ func (h *Handlers) HandleGetTask(ctx context.Context, req mcp.CallToolRequest) (
 	project := h.resolveProject(ctx, req)
 	taskID := req.GetString("task_id", "")
 	if taskID == "" {
-		return mcp.NewToolResultError("task_id is required"), nil
+		return toolResultError("task_id is required"), nil
 	}
 	taskID, rErr := h.resolveTaskID(taskID, project)
 	if rErr != nil {
-		return mcp.NewToolResultError(rErr.Error()), nil
+		return toolResultError(rErr.Error()), nil
 	}
 	includeSubtasks := req.GetBool("include_subtasks", false)
 
@@ -797,10 +827,10 @@ func (h *Handlers) HandleGetTask(ctx context.Context, req mcp.CallToolRequest) (
 		task, err = h.db.GetTask(taskID, project)
 	}
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to get task: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to get task: %v", err)), nil
 	}
 	if task == nil {
-		return mcp.NewToolResultError("task not found"), nil
+		return toolResultError("task not found"), nil
 	}
 
 	return h.resultJSONTracked(project, "", "get_task", task)
@@ -818,7 +848,7 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 
 	tasks, err := h.db.ListTasks(project, status, profile, priority, assignedTo, boardID, limit, includeArchived)
 	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("failed to list tasks: %v", err)), nil
+		return toolResultError(fmt.Sprintf("failed to list tasks: %v", err)), nil
 	}
 	if tasks == nil {
 		tasks = []models.Task{}
