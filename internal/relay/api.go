@@ -188,6 +188,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// pressure, table growth, DB/snapshot health, Linear freshness.
 	case path == "/metrics" && req.Method == http.MethodGet:
 		r.apiGetMetrics(w, req)
+	// Comms-discipline health view (comms S4): no-wake share vs target, per-sender
+	// action_required distribution, read-latency buckets, coalescing candidates.
+	case path == "/metrics/comms" && req.Method == http.MethodGet:
+		r.apiGetCommsMetrics(w, req)
 	// Notification rules (configurable event→action→target rules engine)
 	case path == "/notification-rules" && req.Method == http.MethodGet:
 		r.apiGetNotificationRules(w, req)
