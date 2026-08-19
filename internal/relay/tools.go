@@ -25,7 +25,7 @@ func whoamiTool() mcp.Tool {
 func registerAgentTool() mcp.Tool {
 	return mcp.NewTool(
 		"register_agent",
-		mcp.WithDescription("Register an agent (once per agent at startup; re-registering updates it). Returns session_context: profile, tasks, unread messages, conversations.\n\nOn re-register, identity fields you OMIT (reports_to, profile_slug, is_executive, session_id) are PRESERVED, not cleared; role/description/interest_tags/max_context_bytes always update.\n\nis_executive=true auto-creates the 'leadership' admin team and adds the agent, enabling broadcast (send_message to='*'). Broadcast is open until the first team exists, then requires admin-team membership."),
+		mcp.WithDescription("Register an agent (once at startup; re-registering updates it). Returns session_context (profile, tasks, unread, conversations). On re-register, OMITTED identity fields (reports_to, profile_slug, is_executive, session_id) are PRESERVED; role/description/interest_tags/max_context_bytes always update. is_executive=true auto-creates the 'leadership' admin team, enabling broadcast (to='*')."),
 		projectParam,
 		mcp.WithString("name", mcp.Description("Unique agent name (e.g. 'backend'). Re-register same name to update. To rename: register new name, deactivate_agent the old."), mcp.Required()),
 		mcp.WithString("role", mcp.Description("Role description (e.g. 'FastAPI backend developer')")),
@@ -64,9 +64,26 @@ func sendMessageTool() mcp.Tool {
 		mcp.WithNumber("ttl_seconds", mcp.Description("Seconds before expiry (default 14400 = 4h, 0 = never). Expired messages leave the inbox.")),
 		mcp.WithString("target_project", mcp.Description("Cross-project DM: deliver to this agent name in target_project. Both sender and recipient must be is_executive. Message lives in the target project; metadata records the source.")),
 		mcp.WithString("action_required",
-			mcp.Description("Does this need the recipient to act? 'none' routes it no-wake (still in their inbox, never wakes a busy agent) — use it for FYIs, receipts, status, and reports. 'ask'/'do'/'decide' may wake per priority. Omit to let the relay derive it from type (question→ask, task→do, notification/response→none). A question or blocker is never suppressed by 'none'."),
+			mcp.Description("Does the recipient need to act? 'none' routes no-wake (stays in inbox) — for FYIs/receipts/status. 'ask'/'do'/'decide' may wake per priority. Omit to derive from type. A question/blocker is never suppressed by 'none'."),
 			mcp.Enum("ask", "do", "decide", "none"),
 		),
+	)
+}
+
+func sendStatusTool() mcp.Tool {
+	return mcp.NewTool(
+		"send_status",
+		mcp.WithDescription("Post a typed status (done/doing/blockers + note). No-wake: surfaced, never wakes. A blocker here is not an escalation — send a question to escalate. Over-long input is capped, not rejected."),
+		asParam,
+		projectParam,
+		mcp.WithString("to", mcp.Description("Agent name, '*', or a conversation_id."), mcp.Required()),
+		mcp.WithArray("done", mcp.Description("Completed items (up to 20)."), mcp.WithStringItems()),
+		mcp.WithArray("doing", mcp.Description("In-progress items."), mcp.WithStringItems()),
+		mcp.WithArray("blockers", mcp.Description("Blockers — surfaced, not woken."), mcp.WithStringItems()),
+		mcp.WithString("note", mcp.Description("One short note.")),
+		mcp.WithString("conversation_id", mcp.Description("Post to a conversation.")),
+		mcp.WithString("priority", mcp.Description("P2 default; never wakes except P0."), mcp.Enum("P0", "P1", "P2", "P3")),
+		mcp.WithNumber("ttl_seconds", mcp.Description("Expiry seconds (default 14400, 0=never).")),
 	)
 }
 
@@ -152,7 +169,7 @@ func listAgentsTool() mcp.Tool {
 func isEligibleTool() mcp.Tool {
 	return mcp.NewTool(
 		"is_eligible",
-		mcp.WithDescription("Read-only sender-eligibility check: returns {eligible, reason} for an agent WITHOUT sending anything. Same verdict as send_message would give, so a client checks first and PARKS on eligible=false instead of hot-looping a send that would fail with SENDER_INACTIVE. Service identities (is_service) are always eligible."),
+		mcp.WithDescription("Read-only sender-eligibility check: {eligible, reason} for an agent without sending. Same verdict send_message would give, so a client PARKS on eligible=false instead of hot-looping a failing send. Service identities are always eligible."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Agent name to check (default: yourself, i.e. the `as` identity)")),
@@ -536,7 +553,7 @@ func cancelTaskTool() mcp.Tool {
 func reclaimTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"reclaim_task",
-		mcp.WithDescription("Take over a DEAD holder's task (supervisor re-claim). Succeeds only when the current lease has expired OR its holder is deregistered/inactive; a live holder's task refuses with TASK_LEASE_HELD. On success the task moves to 'accepted' under the caller with a fresh lease, and a task.lease_transferred event fires."),
+		mcp.WithDescription("Take over a DEAD holder's task (supervisor re-claim). Succeeds only when the lease has expired OR its holder is deregistered/inactive; a live holder refuses with TASK_LEASE_HELD. On success the task moves to 'accepted' under the caller with a fresh lease."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -546,7 +563,7 @@ func reclaimTaskTool() mcp.Tool {
 func linkPrTool() mcp.Tool {
 	return mcp.NewTool(
 		"link_pr",
-		mcp.WithDescription("Link a GitHub PR to a task (Linear-style). Stores pr_url/pr_number/pr_repo/pr_state on the task so its lifecycle can sync from GitHub. Additive + idempotent: omitted fields keep their current value, so a re-link or a state-only update never wipes the rest."),
+		mcp.WithDescription("Link a GitHub PR to a task (Linear-style): stores pr_url/pr_number/pr_repo/pr_state so its lifecycle syncs from GitHub. Additive + idempotent — omitted fields keep their value."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -560,7 +577,7 @@ func linkPrTool() mcp.Tool {
 func reconcilePrTool() mcp.Tool {
 	return mcp.NewTool(
 		"reconcile_pr",
-		mcp.WithDescription("Poll-side PR convergence (the write-back for relay://pr-reconcile). An external poller that owns gh reads the reconcile candidates, GETs each PR's live state, then calls this with the observed pr_state to converge the task: records the state and applies the same one-way map as the webhook (open→in-review, merged→done, closed-unmerged→blocked), with no-resurrect + idempotent guards. Catches a missed pull_request webhook. Returns {task, changed}."),
+		mcp.WithDescription("Poll-side PR convergence (write-back for relay://pr-reconcile): a gh-owning poller passes the observed pr_state to converge the task via the webhook's one-way map (open→in-review, merged→done, closed-unmerged→blocked), no-resurrect + idempotent. Returns {task, changed}."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID (a pr-reconcile candidate)"), mcp.Required()),
@@ -573,7 +590,7 @@ func reconcilePrTool() mcp.Tool {
 func setRunTool() mcp.Tool {
 	return mcp.NewTool(
 		"set_run",
-		mcp.WithDescription("Stamp the run zone on a PARENT task (changeset-per-run): its integration_branch and/or a run_state advance (open→gating→merging→merged | blocked | amputated). A task with run_state set is a run container — it groups the run's slices and is NOT claimable as work. run_state is transition-enforced (open-first, no resurrecting a merged run). Idempotent: omitted fields keep their value."),
+		mcp.WithDescription("Stamp the run zone on a PARENT task (changeset-per-run): integration_branch and/or a run_state advance (open→gating→merging→merged | blocked | amputated). A run-state task is a container (groups slices, not claimable). Transition-enforced, idempotent."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Parent task ID (the run)"), mcp.Required()),

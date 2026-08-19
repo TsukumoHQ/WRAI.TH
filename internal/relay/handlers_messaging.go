@@ -206,6 +206,108 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	return h.resultJSONTracked(project, from, "send_message", msg)
 }
 
+// HandleSendStatus posts a typed-status report (DEC-relay-comms-discipline-1
+// mechanism B): {done[],doing[],blockers[]} + one capped free-text note, slotted
+// into the message metadata. It is ACCEPT-AND-SLOT — over-long slots/note are
+// capped (see buildStatusPayload), never rejected — and always no-wake: the
+// message is type 'status' with action_required forced 'none', so a listed
+// blocker is SURFACED in the inbox, not a wake (Ruling-3: passively listing a
+// blocker is not escalating). A P0 status still wakes via the guard-first
+// predicate's P0 clause — the deliberate escape hatch. To escalate, send a
+// question; this path never gates one.
+func (h *Handlers) HandleSendStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	from := resolveAgent(ctx, req)
+	to := strings.ToLower(req.GetString("to", ""))
+	conversationID := optionalString(req.GetString("conversation_id", ""))
+	if conversationID == nil && strings.HasPrefix(to, "conversation:") {
+		cid := strings.TrimPrefix(to, "conversation:")
+		conversationID = &cid
+	}
+	if conversationID == nil && to == "" {
+		return toolResultError("to is required (agent name, '*', or a conversation_id)"), nil
+	}
+	if strings.HasPrefix(to, "team:") {
+		return toolResultError("send_status targets a direct agent, '*', or a conversation — not team:<slug> (send a status to your lead, or '*' to the fleet)"), nil
+	}
+
+	priority := mapPriority(req.GetString("priority", "P2"))
+	ttlSeconds := req.GetInt("ttl_seconds", 14400)
+	content, metadata, _ := buildStatusPayload(
+		req.GetStringSlice("done", nil),
+		req.GetStringSlice("doing", nil),
+		req.GetStringSlice("blockers", nil),
+		req.GetString("note", ""),
+	)
+
+	// Unknown-project guard (mirrors send_message): a status to a project nobody
+	// created is a black hole. "default" stays grandfathered.
+	if project != "default" {
+		if known, err := h.db.GetProject(project); err == nil && known == nil {
+			return toolResultError(fmt.Sprintf("unknown project %q — register_agent or create_project first", project)), nil
+		}
+	}
+	if qErr := h.db.CheckQuotaError(project, from, "messages"); qErr != "" {
+		return toolResultError(qErr), nil
+	}
+	_ = h.db.TouchAgent(project, from)
+
+	// Same permission model as send_message for the paths supported here.
+	if conversationID != nil {
+		isMember, err := h.db.IsConversationMember(*conversationID, from)
+		if err != nil {
+			return toolResultError(fmt.Sprintf("failed to check membership: %v", err)), nil
+		}
+		if !isMember {
+			return toolResultError("you are not a member of this conversation"), nil
+		}
+		to = ""
+	} else if to == "*" {
+		if hasTeams, _ := h.db.HasTeams(project); hasTeams {
+			if allowed, _ := h.db.CanMessage(project, from, "*"); !allowed {
+				return toolResultError("broadcast requires membership in an 'admin' type team (register is_executive=true)"), nil
+			}
+		}
+	} else if to != "user" {
+		if hasTeams, _ := h.db.HasTeams(project); hasTeams {
+			allowed, err := h.db.CanMessage(project, from, to)
+			if err != nil {
+				return toolResultError(fmt.Sprintf("permission check failed: %v", err)), nil
+			}
+			if !allowed {
+				return toolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path.", to)), nil
+			}
+		}
+	}
+
+	// action_required forced 'none' — a status never wakes (P0 still wakes via the
+	// guard-first predicate). Recipients resolved first so the message is never
+	// persisted without its deliveries.
+	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
+	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, "status", "status", content, metadata, priority, ttlSeconds, nil, conversationID, recipients, "none")
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to send status: %v", err)), nil
+	}
+
+	if conversationID != nil {
+		h.notifyConversation(project, *conversationID, from, "status", msg.ID)
+	} else if to == "*" {
+		h.registry.NotifyBroadcast(project, from, "status", msg.ID)
+	} else {
+		h.registry.Notify(project, to, from, "status", msg.ID)
+	}
+
+	action := "send"
+	if to == "*" {
+		action = "broadcast"
+	} else if conversationID != nil {
+		action = "conversation"
+	}
+	h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: "status", Priority: priority, MsgType: "status"})
+
+	return h.resultJSONTracked(project, from, "send_status", msg)
+}
+
 func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)

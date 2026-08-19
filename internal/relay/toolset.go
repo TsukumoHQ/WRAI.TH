@@ -78,6 +78,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: queryContextTool(), Handler: h.HandleQueryContext}, "session"},
 
 		{server.ServerTool{Tool: sendMessageTool(), Handler: h.HandleSendMessage}, "messaging"},
+		{server.ServerTool{Tool: sendStatusTool(), Handler: h.HandleSendStatus}, "messaging"},
 		{server.ServerTool{Tool: getInboxTool(), Handler: h.HandleGetInbox}, "messaging"},
 		{server.ServerTool{Tool: ackDeliveryTool(), Handler: h.HandleAckDelivery}, "messaging"},
 		{server.ServerTool{Tool: deliveryStatusTool(), Handler: h.HandleDeliveryStatus}, "messaging"},
@@ -186,6 +187,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 // is dead. ack_delivery is included for consistency with send (and T4).
 var livenessGatedTools = map[string]bool{
 	"send_message": true,
+	"send_status":  true,
 	"ack_delivery": true,
 }
 
@@ -193,7 +195,7 @@ var livenessGatedTools = map[string]bool{
 // that record or act under an agent identity. Pure reads and identity bootstrap
 // tools are intentionally absent so registration and orientation stay open.
 var mutatingTools = map[string]bool{
-	"send_message": true, "ack_delivery": true, "mark_read": true,
+	"send_message": true, "send_status": true, "ack_delivery": true, "mark_read": true,
 	"dispatch_task": true, "claim_task": true, "start_task": true,
 	"review_task": true, "comment": true, "complete_task": true,
 	"block_task": true, "resume_task": true, "cancel_task": true,
