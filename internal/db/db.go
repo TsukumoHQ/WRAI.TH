@@ -531,6 +531,16 @@ func migrate(conn *sql.DB) error {
 		"pr_state":  "TEXT",
 		"pr_repo":   "TEXT",
 
+		// --- Run zone (changeset-per-factory-run S1) — when this task is the
+		// PARENT of a multi-agent run it doubles as the run container:
+		// integration_branch is the run's shared branch (niwa-set), run_state is
+		// the run lifecycle (open|gating|merging|merged|blocked|amputated). run =
+		// parent + its subtasks; no separate runs table. Additive + nullable: a
+		// non-run task reads run_* = null. A row with run_state set is a container
+		// and is not claimable as work (ClaimTask/StartTask guard).
+		"integration_branch": "TEXT",
+		"run_state":          "TEXT",
+
 		// --- Typed ticket zone (V-lifecycle) — goal / acceptance criteria / dod
 		// stamped at dispatch. Additive with safe defaults so existing rows and
 		// clients that never send a ticket keep working; enforcement is opt-in

@@ -51,7 +51,8 @@ func taskErrorCategory(code string) (category string, retryable bool) {
 	switch code {
 	case db.CodeTaskLeaseHeld:
 		return CategoryTransient, false
-	case db.CodeTaskStateConflict, db.CodeTaskNotFound:
+	case db.CodeTaskStateConflict, db.CodeTaskNotFound,
+		db.CodeRunStateInvalid, db.CodeRunContainer:
 		return CategoryValidation, false
 	default:
 		return CategoryValidation, false
@@ -422,6 +423,80 @@ func (h *Handlers) HandleLinkPr(ctx context.Context, req mcp.CallToolRequest) (*
 	}
 	emitTaskEvent(h.events, "task.pr_linked", "link_pr", project, task, prPayload)
 	return h.resultJSONTracked(project, agent, "link_pr", task)
+}
+
+// HandleSetRun stamps the run zone on the PARENT task (changeset-per-factory-run
+// S1) — integration_branch and/or a run_state advance. run_state is
+// transition-enforced (open-first, no resurrection of a merged run); a bad edge
+// returns the typed RUN_STATE_INVALID so the caller parks. Additive + idempotent:
+// omitted fields keep their stored value (COALESCE), a same-state stamp is a
+// no-op. The relay stores the zone opaquely and stays inbound-only — niwa (S2)
+// drives the branch + transitions; the relay never reaches GitHub.
+func (h *Handlers) HandleSetRun(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	if taskID == "" {
+		return toolResultError("task_id is required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+
+	integrationBranch := optionalString(req.GetString("integration_branch", ""))
+	runState := optionalString(req.GetString("run_state", ""))
+	if runState != nil {
+		switch *runState {
+		case db.RunStateOpen, db.RunStateGating, db.RunStateMerging,
+			db.RunStateMerged, db.RunStateBlocked, db.RunStateAmputated:
+		default:
+			return validationError(CodeInvalidArgument,
+				"run_state must be one of open|gating|merging|merged|blocked|amputated"), nil
+		}
+	}
+	if integrationBranch == nil && runState == nil {
+		return toolResultError("nothing to set: provide at least one of integration_branch, run_state"), nil
+	}
+
+	task, err := h.db.SetTaskRun(taskID, project, integrationBranch, runState)
+	if err != nil {
+		return taskOpError(err, "failed to set run zone: %v", err), nil
+	}
+	h.events.Emit(MCPEvent{Type: "task", Action: "set_run", Agent: agent, Project: project, Label: task.Title})
+	runPayload := map[string]any{"doer": agent}
+	if task.IntegrationBranch != nil {
+		runPayload["integration_branch"] = *task.IntegrationBranch
+	}
+	if task.RunState != nil {
+		runPayload["run_state"] = *task.RunState
+	}
+	emitTaskEvent(h.events, "task.run_updated", "set_run", project, task, runPayload)
+	return h.resultJSONTracked(project, agent, "set_run", task)
+}
+
+// HandleGetRun returns the run = the PARENT task (carrying the run zone) with its
+// subtask chain (the agent slices) attached — the single read S2/niwa and the
+// changeset reviewer consume. Pure DB read; the relay stays inbound-only.
+func (h *Handlers) HandleGetRun(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	runID := req.GetString("run_id", "")
+	if runID == "" {
+		return toolResultError("run_id is required"), nil
+	}
+	runID, rErr := h.resolveTaskID(runID, project)
+	if rErr != nil {
+		return toolResultError(rErr.Error()), nil
+	}
+
+	run, err := h.db.GetRun(runID, project)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to get run: %v", err)), nil
+	}
+	if run == nil {
+		return toolResultError("run not found"), nil
+	}
+	return h.resultJSONTracked(project, "", "get_run", run)
 }
 
 func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -66,6 +66,7 @@ const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, descri
 	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
 	"git_branch, git_worktree, git_target, " +
 	"pr_url, pr_number, pr_state, pr_repo, " +
+	"integration_branch, run_state, " +
 	"goal, acceptance_criteria, dod, refusal_notified_at, " +
 	"lease_holder, lease_expires_at, lease_heartbeat_at"
 
@@ -80,6 +81,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
 		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
 		&t.PRURL, &t.PRNumber, &t.PRState, &t.PRRepo,
+		&t.IntegrationBranch, &t.RunState,
 		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.RefusalNotifiedAt,
 		&t.LeaseHolder, &t.LeaseExpiresAt, &t.LeaseHeartbeatAt)
 	return t, err
@@ -268,10 +270,16 @@ func (d *DB) ResetTask(taskID, agentName, project string) (*models.Task, error) 
 }
 
 func (d *DB) ClaimTask(taskID, agentName, project string) (*models.Task, error) {
+	if err := d.guardNotRunContainer(taskID, project); err != nil {
+		return nil, err
+	}
 	return d.transitionTask(taskID, agentName, project, "accepted", nil, nil)
 }
 
 func (d *DB) StartTask(taskID, agentName, project string) (*models.Task, error) {
+	if err := d.guardNotRunContainer(taskID, project); err != nil {
+		return nil, err
+	}
 	return d.transitionTask(taskID, agentName, project, "in-progress", nil, nil)
 }
 

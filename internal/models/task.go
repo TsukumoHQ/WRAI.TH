@@ -89,6 +89,20 @@ type Task struct {
 	PRState  *string `json:"pr_state,omitempty"`
 	PRRepo   *string `json:"pr_repo,omitempty"`
 
+	// --- Run zone (changeset-per-factory-run S1, DEC reuse-parent) — when this
+	// task is the PARENT of a multi-agent factory run, it doubles as the run
+	// container: IntegrationBranch is the run's shared branch (niwa-set, off the
+	// real target), RunState tracks the run lifecycle
+	// (open→gating→merging→merged | blocked | amputated). The run = this parent +
+	// its subtasks (the agent slices); no separate run_id entity. Both nullable +
+	// additive: a task that is not a run reads run_* = null, so every existing row
+	// and older client keeps working. A task with RunState set is a container and
+	// is NOT claimable as work (guarded in ClaimTask/StartTask) — it groups
+	// slices, it is never itself leased by a worker. The relay stores the zone
+	// opaquely and stays inbound-only; niwa drives the branch + state transitions.
+	IntegrationBranch *string `json:"integration_branch,omitempty"`
+	RunState          *string `json:"run_state,omitempty"`
+
 	// --- Typed ticket zone (V-lifecycle, dispatch time) — the deterministic
 	// left branch of the V. Goal states intent, AcceptanceCriteria is the
 	// per-requirement checklist the review gate verdicts against, Dod is the

@@ -553,6 +553,27 @@ func linkPrTool() mcp.Tool {
 	)
 }
 
+func setRunTool() mcp.Tool {
+	return mcp.NewTool(
+		"set_run",
+		mcp.WithDescription("Stamp the run zone on a PARENT task (changeset-per-run): its integration_branch and/or a run_state advance (open→gating→merging→merged | blocked | amputated). A task with run_state set is a run container — it groups the run's slices and is NOT claimable as work. run_state is transition-enforced (open-first, no resurrecting a merged run). Idempotent: omitted fields keep their value."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Parent task ID (the run)"), mcp.Required()),
+		mcp.WithString("integration_branch", mcp.Description("The run's shared integration branch (off the real target)")),
+		mcp.WithString("run_state", mcp.Description("Advance the run lifecycle: open | gating | merging | merged | blocked | amputated")),
+	)
+}
+
+func getRunTool() mcp.Tool {
+	return mcp.NewTool(
+		"get_run",
+		mcp.WithDescription("Get a run: the PARENT task (with its run zone integration_branch/run_state) plus its subtask chain — the agent slices. The read for the changeset review surface."),
+		projectParam,
+		mcp.WithString("run_id", mcp.Description("Run (parent task) ID"), mcp.Required()),
+	)
+}
+
 func getTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"get_task",
