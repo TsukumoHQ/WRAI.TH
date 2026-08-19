@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"agent-relay/internal/db"
 )
@@ -68,6 +69,32 @@ func (r *Relay) apiGetAgentHealth(w http.ResponseWriter, req *http.Request) {
 	}
 	if data == nil {
 		data = []db.AgentHealth{}
+	}
+	writeJSON(w, data)
+}
+
+// apiGetStuckAgents returns the liveness-watchdog candidate set: agents silent
+// past the threshold that still hold in-flight work. Read-only, inbound-only
+// (the host daemon polls this, then owns the pane-kill + requeue).
+// Path: GET /api/agents/stuck?project=&threshold_minutes=
+func (r *Relay) apiGetStuckAgents(w http.ResponseWriter, req *http.Request) {
+	project := req.URL.Query().Get("project")
+	if project == "" {
+		project = "default"
+	}
+	threshold := db.DefaultStuckThreshold
+	if m := req.URL.Query().Get("threshold_minutes"); m != "" {
+		if v, err := strconv.Atoi(m); err == nil && v > 0 {
+			threshold = time.Duration(v) * time.Minute
+		}
+	}
+	data, err := r.DB.StuckAgents(project, threshold)
+	if err != nil {
+		http.Error(w, `{"error":"failed to get stuck agents"}`, http.StatusInternalServerError)
+		return
+	}
+	if data == nil {
+		data = []db.StuckAgent{}
 	}
 	writeJSON(w, data)
 }

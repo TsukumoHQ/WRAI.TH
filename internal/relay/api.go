@@ -57,6 +57,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetAllAgents(w)
 	case path == "/agents/health" && req.Method == http.MethodGet:
 		r.apiGetAgentHealth(w, req)
+	case path == "/agents/stuck" && req.Method == http.MethodGet:
+		r.apiGetStuckAgents(w, req)
 	case path == "/conversations/all" && req.Method == http.MethodGet:
 		r.apiGetAllConversations(w)
 	case path == "/conversations" && req.Method == http.MethodGet:
@@ -133,6 +135,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiTransitionTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/reassign") && req.Method == http.MethodPost:
 		r.apiReassignTask(w, req, path)
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/requeue") && req.Method == http.MethodPost:
+		r.apiRequeueTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/comment") && req.Method == http.MethodPost:
 		r.apiTaskComment(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/progress") && req.Method == http.MethodGet:
@@ -1609,6 +1613,50 @@ func (r *Relay) apiReassignTask(w http.ResponseWriter, req *http.Request, path s
 		ResourceID:   taskID,
 		Summary:      fmt.Sprintf("%s → %s", orDash(prev), body.Agent),
 	})
+	writeJSON(w, task)
+}
+
+// apiRequeueTask returns a stuck holder's in-flight task to the pending pool —
+// the write-back half of the liveness watchdog. The host daemon reads the
+// stuck-candidate set (GET /api/agents/stuck), gracefully kills the dead pane,
+// then POSTs here to release the work so a fresh agent claims it. CAS-guarded in
+// the DB layer (TASK_STATE_CONFLICT if the task changed since it was read).
+// Path: POST /tasks/{id}/requeue
+func (r *Relay) apiRequeueTask(w http.ResponseWriter, req *http.Request, path string) {
+	trimmed := strings.TrimPrefix(path, "/tasks/")
+	taskID, _, _ := strings.Cut(trimmed, "/")
+	if taskID == "" {
+		http.Error(w, `{"error":"missing task id"}`, http.StatusBadRequest)
+		return
+	}
+	var body struct {
+		Project string `json:"project"`
+		Reason  string `json:"reason"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	if body.Project == "" {
+		body.Project = "default"
+	}
+	task, err := r.DB.RequeueTask(taskID, body.Project, body.Reason)
+	if err != nil {
+		apiError(w, http.StatusBadRequest, "failed to requeue task", err)
+		return
+	}
+	// The task lost its holder and returned to the pool — announce the release
+	// (audit already written by the DB layer) then the pending transition so a
+	// subscriber sees the work is claimable again.
+	if task.LeaseTransfer != nil {
+		emitTaskEvent(r.Events, "task.lease_transferred", "reset", body.Project, task, map[string]any{
+			"from":   task.LeaseTransfer.From,
+			"to":     task.LeaseTransfer.To,
+			"reason": task.LeaseTransfer.Reason,
+		})
+	}
+	emitTaskEvent(r.Events, "task.pending", "reset", body.Project, task)
+	pushStatusAsync(r.TaskConn(), task, "pending", nil)
 	writeJSON(w, task)
 }
 
