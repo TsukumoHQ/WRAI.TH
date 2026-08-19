@@ -204,6 +204,10 @@ func startServer() {
 		r.Notifier.Start(cleanupDone)
 	}
 
+	// Start the cron scheduler (recurring typed tickets). Inert until the
+	// "cron_schedules" setting is populated.
+	r.StartCronScheduler(cleanupDone)
+
 	// Wire the Linear connector from effective config (env or settings table).
 	// Inert when unconfigured; hot-reloaded on settings changes without restart.
 	r.ReconfigureLinear()
