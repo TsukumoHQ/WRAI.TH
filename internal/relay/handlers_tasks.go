@@ -157,6 +157,18 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 // Callers own quota/ticket-validation/dedup-warning; this is the create+announce
 // core so a signal-created task is indistinguishable from a hand-dispatched one.
 func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, description, priority string, parentTaskID, boardID *string, ticket db.TypedTicket) (*models.Task, *models.Board, error) {
+	// Typed-ticket guard, hoisted AHEAD of the profile/board auto-create below.
+	// db.DispatchTask is the authoritative choke and would refuse a bare ticket on
+	// an enforced project regardless — but by then this function may already have
+	// auto-created a stray empty "Backlog" board / "human" profile for a dispatch
+	// that never lands (a bare signal-webhook or cron ticket on niwa). Fail fast on
+	// the same predicate (ticket.Missing) so a refused dispatch leaves no residue.
+	if h.db.ProjectRequiresTypedTicket(project) {
+		if missing := ticket.Missing(); len(missing) > 0 {
+			return nil, nil, &db.TypedTicketError{Project: project, Missing: missing}
+		}
+	}
+
 	// Auto-create "human" profile if dispatching to it for the first time.
 	if profile == "human" {
 		existing, _ := h.db.GetProfile(project, "human")

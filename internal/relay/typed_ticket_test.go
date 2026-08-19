@@ -37,6 +37,26 @@ func TestDispatchCore_TypedTicket_RefusesBareSelfDispatch(t *testing.T) {
 	}
 }
 
+// The guard is hoisted ahead of dispatchCore's board/profile auto-create: a
+// refused bare dispatch on an enforced project with no board must leave NO stray
+// empty "Backlog" board (review-b092a6be finding). Enforcement fails fast, before
+// any side-effect.
+func TestDispatchCore_TypedTicket_RefusalLeavesNoStrayBoard(t *testing.T) {
+	h := testHandlers(t)
+
+	if boards, _ := h.db.ListBoards("niwa"); len(boards) != 0 {
+		t.Fatalf("precondition: niwa should start with no boards, got %d", len(boards))
+	}
+	// boardID nil → dispatchCore would auto-create a Backlog board if it reached
+	// that far. A bare ticket must be refused before that.
+	if _, _, err := h.dispatchCore("niwa", "cto", "dev", "bare", "", "P2", nil, nil, db.TypedTicket{}); err == nil {
+		t.Fatal("bare dispatch must be refused")
+	}
+	if boards, _ := h.db.ListBoards("niwa"); len(boards) != 0 {
+		t.Fatalf("refused dispatch left a stray board: %d board(s)", len(boards))
+	}
+}
+
 // On a typed-ticket project (niwa is seeded on) an incomplete dispatch is
 // refused, and the error names exactly the missing field(s).
 func TestDispatchTask_TypedTicket_RefusesMissingFields(t *testing.T) {
