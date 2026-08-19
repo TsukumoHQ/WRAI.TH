@@ -206,7 +206,12 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 			content += "\n\n" + description
 		}
 		taskID := task.ID
-		_, _ = h.db.InsertMessage(project, agent, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, taskID), "P2", 14400, nil, nil)
+		// InsertMessageWithDeliveries (not InsertMessage) so a durable 'queued'
+		// delivery row lands: the inbox is delivery-based, and UnreadCountForAgent
+		// counts queued deliveries — that count is niwa's idle-wake poll signal.
+		// A bare message with no delivery is invisible to the delivery-based inbox
+		// and unpollable, so an idle/inactive lane never wakes on it (bug 6509668c).
+		_, _ = h.db.InsertMessageWithDeliveries(project, agent, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, taskID), "P2", 14400, nil, nil, []string{a.Name})
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: agent, Project: project, Target: profile, Label: title})

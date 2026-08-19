@@ -180,13 +180,30 @@ func (d *DB) ListAgents(project string) ([]models.Agent, error) {
 	return agents, rows.Err()
 }
 
-// MarkStaleAgentsInactive marks agents whose last_seen is older than the given duration as inactive.
+// MarkStaleAgentsInactive marks agents whose last_seen is older than the given
+// duration as inactive — EXCEPT one holding an UNEXPIRED task lease. A heads-down
+// worker makes no relay calls while it grinds, so its last_seen goes stale and the
+// sweep would flip it 'inactive' mid-task (bug 6509668c). The NOT EXISTS guard
+// protects an agent only while it holds a live lease (lease_expires_at in the
+// future); once the lease lapses the guard releases, so a truly-hung holder still
+// loses its 'active' signal and reclaim_task can take over — a dead agent never
+// looks alive forever. Terminal transitions NULL the lease, so a done task's stale
+// lease_holder can't protect anyone. Dates are RFC3339; datetime() normalizes the
+// micros/Z variants for the comparison.
 func (d *DB) MarkStaleAgentsInactive(maxAge time.Duration) (int, error) {
 	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := d.conn.Exec(
-		"UPDATE agents SET status = 'inactive', deactivated_at = ? WHERE last_seen < ? AND status = 'active'",
-		now, cutoff,
+		`UPDATE agents SET status = 'inactive', deactivated_at = ?
+		 WHERE last_seen < ? AND status = 'active'
+		   AND NOT EXISTS (
+		     SELECT 1 FROM tasks t
+		     WHERE t.lease_holder = agents.name
+		       AND t.project = agents.project
+		       AND t.lease_expires_at IS NOT NULL
+		       AND datetime(t.lease_expires_at) > datetime(?)
+		   )`,
+		now, cutoff, now,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("mark stale agents inactive: %w", err)
@@ -224,10 +241,20 @@ func (d *DB) DeleteAgent(project, name string) error {
 	return err
 }
 
-// GetAgentsByProfile returns active agents running a given profile slug.
+// GetAgentsByProfile returns the DELIVERABLE agents running a given profile slug
+// — status IN (active, sleeping, inactive), i.e. everything except 'deleted',
+// exactly ListAgents' recipient filter. It resolves the dispatch fan-out targets,
+// so it must NOT drop a registered-but-inactive agent: the 30-min last_seen sweep
+// (MarkStaleAgentsInactive) flips an idle-but-alive dev lane to 'inactive', and
+// an 'active'-only filter here left the dispatch with zero delivery rows — the
+// work stranded, unpollable, until a re-register. Including inactive lets a
+// durable delivery land so niwa's unread-count poll wakes + re-registers the lane
+// (bug 6509668c). The dispatcher exempts itself in the caller, and the direct
+// send_message / broadcast paths already deliver to inactive recipients — this
+// closes the asymmetry.
 func (d *DB) GetAgentsByProfile(project, profileSlug string) ([]models.Agent, error) {
 	rows, err := d.ro().Query(
-		"SELECT "+agentColumns+" FROM agents WHERE project = ? AND profile_slug = ? AND status = 'active'",
+		"SELECT "+agentColumns+" FROM agents WHERE project = ? AND profile_slug = ? AND status IN ('active', 'sleeping', 'inactive')",
 		project, profileSlug,
 	)
 	if err != nil {
