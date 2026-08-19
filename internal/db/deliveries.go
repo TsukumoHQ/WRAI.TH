@@ -81,7 +81,7 @@ func (d *DB) GetInboxViaDeliveries(project, agentName string, unreadOnly bool, l
 		WHERE d.project = ? AND d.to_agent = ?
 		  AND d.state != 'expired'
 		  AND m.expired_at IS NULL
-		  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
+		  AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`
 	args := []any{project, agentName}
 
@@ -168,7 +168,7 @@ func (d *DB) FetchInboxDeliveries(project, agentName string, unreadOnly bool, li
 		WHERE d.project = ? AND d.to_agent = ?
 		  AND d.state != 'expired'
 		  AND m.expired_at IS NULL
-		  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
+		  AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`
 	args := []any{project, agentName}
 

@@ -9,14 +9,33 @@ import (
 	"github.com/google/uuid"
 )
 
+// normalizeTTL applies the priority-based TTL policy (cto T6 decision):
+//   - P0 never auto-expires (ttl=0) REGARDLESS of the caller's ttl — a critical
+//     interrupt stays surfaced until acknowledged, never silently dropped.
+//   - P1 defaults to a long horizon (7d) when the caller leaves ttl unspecified (<0).
+//   - P2/P3 keep the standard 4h default when unspecified.
+//
+// A caller-supplied ttl (>=0) is respected for every priority EXCEPT P0, whose
+// never-expire semantics are non-negotiable. priority must already be defaulted.
+func normalizeTTL(priority string, ttlSeconds int) int {
+	if priority == "P0" {
+		return 0 // never expires — caller ttl ignored on purpose
+	}
+	if ttlSeconds < 0 {
+		if priority == "P1" {
+			return 604800 // 7 days
+		}
+		return 14400 // 4h
+	}
+	return ttlSeconds
+}
+
 func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string) (*models.Message, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {
 		priority = "P2"
 	}
-	if ttlSeconds < 0 {
-		ttlSeconds = 14400
-	}
+	ttlSeconds = normalizeTTL(priority, ttlSeconds)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -55,9 +74,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	if priority == "" {
 		priority = "P2"
 	}
-	if ttlSeconds < 0 {
-		ttlSeconds = 14400
-	}
+	ttlSeconds = normalizeTTL(priority, ttlSeconds)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -146,7 +163,7 @@ func (d *DB) UnreadCountForAgent(project, agentName string) (int, error) {
 			WHERE d.project = ? AND d.to_agent = ?
 			  AND d.state = 'queued'
 			  AND m.expired_at IS NULL
-			  AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
+			  AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 		`, project, agentName).Scan(&n)
 		if err != nil {
 			return 0, fmt.Errorf("unread count for agent: %w", err)
@@ -185,7 +202,7 @@ func (d *DB) getInboxLegacy(project, agentName string, unreadOnly bool, limit in
 				) AND m.from_agent != ?)
 			)
 			AND m.expired_at IS NULL
-			AND (m.ttl_seconds = 0 OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
+			AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
 	`, broadcastClause)
 	args := []any{project, agentName}
 	if !f.ExcludeBroadcasts {
@@ -365,12 +382,16 @@ func (d *DB) queryMessages(query string, args ...any) ([]models.Message, error) 
 }
 
 // ExpireMessages marks messages whose TTL has elapsed as expired.
-// ttl_seconds=0 means never expires.
+// ttl_seconds=0 means never expires. P0 messages NEVER auto-expire regardless
+// of ttl (cto T6 policy) — a critical interrupt stays surfaced until acknowledged.
+// This priority != 'P0' guard is the sweep-side belt to normalizeTTL's insert-side
+// suspenders, so even a legacy/direct-insert P0 with ttl>0 survives every sweep.
 func (d *DB) ExpireMessages() (int, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	result, err := d.conn.Exec(
 		`UPDATE messages SET expired_at = ?
 		 WHERE expired_at IS NULL
+		   AND priority != 'P0'
 		   AND ttl_seconds > 0
 		   AND datetime(created_at, '+' || ttl_seconds || ' seconds') < datetime(?)`,
 		now, now,
