@@ -136,6 +136,14 @@ func emitTaskEvent(events *EventBus, name, action, project string, t *models.Tas
 		"agent":   agentForEvent(t),
 		"task_id": t.ID,
 		"title":   t.Title,
+		// The task's dispatcher — the escalation/announce target for the
+		// "dispatcher" and (as a fallback) "manager" notification rules. Without
+		// it the MCP transition path (block/complete) delivered an event with no
+		// dispatched_by, so "dispatcher"-targeted rules (auto-done) resolved to no
+		// recipients and every firing failed, and a blocked task whose assignee
+		// had no reports_to had no escalation fallback. The web-UI path already
+		// carried it (taskSemantic); this brings the MCP path to parity.
+		"dispatched_by": t.DispatchedBy,
 		// The profile archetype the task targets — an external pool manager
 		// (niwa spawn-on-dispatch) needs it to decide whether a worker of
 		// that profile must be born, without a follow-up GET.

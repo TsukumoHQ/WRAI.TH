@@ -145,7 +145,10 @@ func (n *Notifier) deliverEvent(e db.Event) {
 			continue
 		}
 		fired++
-		if _, rec := n.fireRule(rule, e.EventType, e.Project, payload, false); rec != nil && rec.Outcome != "ok" {
+		// Only a hard "failed" outcome counts toward retry/DLQ. "skipped" (empty
+		// content suppressed) is a deliberate no-op, not a delivery failure — it
+		// must not push the event toward the dead-letter queue.
+		if _, rec := n.fireRule(rule, e.EventType, e.Project, payload, false); rec != nil && rec.Outcome == "failed" {
 			failures++
 		}
 	}
@@ -308,6 +311,13 @@ func (n *Notifier) buildPayload(rule models.NotificationRule, event string, sem 
 		"task_id":    strVal(sem["task_id"]),
 		"linear_key": sem["linear_key"], // may be nil
 		"title":      strVal(sem["title"]),
+		// Routing keys read by resolveTargets. buildPayload rebuilds a fixed-field
+		// map, so any key not copied here is invisible to target resolution — the
+		// reason the "dispatcher"/"owner"/"manager" targets silently resolved to
+		// nobody (they read payload.dispatched_by / payload.owner, which were
+		// dropped). Carry them through so resolution needs no DB round-trip.
+		"dispatched_by": strVal(sem["dispatched_by"]),
+		"owner":         strVal(sem["owner"]),
 	}
 	line := strVal(sem["line"])
 	if opts.Template != "" {
@@ -398,13 +408,24 @@ func signBody(body []byte) string {
 // doMessage sends a relay inbox message to the resolved target(s) honoring
 // ttl/priority. Best-effort: loss is harmless (Linear SSOT / mirror).
 func (n *Notifier) doMessage(rule models.NotificationRule, project string, payload map[string]any, opts ruleOpts, rec *models.NotificationDelivery) {
+	// Empty-content guard: a template that renders to nothing (no line, no
+	// title, no structured payload) used to still deliver a 0-char message that
+	// woke the recipient — a pure-noise wake. Suppress it. "skipped" is not a
+	// failure (deliverEvent must not retry it toward the DLQ).
+	line := strVal(payload["line"])
+	_, hasStructured := payload["payload"]
+	if strings.TrimSpace(line) == "" && !hasStructured {
+		rec.Outcome = "skipped"
+		rec.Error = "empty content (no line/title/template output) — suppressed to avoid an empty wake"
+		return
+	}
 	recipients := n.resolveTargets(project, rule.Target, payload)
 	if len(recipients) == 0 {
 		rec.Outcome = "failed"
 		rec.Error = "no recipients resolved for target: " + rule.Target
 		return
 	}
-	subject := strVal(payload["line"])
+	subject := line
 	if subject == "" {
 		subject = rule.Event
 	}
@@ -428,10 +449,11 @@ func (n *Notifier) doMessage(rule models.NotificationRule, project string, paylo
 		priority = "P2"
 	}
 	meta := fmt.Sprintf(`{"task_id":%q,"event":%q}`, strVal(payload["task_id"]), rule.Event)
+	actionReq := actionRequiredFor(rule.Event, opts)
 
 	var sent int
 	for _, to := range recipients {
-		msg, err := n.db.InsertMessageWithDeliveries(project, "notifier", to, "notification", subject, content, meta, priority, ttl, nil, nil, []string{to}, "")
+		msg, err := n.db.InsertMessageWithDeliveries(project, "notifier", to, "notification", subject, content, meta, priority, ttl, nil, nil, []string{to}, actionReq)
 		if err != nil {
 			rec.Error = err.Error()
 			continue
@@ -492,15 +514,22 @@ func (n *Notifier) resolveTargets(project, target string, payload map[string]any
 	case "human", "user":
 		return []string{"user"}
 	case "manager", "reports_to":
-		agentName := strVal(payload["agent"])
-		if agentName == "" {
-			return nil
+		// Escalation target for a task event. Prefer the event agent's org-chart
+		// manager (reports_to). Most workers have NO reports_to set, so the
+		// manager lookup drops most of the time — the reason the "Blocked →
+		// manager" rule failed ~64% and blocked lanes went silently unescalated.
+		// Fall back to the task's dispatcher (who assigned the work and always
+		// exists) so a blocked task reliably escalates to someone who cares.
+		if agentName := strVal(payload["agent"]); agentName != "" {
+			if a, err := n.db.GetAgent(project, agentName); err == nil && a != nil &&
+				a.ReportsTo != nil && *a.ReportsTo != "" {
+				return []string{*a.ReportsTo}
+			}
 		}
-		a, err := n.db.GetAgent(project, agentName)
-		if err != nil || a == nil || a.ReportsTo == nil || *a.ReportsTo == "" {
-			return nil
+		if d := n.resolveDispatcher(project, payload); d != "" {
+			return []string{d}
 		}
-		return []string{*a.ReportsTo}
+		return nil
 	case "assignee":
 		// the task's own assignee. Prefer the explicit payload agent; otherwise
 		// resolve from the task itself — its claimer, or (for Linear-sourced tasks
@@ -515,8 +544,9 @@ func (n *Notifier) resolveTargets(project, target string, payload map[string]any
 		}
 		return nil
 	case "dispatcher", "dispatched_by":
-		// the agent that dispatched the task
-		if d := strVal(payload["dispatched_by"]); d != "" {
+		// the agent that dispatched the task — from the event payload, or the
+		// task record when the emitter didn't carry it.
+		if d := n.resolveDispatcher(project, payload); d != "" {
 			return []string{d}
 		}
 		return nil
@@ -565,6 +595,25 @@ func (n *Notifier) resolveTaskAssignee(project, taskID string) string {
 	return routing[*task.LinearProjectID]
 }
 
+// resolveDispatcher resolves the agent that dispatched a task. Prefers the
+// explicit payload.dispatched_by (carried by both the web-UI taskSemantic and
+// the MCP emitTaskEvent paths); falls back to the task record when an older
+// emitter didn't include it. Returns "" when unresolvable.
+func (n *Notifier) resolveDispatcher(project string, payload map[string]any) string {
+	if d := strVal(payload["dispatched_by"]); d != "" {
+		return d
+	}
+	taskID := strVal(payload["task_id"])
+	if taskID == "" {
+		return ""
+	}
+	task, err := n.db.GetTask(taskID, project)
+	if err != nil || task == nil {
+		return ""
+	}
+	return task.DispatchedBy
+}
+
 func matchByRole(database *db.DB, project, role string) []string {
 	agents, err := database.ListAgents(project)
 	if err != nil {
@@ -586,6 +635,12 @@ type ruleOpts struct {
 	Priority      string
 	Template      string
 	IntervalHours int
+	// ActionRequired overrides the comms-discipline wake tag on the delivered
+	// message (DEC-relay-comms-discipline-1): "do"/"ask"/"decide" wake a busy
+	// recipient, "none" does not. Empty = the per-event default (see
+	// actionRequiredFor). Accepts opts key "action_required"; the shorthand
+	// "no_wake":true maps to "none".
+	ActionRequired string
 }
 
 func parseOpts(raw string) ruleOpts {
@@ -609,7 +664,45 @@ func parseOpts(raw string) ruleOpts {
 	if v, ok := m["interval_hours"]; ok {
 		o.IntervalHours = toInt(v)
 	}
+	if v, ok := m["action_required"]; ok {
+		o.ActionRequired = strVal(v)
+	}
+	if v, ok := m["no_wake"]; ok {
+		if b, ok := v.(bool); ok && b {
+			o.ActionRequired = actionNone
+		}
+	}
 	return o
+}
+
+// comms-discipline wake tags (DEC-relay-comms-discipline-1). A busy agent is
+// woken when a queued delivery's effective tag is anything but "none" (or when
+// it is P0 / a question / task type, per the wake predicate's guard clauses).
+const (
+	actionDo   = "do"   // wake-capable
+	actionNone = "none" // no-wake report/announce
+)
+
+// actionRequiredFor decides the comms-discipline wake tag for a rule firing.
+// It is the wake lever, not the message type: the notifier sends every rule
+// message as type "notification", which deriveActionRequired maps to "none"
+// (no-wake). That is right for reports (done/digest) but WRONG for a blocked
+// escalation — a blocked lane that doesn't wake its manager isn't escalated.
+// So task.blocked is force-tagged "do" (wakes despite type→none). task.done is
+// pinned "none" (announce). Everything else defers to the type-derived default
+// (empty ⇒ InsertMessageWithDeliveries derives it). An explicit opts value
+// always wins, letting any rule opt a wake in or out.
+func actionRequiredFor(event string, opts ruleOpts) string {
+	if opts.ActionRequired != "" {
+		return opts.ActionRequired
+	}
+	switch event {
+	case EvTaskBlocked:
+		return actionDo
+	case EvTaskDone:
+		return actionNone
+	}
+	return ""
 }
 
 // --- Digest scheduler ---
