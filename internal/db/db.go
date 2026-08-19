@@ -387,8 +387,10 @@ func migrate(conn *sql.DB) error {
 	// message-retention GC (PurgeExpiredMessages) hard-deletes expired messages +
 	// their deliveries, so an unread P0/P1 that TTL-expires would otherwise vanish
 	// with no trace. This table is captured at expiry time (ExpireDeliveries) and
-	// is NOT touched by the GC, so the record survives. UNIQUE(message_id,to_agent)
-	// makes the capture idempotent.
+	// SURVIVES that GC. It has its own long-horizon retention sweep
+	// (PurgeOldDeadletter) so it stays bounded — non-P0/P1 reclaimed after
+	// DeadletterShortRetention, P0/P1 kept far longer (DeadletterLongRetention).
+	// UNIQUE(message_id,to_agent) makes the capture idempotent.
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS deadletter (
 		id          TEXT PRIMARY KEY,
 		message_id  TEXT NOT NULL,

@@ -429,6 +429,49 @@ func (d *DB) Deadletter(project, agent string, limit int) ([]models.DeadletterRo
 	return out, rows.Err()
 }
 
+// deadletterPurgeBatch bounds how many deadletter rows a single DELETE reclaims,
+// so a large backlog is trimmed across several small writes instead of one huge
+// DELETE that holds the single writer.
+const deadletterPurgeBatch = 500
+
+// PurgeOldDeadletter trims the durable deadletter journal so it stays bounded
+// under long-running fleet operation. Records that are NOT P0/P1 are reclaimed
+// once older than shortMaxAge; P0/P1 records — the critical traces a human may
+// still need to audit — are kept far longer and only reclaimed past longMaxAge.
+// Everything is keyed on expired_at (the capture time). Reclaims in bounded
+// batches so the writer is never held for one large DELETE, and the eligible
+// set is fixed by cutoffs computed before the loop so it always terminates.
+// Idempotent: once nothing is old enough the sweep deletes 0 rows. Touches ONLY
+// the deadletter table — never live deliveries or messages.
+func (d *DB) PurgeOldDeadletter(shortMaxAge, longMaxAge time.Duration) (int64, error) {
+	now := time.Now().UTC()
+	shortCutoff := now.Add(-shortMaxAge).Format("2006-01-02T15:04:05.000000Z")
+	longCutoff := now.Add(-longMaxAge).Format("2006-01-02T15:04:05.000000Z")
+
+	// One predicate: P0/P1 only past the long horizon, everything else past the
+	// short horizon. LIMIT keeps each DELETE bounded (works without the sqlite
+	// UPDATE/DELETE-LIMIT compile flag by deleting a bounded id set).
+	const sel = `SELECT id FROM deadletter WHERE
+		(priority IN ('P0','P1') AND datetime(expired_at) < datetime(?))
+		OR (priority NOT IN ('P0','P1') AND datetime(expired_at) < datetime(?))
+		LIMIT ?`
+
+	var total int64
+	for {
+		res, err := d.conn.Exec(`DELETE FROM deadletter WHERE id IN (`+sel+`)`,
+			longCutoff, shortCutoff, deadletterPurgeBatch)
+		if err != nil {
+			return total, fmt.Errorf("purge deadletter: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		total += n
+		if n < deadletterPurgeBatch {
+			break
+		}
+	}
+	return total, nil
+}
+
 // HasDeliveries returns true if the deliveries table has any rows.
 func (d *DB) HasDeliveries() bool {
 	var count int

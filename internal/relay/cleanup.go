@@ -43,6 +43,14 @@ const (
 	MessageRetention = 7 * 24 * time.Hour
 	// AuditLogRetention: 90 days of accountability trail before reclamation.
 	AuditLogRetention = 90 * 24 * time.Hour
+	// DeadletterShortRetention: non-P0/P1 deadletter journal rows are reclaimed 30
+	// days after capture — a generous window to notice a dropped P2/P3 without
+	// letting the table grow unbounded.
+	DeadletterShortRetention = 30 * 24 * time.Hour
+	// DeadletterLongRetention: P0/P1 deadletter records are the critical traces a
+	// human may still need to audit, so they are kept far longer (180 days) before
+	// reclamation — bounded, but never dropped early.
+	DeadletterLongRetention = 180 * 24 * time.Hour
 )
 
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
@@ -99,6 +107,13 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 					log.Printf("purge audit log error: %v", err)
 				} else if purged > 0 {
 					log.Printf("purged %d old audit log record(s)", purged)
+				}
+				// Bound the durable deadletter journal: reclaim aged non-P0/P1 rows,
+				// keep P0/P1 far longer (self-GC follow-up to the T6 deadletter).
+				if purged, err := database.PurgeOldDeadletter(DeadletterShortRetention, DeadletterLongRetention); err != nil {
+					log.Printf("purge deadletter error: %v", err)
+				} else if purged > 0 {
+					log.Printf("purged %d old deadletter record(s)", purged)
 				}
 				database.Optimize()
 
