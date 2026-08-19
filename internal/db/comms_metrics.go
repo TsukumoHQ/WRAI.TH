@@ -68,6 +68,19 @@ type CommsMetrics struct {
 	// of a PRIOR wake-eligible delivery to the same recipient — an estimate of how
 	// many wakes a batching window could have merged.
 	CoalescingCandidates int64 `json:"coalescing_candidates"`
+
+	// MsgLength summarises message CONTENT size (SQLite LENGTH = character count)
+	// over the window — the comms-discipline analysis found verbosity is
+	// substance-length, not preamble, so this is the metric that actually tracks
+	// (ASCII dev chatter makes chars≈bytes). Avg is the mean;
+	// P50/P90 are the median and 90th percentile; Sampled is the message count the
+	// percentiles are computed over.
+	MsgLength struct {
+		Avg     float64 `json:"avg"`
+		P50     int64   `json:"p50"`
+		P90     int64   `json:"p90"`
+		Sampled int64   `json:"sampled"`
+	} `json:"msg_length"`
 }
 
 // CommsMetricsSnapshot computes a CommsMetrics for one project over the last
@@ -171,6 +184,31 @@ func (d *DB) CommsMetricsSnapshot(project string, window time.Duration) CommsMet
 		  )`,
 		project, since,
 	).Scan(&m.CoalescingCandidates)
+
+	// Message-length distribution (content char count = verbosity proxy). Avg + count
+	// in one pass; the p50/p90 are read off the ordered set by OFFSET (SQLite has
+	// no PERCENTILE_CONT). Best-effort: a failing sub-query leaves zeros. Same
+	// project/window scoping as the rest, so unscoped (project='') samples nothing.
+	_ = ro.QueryRow(
+		`SELECT COALESCE(AVG(LENGTH(content)), 0), COUNT(*)
+		 FROM messages WHERE project = ? AND created_at >= ?`,
+		project, since,
+	).Scan(&m.MsgLength.Avg, &m.MsgLength.Sampled)
+	if m.MsgLength.Sampled > 0 {
+		pick := func(frac float64) int64 {
+			off := int64(frac * float64(m.MsgLength.Sampled-1))
+			var v int64
+			_ = ro.QueryRow(
+				`SELECT LENGTH(content) FROM messages
+				 WHERE project = ? AND created_at >= ?
+				 ORDER BY LENGTH(content) LIMIT 1 OFFSET ?`,
+				project, since, off,
+			).Scan(&v)
+			return v
+		}
+		m.MsgLength.P50 = pick(0.5)
+		m.MsgLength.P90 = pick(0.9)
+	}
 
 	return m
 }

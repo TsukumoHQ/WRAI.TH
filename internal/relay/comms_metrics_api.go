@@ -9,8 +9,10 @@ import (
 // apiGetCommsMetrics serves GET /api/metrics/comms?project=<p>&hours=<h> — the
 // read-only comms-discipline health view (comms S4). It reports the no-wake
 // share against the >=55% target, per-sender action_required distribution,
-// read-latency buckets, and coalescing candidates. Sits behind the same auth
-// chain as /api/metrics (loopback-exempt) and never writes — safe to scrape.
+// message-length percentiles (p50/p90/avg), read-latency buckets, and coalescing
+// candidates. Unscoped (no ?project=) samples nothing — pass a project. Sits
+// behind the same auth chain as /api/metrics (loopback-exempt) and never
+// writes — safe to scrape.
 func (r *Relay) apiGetCommsMetrics(w http.ResponseWriter, req *http.Request) {
 	project := projectFromRequest(req)
 	window := parseWindowHours(req.URL.Query().Get("hours"))

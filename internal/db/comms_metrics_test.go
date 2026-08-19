@@ -1,6 +1,7 @@
 package db
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,6 +73,32 @@ func TestCommsMetricsSnapshot(t *testing.T) {
 	_ = q
 }
 
+// TestCommsMetricsMsgLength: content-byte percentiles over the window. Contents
+// of lengths 10,20,30,40,100 → avg 40, sorted [10,20,30,40,100]: p50 (OFFSET
+// int(0.5*4)=2) = 30, p90 (OFFSET int(0.9*4)=3) = 40, sampled 5.
+func TestCommsMetricsMsgLength(t *testing.T) {
+	d := testDB(t)
+	for _, n := range []int{10, 20, 30, 40, 100} {
+		if _, err := d.InsertMessageWithDeliveries("lp", "cto", "b", "notification", "s",
+			strings.Repeat("a", n), "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
+			t.Fatalf("insert len %d: %v", n, err)
+		}
+	}
+	m := d.CommsMetricsSnapshot("lp", time.Hour)
+	if m.MsgLength.Sampled != 5 {
+		t.Fatalf("sampled = %d, want 5", m.MsgLength.Sampled)
+	}
+	if m.MsgLength.Avg < 39.9 || m.MsgLength.Avg > 40.1 {
+		t.Errorf("avg = %v, want 40", m.MsgLength.Avg)
+	}
+	if m.MsgLength.P50 != 30 {
+		t.Errorf("p50 = %d, want 30", m.MsgLength.P50)
+	}
+	if m.MsgLength.P90 != 40 {
+		t.Errorf("p90 = %d, want 40", m.MsgLength.P90)
+	}
+}
+
 // TestCommsMetricsEmpty: a project with no traffic returns a clean zero snapshot,
 // never a divide-by-zero or nil-slice panic.
 func TestCommsMetricsEmpty(t *testing.T) {
@@ -82,6 +109,9 @@ func TestCommsMetricsEmpty(t *testing.T) {
 	}
 	if len(m.ActionRequiredBySender) != 0 {
 		t.Errorf("empty senders = %v", m.ActionRequiredBySender)
+	}
+	if m.MsgLength.Sampled != 0 || m.MsgLength.P50 != 0 || m.MsgLength.Avg != 0 {
+		t.Errorf("empty msg_length not zero: %+v", m.MsgLength)
 	}
 	if m.TargetNoWakeRate != 0.55 {
 		t.Errorf("target = %v, want 0.55", m.TargetNoWakeRate)
