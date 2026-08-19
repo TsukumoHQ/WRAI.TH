@@ -192,6 +192,11 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// pressure, table growth, DB/snapshot health, Linear freshness.
 	case path == "/metrics" && req.Method == http.MethodGet:
 		r.apiGetMetrics(w, req)
+	// Living-ADR graph (steal #11): mermaid render + the gate-check read.
+	case path == "/decisions/graph" && req.Method == http.MethodGet:
+		r.apiDecisionGraph(w, req)
+	case path == "/decisions/relevant" && req.Method == http.MethodGet:
+		r.apiRelevantDecisions(w, req)
 	// Comms-discipline health view (comms S4): no-wake share vs target, per-sender
 	// action_required distribution, read-latency buckets, coalescing candidates.
 	case path == "/metrics/comms" && req.Method == http.MethodGet:

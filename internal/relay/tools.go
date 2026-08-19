@@ -299,14 +299,15 @@ func setMemoryTool() mcp.Tool {
 func rememberTool() mcp.Tool {
 	return mcp.NewTool(
 		"remember",
-		mcp.WithDescription("Record a SETTLED decision (ADR-style) so the team stops re-debating it. Stored as a project decision; the accepted set is surfaced at session start. Enforces dedup-or-supersede: a near-identical decision in the same area is rejected unless you pass `supersedes`."),
+		mcp.WithDescription("Record a SETTLED decision (ADR-style) so the team stops re-debating it. A project decision, surfaced at session start. Dedup-or-supersede: a near-identical decision in the same area is rejected unless you pass `supersedes`."),
 		asParam,
 		projectParam,
-		mcp.WithString("decision", mcp.Description("The settled rule, one line (e.g. 'POST hook events to the relay; no file-drop watcher')"), mcp.Required()),
+		mcp.WithString("decision", mcp.Description("The settled rule, one line"), mcp.Required()),
 		mcp.WithString("rationale", mcp.Description("Why, one line")),
-		mcp.WithString("area", mcp.Description("Component/area it governs (e.g. 'ingest/hooks') — groups the DEC key")),
+		mcp.WithString("area", mcp.Description("Area it governs (e.g. 'ingest/hooks') — groups the DEC key")),
 		mcp.WithArray("tags", mcp.Description("Extra tags for search"), mcp.WithStringItems()),
-		mcp.WithString("supersedes", mcp.Description("DEC id this replaces (archives the prior decision)")),
+		mcp.WithString("supersedes", mcp.Description("DEC id this replaces (archives it)")),
+		mcp.WithArray("depends_on", mcp.Description("DEC ids this rests on (graph edges)"), mcp.WithStringItems()),
 	)
 }
 

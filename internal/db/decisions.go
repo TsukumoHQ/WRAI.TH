@@ -18,6 +18,11 @@ type DecisionValue struct {
 	Status     string `json:"status"` // accepted | superseded | needs_review
 	Area       string `json:"area,omitempty"`
 	Supersedes string `json:"supersedes,omitempty"`
+	// DependsOn are the DEC keys this decision causally rests on (steal #11).
+	// Additive + backward-compatible: an older decision row simply omits it. The
+	// living-ADR graph draws a 'depends' edge to each; the gate can walk them to
+	// see whether a change touches a decision's foundations.
+	DependsOn []string `json:"depends_on,omitempty"`
 }
 
 // decisionKeyArea sanitizes an area into the key segment (DEC-<area>-NNN): keys
@@ -47,7 +52,7 @@ func (d *DB) nextDecisionSeq(project, keyArea string) int {
 // dedup-or-supersede: an active decision in the same area with the same text is
 // rejected unless `supersedes` is given; on supersede the named prior decision
 // is archived so only the live set stays "accepted". Returns the new decision.
-func (d *DB) RememberDecision(project, agent, area, decision, rationale string, tags []string, supersedes string) (*models.Memory, error) {
+func (d *DB) RememberDecision(project, agent, area, decision, rationale string, tags []string, supersedes string, dependsOn []string) (*models.Memory, error) {
 	decision = strings.TrimSpace(decision)
 	if decision == "" {
 		return nil, fmt.Errorf("decision text is required")
@@ -72,7 +77,7 @@ func (d *DB) RememberDecision(project, agent, area, decision, rationale string, 
 	}
 
 	key := fmt.Sprintf("DEC-%s-%d", keyArea, d.nextDecisionSeq(project, keyArea))
-	val := DecisionValue{Decision: decision, Rationale: strings.TrimSpace(rationale), Status: "accepted", Area: strings.TrimSpace(area), Supersedes: supersedes}
+	val := DecisionValue{Decision: decision, Rationale: strings.TrimSpace(rationale), Status: "accepted", Area: strings.TrimSpace(area), Supersedes: supersedes, DependsOn: cleanDecisionRefs(dependsOn)}
 	vj, _ := json.Marshal(val)
 
 	// Tag with the area for search/filtering (plus any caller tags).
@@ -105,4 +110,66 @@ func (d *DB) ListDecisions(project string) ([]models.Memory, error) {
 
 func normalizeDecisionText(s string) string {
 	return strings.Join(strings.Fields(strings.ToLower(s)), " ")
+}
+
+// cleanDecisionRefs trims, drops blanks, and de-dupes a list of DEC-key refs
+// (order-preserving). Accept-and-store: an unknown/forward ref is kept — the
+// graph simply renders it as a stub node — so a decision can reference one not
+// yet written without failing the write.
+func cleanDecisionRefs(refs []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, r := range refs {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// AllDecisions returns every decision for a project INCLUDING archived
+// (superseded) ones, newest first — the append-only causal ledger the mermaid
+// graph renders. ListDecisions (active-only) stays the session-start set.
+func (d *DB) AllDecisions(project string) ([]models.Memory, error) {
+	return d.queryMemories(
+		fmt.Sprintf(`SELECT %s FROM memories
+		 WHERE layer='decision' AND project=?
+		 ORDER BY updated_at DESC LIMIT 1000`, memorySelectCols),
+		project,
+	)
+}
+
+// RelevantDecisions returns the LIVE (accepted, non-archived) decisions that
+// govern an area — the gate-check read (steal #11): given the area a change
+// touches, the gate fetches the decisions it must not contradict. Matching is on
+// the sanitized area key: an exact key match, or either area being a prefix of
+// the other (so "relay/comms" matches "relay/comms-discipline"). An empty area
+// returns all live decisions (the gate can then filter).
+func (d *DB) RelevantDecisions(project, area string) ([]models.Memory, error) {
+	live, err := d.ListDecisions(project)
+	if err != nil {
+		return nil, err
+	}
+	want := decisionKeyArea(area)
+	if strings.TrimSpace(area) == "" {
+		return live, nil
+	}
+	var out []models.Memory
+	for _, m := range live {
+		var dv DecisionValue
+		if json.Unmarshal([]byte(m.Value), &dv) != nil {
+			continue
+		}
+		got := decisionKeyArea(dv.Area)
+		if got == want || strings.HasPrefix(got, want) || strings.HasPrefix(want, got) {
+			out = append(out, m)
+		}
+	}
+	return out, nil
 }

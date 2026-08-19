@@ -127,8 +127,9 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 	area := req.GetString("area", "")
 	tags := req.GetStringSlice("tags", nil)
 	supersedes := req.GetString("supersedes", "")
+	dependsOn := req.GetStringSlice("depends_on", nil)
 
-	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes)
+	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes, dependsOn)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to remember decision: %v", err)), nil
 	}

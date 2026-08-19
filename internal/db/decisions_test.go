@@ -13,7 +13,7 @@ func TestRememberDecision(t *testing.T) {
 	const project = "p1"
 
 	m1, err := d.RememberDecision(project, "wraith-dev", "ingest/hooks",
-		"POST hook events to the relay; no file-drop watcher", "watcher deadlocked the detector", []string{"arch"}, "")
+		"POST hook events to the relay; no file-drop watcher", "watcher deadlocked the detector", []string{"arch"}, "", nil)
 	if err != nil {
 		t.Fatalf("remember: %v", err)
 	}
@@ -23,7 +23,7 @@ func TestRememberDecision(t *testing.T) {
 
 	// A second decision in the same area gets the next sequence number.
 	m2, err := d.RememberDecision(project, "wraith-dev", "ingest/hooks",
-		"tokens come from the Stop hook reading the transcript", "", nil, "")
+		"tokens come from the Stop hook reading the transcript", "", nil, "", nil)
 	if err != nil {
 		t.Fatalf("remember 2: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestRememberDecision(t *testing.T) {
 
 	// Dedup: re-asserting the same decision text in the area without supersedes is rejected.
 	if _, err := d.RememberDecision(project, "wraith-dev", "ingest/hooks",
-		"POST hook events to the relay; no file-drop watcher", "", nil, ""); err == nil {
+		"POST hook events to the relay; no file-drop watcher", "", nil, "", nil); err == nil {
 		t.Fatal("expected near-duplicate to be rejected without supersedes")
 	}
 
@@ -49,7 +49,7 @@ func TestRememberDecision(t *testing.T) {
 	// Supersede m1 with a revised decision → m1 archived, accepted set still has 2
 	// (m2 + the new one), m1 gone.
 	m3, err := d.RememberDecision(project, "wraith-dev", "ingest/hooks",
-		"POST hook events to the relay over HTTP/2", "perf", nil, m1.Key)
+		"POST hook events to the relay over HTTP/2", "perf", nil, m1.Key, nil)
 	if err != nil {
 		t.Fatalf("supersede: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestRememberDecision(t *testing.T) {
 	}
 
 	// Superseding a non-existent decision errors.
-	if _, err := d.RememberDecision(project, "wraith-dev", "x", "y", "", nil, "DEC-nope-9"); err == nil {
+	if _, err := d.RememberDecision(project, "wraith-dev", "x", "y", "", nil, "DEC-nope-9", nil); err == nil {
 		t.Fatal("expected error superseding a non-existent decision")
 	}
 }

@@ -23,7 +23,7 @@ func TestSessionContext_InjectsDecisions(t *testing.T) {
 	const project = "p1"
 
 	if _, err := database.RememberDecision(project, "wraith-dev", "ingest/hooks",
-		"POST hook events to the relay; no file-drop watcher", "watcher deadlocked", nil, ""); err != nil {
+		"POST hook events to the relay; no file-drop watcher", "watcher deadlocked", nil, "", nil); err != nil {
 		t.Fatalf("remember: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestSessionContext_DecisionsOmitted_ReflectsByteBudget(t *testing.T) {
 	blob := strings.Repeat("y", 3000)
 	for i := 0; i < seeded; i++ {
 		area := fmt.Sprintf("ops/area-%02d", i)
-		if _, err := database.RememberDecision(project, "wraith-dev", area, blob, blob, nil, ""); err != nil {
+		if _, err := database.RememberDecision(project, "wraith-dev", area, blob, blob, nil, "", nil); err != nil {
 			t.Fatalf("remember %d: %v", i, err)
 		}
 	}
