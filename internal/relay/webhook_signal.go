@@ -107,11 +107,23 @@ func (r *Relay) apiSignalWebhook(w http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// Quota-gate the signal identity BEFORE reserving the delivery id, so a signed
+	// source can't flood the board past the project task quota (the same guard the
+	// MCP dispatch path enforces). Checked pre-reservation so a rejected signal
+	// leaves no dedup row and can be retried after the quota window resets.
+	signalAgent := "signal:" + source
+	if qErr := r.DB.CheckQuotaError(project, signalAgent, "tasks"); qErr != "" {
+		http.Error(w, `{"error":"task quota exceeded for signal source"}`, http.StatusTooManyRequests)
+		return
+	}
+
 	// Idempotency: the events outbox INSERT-OR-IGNOREs on delivery_id. A duplicate
 	// delivery is a no-op — no second ticket. The event is also a durable journal
-	// of every accepted signal.
+	// of every accepted signal. This is a reservation: if the dispatch below
+	// fails, we compensate-delete the row so a redelivery re-attempts rather than
+	// deduping to a silent no-op (record-then-act: no lost signal, still no dup).
 	payloadJSON, _ := json.Marshal(map[string]any{"source": source, "title": title, "priority": sig.Priority})
-	_, inserted, err := r.DB.InsertEvent(deliveryID, project, "signal:"+source, "signal:"+source, string(payloadJSON))
+	_, inserted, err := r.DB.InsertEvent(deliveryID, project, "signal:"+source, signalAgent, string(payloadJSON))
 	if err != nil {
 		http.Error(w, `{"error":"persist signal"}`, http.StatusInternalServerError)
 		return
@@ -134,8 +146,11 @@ func (r *Relay) apiSignalWebhook(w http.ResponseWriter, req *http.Request) {
 	// emits task.dispatched). Free-form ticket: a signal can't supply
 	// goal/AC/dod, so typed-ticket enforcement (an interactive-dispatch policy)
 	// does not apply here.
-	task, _, err := r.Handlers.dispatchCore(project, "signal:"+source, cfg.Profile, title, sig.Description, priority, nil, boardID, db.TypedTicket{})
+	task, _, err := r.Handlers.dispatchCore(project, signalAgent, cfg.Profile, title, sig.Description, priority, nil, boardID, db.TypedTicket{})
 	if err != nil {
+		// Compensating action: release the delivery-id reservation so an
+		// at-least-once redelivery can retry instead of deduping to a no-op.
+		r.DB.DeleteEventByDelivery(project, deliveryID)
 		http.Error(w, `{"error":"create ticket"}`, http.StatusInternalServerError)
 		return
 	}

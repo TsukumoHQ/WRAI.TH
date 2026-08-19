@@ -55,3 +55,28 @@ func TestInsertEvent_DedupAndReplay(t *testing.T) {
 		t.Fatalf("want 1 undelivered after marking one, got %d", len(undel))
 	}
 }
+
+// TestDeleteEventByDelivery: the compensating action releases a reservation so a
+// redelivery can retry (insert again) instead of deduping to a no-op.
+func TestDeleteEventByDelivery(t *testing.T) {
+	d := testDB(t)
+	const project = "p1"
+
+	if _, ins, _ := d.InsertEvent("sig-1", project, "signal:ci", "signal:ci", `{}`); !ins {
+		t.Fatal("first insert should succeed")
+	}
+	// Same delivery dedupes while the row exists.
+	if _, ins, _ := d.InsertEvent("sig-1", project, "signal:ci", "signal:ci", `{}`); ins {
+		t.Fatal("redelivery should dedupe before compensate-delete")
+	}
+	// Compensate-delete, then the same delivery inserts again (retryable).
+	d.DeleteEventByDelivery(project, "sig-1")
+	if _, ins, _ := d.InsertEvent("sig-1", project, "signal:ci", "signal:ci", `{}`); !ins {
+		t.Fatal("after compensate-delete a redelivery must insert again")
+	}
+	// Wrong project is a no-op (scoped delete).
+	d.DeleteEventByDelivery("other", "sig-1")
+	if _, ins, _ := d.InsertEvent("sig-1", project, "signal:ci", "signal:ci", `{}`); ins {
+		t.Fatal("cross-project delete must not release this project's reservation")
+	}
+}

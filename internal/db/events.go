@@ -119,6 +119,17 @@ func (d *DB) MarkEventDead(id, lastErr string) error {
 	return err
 }
 
+// DeleteEventByDelivery removes the event row for a (project, delivery_id). It is
+// the compensating action for a record-then-act webhook: if the work triggered
+// by an accepted signal fails, deleting the dedup row lets an at-least-once
+// redelivery retry instead of deduping to a silent no-op. Best-effort.
+func (d *DB) DeleteEventByDelivery(project, deliveryID string) {
+	if deliveryID == "" {
+		return
+	}
+	_, _ = d.conn.Exec(`DELETE FROM events WHERE project = ? AND delivery_id = ?`, project, deliveryID)
+}
+
 // PruneDeliveredEvents caps the replay log: keeps the newest `keep` delivered
 // rows, deletes older delivered ones. Undelivered (queued) rows are never
 // pruned. Best-effort maintenance against unbounded growth.

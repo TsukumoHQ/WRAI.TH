@@ -141,3 +141,24 @@ func TestSignalWebhookRejections(t *testing.T) {
 		t.Errorf("no-title status = %d, want 400", w.Code)
 	}
 }
+
+// A signed source is quota-gated: past the project task quota it is rejected
+// with 429, and the rejected delivery leaves NO dedup row (retryable later).
+func TestSignalWebhookQuotaExceeded(t *testing.T) {
+	t.Setenv(RelaySignalWebhookSecretEnv, "s")
+	r := testRelay(t)
+	r.DB.SetSetting("signal_source:ci", `{"profile":"wraith-backend"}`)
+	// Cap the signal identity at 1 task.
+	if err := r.DB.SetAgentQuota("default", "signal:ci", 0, 0, 1, 0); err != nil {
+		t.Fatalf("set quota: %v", err)
+	}
+
+	body := `{"title":"CI failed"}`
+	if w := doSignal(r, "s", "ci", "d1", body, true); w.Code != http.StatusAccepted {
+		t.Fatalf("first signal status = %d, want 202; body=%s", w.Code, w.Body.String())
+	}
+	// Second distinct signal is over quota → 429.
+	if w := doSignal(r, "s", "ci", "d2", body, true); w.Code != http.StatusTooManyRequests {
+		t.Errorf("over-quota status = %d, want 429", w.Code)
+	}
+}
