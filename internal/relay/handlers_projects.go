@@ -3,13 +3,17 @@ package relay
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
 func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	name := strings.ToLower(req.GetString("name", ""))
+	// NormalizeProject (not bare ToLower) so an underscore spelling folds to the
+	// same canonical name EnsureProject stores and register_agent resolves to —
+	// otherwise "synergix_prod" here would create a namespace no normalized
+	// handler can ever reach, and the ListAgents cross-check below would miss the
+	// agents already registered under the canonical "synergix-prod".
+	name := NormalizeProject(req.GetString("name", ""))
 	if name == "" {
 		return toolResultError("name is required"), nil
 	}
@@ -49,7 +53,7 @@ func (h *Handlers) HandleCreateProject(ctx context.Context, req mcp.CallToolRequ
 }
 
 func (h *Handlers) HandleDeleteProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	project := req.GetString("project", "")
+	project := NormalizeProject(req.GetString("project", ""))
 	if project == "" {
 		return toolResultError("project is required"), nil
 	}

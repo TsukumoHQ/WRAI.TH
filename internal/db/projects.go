@@ -5,8 +5,26 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"strings"
 	"time"
 )
+
+// canonicalProject is the DB-layer canonical form of a project identifier:
+// TRIM + LOWER + underscores folded to hyphens. It MUST stay in lockstep with
+// relay.NormalizeProject (the handler-boundary normalizer) and with the SQL
+// form baked into migrateNormalizeProjects — the three are one rule expressed
+// three ways. Applying it inside every project-keyed helper here makes the
+// projects registry case/underscore-insensitive at the single choke point all
+// callers pass through, so a path that reaches the DB without going through a
+// handler (or a handler that forgot to normalize) still can't create a
+// case-split duplicate or lose a lookup. Empty and internal "_"-prefixed
+// pseudo-projects are left untouched, matching the migration's exemption.
+func canonicalProject(name string) string {
+	if name == "" || strings.HasPrefix(name, "_") {
+		return name
+	}
+	return strings.ReplaceAll(strings.ToLower(strings.TrimSpace(name)), "_", "-")
+}
 
 // Planet pool: category/variant pairs (48x48, 60 frames each).
 var planetPool = []string{
@@ -27,6 +45,7 @@ func randomPlanet() string {
 
 // EnsureProject creates a project entry if it doesn't exist, assigning a random planet.
 func (d *DB) EnsureProject(name string) {
+	name = canonicalProject(name)
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = d.conn.Exec(
 		"INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES (?, ?, ?)",
@@ -36,6 +55,7 @@ func (d *DB) EnsureProject(name string) {
 
 // GetProject returns a project by name.
 func (d *DB) GetProject(name string) (*models.Project, error) {
+	name = canonicalProject(name)
 	var p models.Project
 	err := d.ro().QueryRow("SELECT name, planet_type, created_at FROM projects WHERE name = ?", name).Scan(&p.Name, &p.PlanetType, &p.CreatedAt)
 	if err == sql.ErrNoRows {
@@ -49,6 +69,7 @@ func (d *DB) GetProject(name string) (*models.Project, error) {
 
 // UpdateProjectPlanetType changes a project's planet_type.
 func (d *DB) UpdateProjectPlanetType(name, planetType string) error {
+	name = canonicalProject(name)
 	_, err := d.conn.Exec("UPDATE projects SET planet_type = ? WHERE name = ?", planetType, name)
 	return err
 }
@@ -58,6 +79,7 @@ func (d *DB) UpdateProjectPlanetType(name, planetType string) error {
 // unknown project or a missing column reads as false, so the many free-form
 // projects the relay serves keep dispatching untouched. niwa is seeded on.
 func (d *DB) ProjectRequiresTypedTicket(name string) bool {
+	name = canonicalProject(name)
 	var v int
 	err := d.ro().QueryRow("SELECT require_typed_ticket FROM projects WHERE name = ?", name).Scan(&v)
 	if err != nil {
@@ -69,6 +91,7 @@ func (d *DB) ProjectRequiresTypedTicket(name string) bool {
 // SetProjectRequiresTypedTicket flips the per-project enforcement flag. The row
 // must already exist (projects are created on first agent registration).
 func (d *DB) SetProjectRequiresTypedTicket(name string, required bool) error {
+	name = canonicalProject(name)
 	v := 0
 	if required {
 		v = 1
@@ -91,6 +114,7 @@ func (d *DB) SetSetting(key, value string) {
 
 // DeleteProject removes a project and all its associated data (cascade delete).
 func (d *DB) DeleteProject(name string) error {
+	name = canonicalProject(name)
 	tx, err := d.conn.Begin()
 	if err != nil {
 		return err
