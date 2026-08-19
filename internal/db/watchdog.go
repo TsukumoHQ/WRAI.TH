@@ -36,9 +36,18 @@ type StuckAgent struct {
 
 // StuckAgents returns the stuck-candidate set for a project: every agent whose
 // last_seen is older than threshold AND that still holds at least one in-flight
-// task (accepted/in-progress/in-review). Deactivated agents (gracefully brought
-// down) and sleeping agents (intentionally parked) are excluded — only a silent
-// holder of live work is a candidate. Read-only (RO pool); never mutates.
+// task (accepted/in-progress/in-review). Read-only (RO pool); never mutates.
+//
+// Status scope: 'active' and 'inactive' are BOTH candidates. A hung agent that
+// still holds a live lease stays 'active' (MarkStaleAgentsInactive protects a
+// live-lease holder), so the primary stuck case is an 'active' agent gone
+// silent; a long-hung one whose lease lapsed is swept to 'inactive'. 'inactive'
+// is deliberately included — an agent brought down gracefully (DeactivateAgent
+// also sets 'inactive') that STILL holds work is equally a requeue candidate,
+// and the two are indistinguishable by status anyway (both set deactivated_at).
+// Excluded: 'sleeping' (intentionally parked) and 'deleted' (tombstoned) — the
+// query's status IN ('active','inactive') filters them out. The daemon decides
+// whether to act on a candidate; the relay only exposes the set.
 func (d *DB) StuckAgents(project string, threshold time.Duration) ([]StuckAgent, error) {
 	if threshold <= 0 {
 		threshold = DefaultStuckThreshold

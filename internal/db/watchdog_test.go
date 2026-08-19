@@ -77,22 +77,50 @@ func TestStuckAgents(t *testing.T) {
 	}
 }
 
-// TestStuckAgents_ExcludesDeactivated: an agent brought down gracefully
-// (deactivated) is not "stuck" even while a task row still points at it.
-func TestStuckAgents_ExcludesDeactivated(t *testing.T) {
+// TestStuckAgents_ExcludesParkedAndDeleted: the query scopes to status IN
+// ('active','inactive'), so a 'sleeping' (intentionally parked) or a 'deleted'
+// (tombstoned) holder is NOT a stuck candidate even while a task still points at
+// it. ('inactive' — set by BOTH the stale sweep AND graceful DeactivateAgent —
+// IS a candidate; see TestStuckAgents_IncludesInactive.)
+func TestStuckAgents_ExcludesParkedAndDeleted(t *testing.T) {
 	d := newWatchdogDB(t)
 	const project = "p1"
-	registerHeldTask(t, d, project, "gone")
-	backdateLastSeen(t, d, project, "gone", 40*time.Minute)
-	if _, err := d.conn.Exec("UPDATE agents SET status = 'deactivated' WHERE name = ? AND project = ?", "gone", project); err != nil {
-		t.Fatal(err)
+	for _, tc := range []struct{ agent, status string }{
+		{"parked", "sleeping"},
+		{"tombstoned", "deleted"},
+	} {
+		registerHeldTask(t, d, project, tc.agent)
+		backdateLastSeen(t, d, project, tc.agent, 40*time.Minute)
+		if _, err := d.conn.Exec("UPDATE agents SET status = ? WHERE name = ? AND project = ?", tc.status, tc.agent, project); err != nil {
+			t.Fatal(err)
+		}
 	}
 	got, err := d.StuckAgents(project, DefaultStuckThreshold)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
-		t.Fatalf("deactivated agent must be excluded, got %v", got)
+		t.Fatalf("sleeping/deleted holders must be excluded, got %v", got)
+	}
+}
+
+// TestStuckAgents_IncludesInactive: a silent holder swept to 'inactive' (lease
+// lapsed) — the same status graceful DeactivateAgent sets — is still a requeue
+// candidate. Locks the documented status scope so the doc/test can't drift again.
+func TestStuckAgents_IncludesInactive(t *testing.T) {
+	d := newWatchdogDB(t)
+	const project = "p1"
+	registerHeldTask(t, d, project, "swept")
+	backdateLastSeen(t, d, project, "swept", 40*time.Minute)
+	if _, err := d.conn.Exec("UPDATE agents SET status = 'inactive' WHERE name = ? AND project = ?", "swept", project); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.StuckAgents(project, DefaultStuckThreshold)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Agent != "swept" {
+		t.Fatalf("inactive holder must be a candidate, got %v", got)
 	}
 }
 
