@@ -682,8 +682,9 @@ func (r *Relay) apiGetLatestMessagesAllProjects(w http.ResponseWriter, req *http
 
 func (r *Relay) apiGetConversations(w http.ResponseWriter, req *http.Request) {
 	project := projectFromRequest(req)
+	user := req.URL.Query().Get("user")
 
-	convs, err := r.DB.ListAllConversations(project)
+	convs, err := r.DB.ListAllConversationsForUser(project, user)
 	if err != nil {
 		http.Error(w, `{"error":"failed to list conversations"}`, http.StatusInternalServerError)
 		return
@@ -720,8 +721,9 @@ func (r *Relay) apiGetConversationMessages(w http.ResponseWriter, path string) {
 
 func (r *Relay) apiGetAllMessages(w http.ResponseWriter, req *http.Request) {
 	project := projectFromRequest(req)
+	user := req.URL.Query().Get("user")
 
-	msgs, err := r.DB.GetAllRecentMessages(project, 500)
+	msgs, err := r.DB.GetAllRecentMessagesForUser(project, user, 500)
 	if err != nil {
 		http.Error(w, `{"error":"failed to get messages"}`, http.StatusInternalServerError)
 		return

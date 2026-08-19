@@ -7,15 +7,33 @@ import (
 
 // ListAllConversations returns all non-archived conversations with member names for a project.
 func (d *DB) ListAllConversations(project string) ([]models.ConversationWithMembers, error) {
+	return d.ListAllConversationsForUser(project, "")
+}
+
+// ListAllConversationsForUser returns non-archived conversations for a project,
+// optionally filtered to those the given user is an active member of. An empty
+// user returns every conversation (identical to ListAllConversations). The
+// filter is case-insensitive; member names are stored lower-cased.
+func (d *DB) ListAllConversationsForUser(project, user string) ([]models.ConversationWithMembers, error) {
 	query := `
 		SELECT c.id, c.title, c.created_by, c.created_at,
 			(SELECT COUNT(*) FROM messages WHERE conversation_id = c.id) AS message_count
 		FROM conversations c
 		WHERE c.archived_at IS NULL AND c.project = ?
-		ORDER BY c.created_at DESC
 	`
+	args := []any{project}
+	if user != "" {
+		query += ` AND EXISTS (
+			SELECT 1 FROM conversation_members cm
+			WHERE cm.conversation_id = c.id
+			AND LOWER(cm.agent_name) = LOWER(?)
+			AND cm.left_at IS NULL
+		)`
+		args = append(args, user)
+	}
+	query += ` ORDER BY c.created_at DESC`
 
-	rows, err := d.ro().Query(query, project)
+	rows, err := d.ro().Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list all conversations: %w", err)
 	}
@@ -50,6 +68,15 @@ func (d *DB) ListAllConversations(project string) ([]models.ConversationWithMemb
 
 // GetAllRecentMessages returns the most recent messages across all conversations for a project.
 func (d *DB) GetAllRecentMessages(project string, limit int) ([]models.Message, error) {
+	return d.GetAllRecentMessagesForUser(project, "", limit)
+}
+
+// GetAllRecentMessagesForUser returns recent messages for a project, optionally
+// filtered to those sent by or addressed to the given user. An empty user
+// returns every message (identical to GetAllRecentMessages). The filter is
+// case-insensitive and applied before LIMIT so a busy project cannot starve a
+// quiet user out of the window.
+func (d *DB) GetAllRecentMessagesForUser(project, user string, limit int) ([]models.Message, error) {
 	if limit <= 0 {
 		limit = 200
 	}
@@ -58,10 +85,18 @@ func (d *DB) GetAllRecentMessages(project string, limit int) ([]models.Message, 
 		SELECT id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, read_at, conversation_id, project, task_id, priority, ttl_seconds, expired_at
 		FROM messages
 		WHERE project = ?
+	`
+	args := []any{project}
+	if user != "" {
+		query += ` AND (LOWER(from_agent) = LOWER(?) OR LOWER(to_agent) = LOWER(?))`
+		args = append(args, user, user)
+	}
+	query += `
 		ORDER BY created_at DESC
 		LIMIT ?
 	`
-	return d.queryMessages(query, project, limit)
+	args = append(args, limit)
+	return d.queryMessages(query, args...)
 }
 
 // GetMessagesSince returns all messages created after the given RFC3339 timestamp for a project.
