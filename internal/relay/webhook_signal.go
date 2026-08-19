@@ -146,9 +146,10 @@ func (r *Relay) apiSignalWebhook(w http.ResponseWriter, req *http.Request) {
 	// Create the ticket through the shared dispatch pipeline, so a signal-created
 	// task is indistinguishable from a hand-dispatched one (notifies the lane,
 	// emits task.dispatched). A signal carries a free-form ticket: it can't supply
-	// goal/AC/dod, so on a typed-ticket project (require_typed_ticket) the single
-	// guard in db.DispatchTask refuses it — bare tickets are impossible on every
-	// path (founder ruling). That refusal is PERMANENT: a redelivery would fail
+	// goal/AC/dod, so on a typed-ticket project (require_typed_ticket) the guard —
+	// hoisted into dispatchCore, with db.DispatchTask as the backstop — refuses it;
+	// bare tickets are impossible on every path (founder ruling). That refusal is
+	// PERMANENT: a redelivery would fail
 	// identically, so we keep the delivery marker (no compensating release) and
 	// return 422, never spin an at-least-once retry into a poison-message loop.
 	task, _, err := r.Handlers.dispatchCore(project, signalAgent, cfg.Profile, title, sig.Description, priority, nil, boardID, db.TypedTicket{})

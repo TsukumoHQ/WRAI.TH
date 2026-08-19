@@ -304,23 +304,29 @@ func migrate(conn *sql.DB) error {
 
 	// Typed-ticket enforcement flag (V-lifecycle). Per-project opt-in: the relay
 	// serves many projects, so a hard "no goal/AC/dod → refuse" default would
-	// break every free-form dispatcher. Default 0 (off); niwa is seeded on as
-	// the rollout project. Flip others with require_typed_ticket = 1.
+	// break every free-form dispatcher. Default 0 (off); niwa and tsukumo are
+	// seeded on as the rollout projects. Flip others with require_typed_ticket = 1.
 	ensureColumns(conn, "projects", map[string]string{
 		"require_typed_ticket": "INTEGER NOT NULL DEFAULT 0",
 	})
-	_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES ('niwa', 'forest/1', ?)", nowStr)
-	// ONE-SHOT seed, guarded by a settings marker. The old code re-ran this
-	// UPDATE on every boot, so an operator who deliberately opted niwa out
+	// ONE-SHOT seed per project, guarded by a settings marker. The old code re-ran
+	// the UPDATE on every boot, so an operator who deliberately opted a project out
 	// (SetProjectRequiresTypedTicket false) was silently re-enabled at the next
-	// relay restart. Seed the rollout default exactly once; after that the flag
-	// is operator-owned and survives restarts.
-	var seededTypedTicket string
-	_ = conn.QueryRow("SELECT value FROM settings WHERE key = 'seed_niwa_typed_ticket'").Scan(&seededTypedTicket)
-	if seededTypedTicket == "" {
-		_, _ = conn.Exec("UPDATE projects SET require_typed_ticket = 1 WHERE name = 'niwa'")
-		_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES ('seed_niwa_typed_ticket', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'")
+	// relay restart. Seed each rollout default exactly once; after that the flag is
+	// operator-owned and survives restarts.
+	seedTypedTicketOn := func(project, planet, marker string) {
+		_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES (?, ?, ?)", project, planet, nowStr)
+		var seeded string
+		_ = conn.QueryRow("SELECT value FROM settings WHERE key = ?", marker).Scan(&seeded)
+		if seeded == "" {
+			_, _ = conn.Exec("UPDATE projects SET require_typed_ticket = 1 WHERE name = ?", project)
+			_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES (?, 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'", marker)
+		}
 	}
+	seedTypedTicketOn("niwa", "forest/1", "seed_niwa_typed_ticket")
+	// tsukumo is the fleet's own project — enforce typed tickets so a bare
+	// self-dispatch (the 43189533 loophole) is refused for us, not just niwa.
+	seedTypedTicketOn("tsukumo", "forest/1", "seed_tsukumo_typed_ticket")
 
 	ensureColumns(conn, "messages", map[string]string{
 		"conversation_id": "TEXT",
