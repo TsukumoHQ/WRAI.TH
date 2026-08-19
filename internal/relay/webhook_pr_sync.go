@@ -120,6 +120,27 @@ func prTargetState(action string, merged bool) (target, reason string) {
 	}
 }
 
+// prTargetFromState maps a last-observed PR STATE (open|merged|closed, the form
+// a poller reads off gh — PR-link S3 reconcile) onto the task state it should
+// drive, and an optional block reason. It is the state-keyed twin of
+// prTargetState (which keys on a webhook action): open collapses "opened /
+// reopened / ready_for_review" → in-review, closed is closed-unmerged (a merged
+// PR reads state=merged, not closed). Empty target = unknown state, no
+// transition. The reconcile poll (which cannot see the webhook action) uses this
+// so the two convergence paths — webhook and poll — apply the SAME map.
+func prTargetFromState(prState string) (target, reason string) {
+	switch prState {
+	case "open":
+		return "in-review", ""
+	case "merged":
+		return "done", ""
+	case "closed":
+		return "blocked", "PR closed unmerged"
+	default:
+		return "", ""
+	}
+}
+
 // intVal reads a JSON number (float64) or numeric string into an int; 0 on miss.
 func intVal(v any) int {
 	switch n := v.(type) {

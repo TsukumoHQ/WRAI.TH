@@ -553,6 +553,19 @@ func linkPrTool() mcp.Tool {
 	)
 }
 
+func reconcilePrTool() mcp.Tool {
+	return mcp.NewTool(
+		"reconcile_pr",
+		mcp.WithDescription("Poll-side PR convergence (the write-back for relay://pr-reconcile). An external poller that owns gh reads the reconcile candidates, GETs each PR's live state, then calls this with the observed pr_state to converge the task: records the state and applies the same one-way map as the webhook (open→in-review, merged→done, closed-unmerged→blocked), with no-resurrect + idempotent guards. Catches a missed pull_request webhook. Returns {task, changed}."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID (a pr-reconcile candidate)"), mcp.Required()),
+		mcp.WithString("pr_state", mcp.Description("Observed live PR state: open | merged | closed (closed = closed-unmerged)"), mcp.Required()),
+		mcp.WithString("pr_url", mcp.Description("PR html_url (optional refresh)")),
+		mcp.WithString("pr_repo", mcp.Description("Repo owner/name (optional refresh)")),
+	)
+}
+
 func setRunTool() mcp.Tool {
 	return mcp.NewTool(
 		"set_run",

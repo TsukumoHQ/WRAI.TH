@@ -425,6 +425,74 @@ func (h *Handlers) HandleLinkPr(ctx context.Context, req mcp.CallToolRequest) (*
 	return h.resultJSONTracked(project, agent, "link_pr", task)
 }
 
+// HandleReconcilePr is the poll-side convergence step (PR-link S3): an external
+// poller (niwa, which owns gh) reads relay://pr-reconcile, GETs each PR's live
+// state, then calls this with the observed pr_state to converge the task. It
+// records the observed state (SetTaskPR, COALESCE — url/repo refreshed if given)
+// and applies the SAME status-map the webhook consumer uses (open→in-review,
+// merged→done, closed-unmerged→blocked) via ForcePRTransition, which carries the
+// no-resurrect + idempotent guards. This is the poll twin of the webhook path —
+// no HMAC/webhook-replay coupling — so a missed pull_request webhook still
+// converges. The relay stays inbound-only: niwa reaches gh, the relay only
+// applies what niwa observed. Returns {task, changed}.
+func (h *Handlers) HandleReconcilePr(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	if taskID == "" {
+		return toolResultError("task_id is required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+
+	prState := req.GetString("pr_state", "")
+	switch prState {
+	case "open", "merged", "closed":
+	default:
+		return validationError(CodeInvalidArgument, "pr_state is required and must be one of open|merged|closed"), nil
+	}
+	prURL := optionalString(req.GetString("pr_url", ""))
+	prRepo := optionalString(req.GetString("pr_repo", ""))
+
+	// Record the observed PR state first (COALESCE keeps number/url/repo; url/repo
+	// refreshed only when the poller passes them).
+	found, err := h.db.SetTaskPR(taskID, project, prURL, nil, &prState, prRepo)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to record PR state: %v", err)), nil
+	}
+	if !found {
+		return validationError(CodeNotFound, fmt.Sprintf("task not found: %s", taskID)), nil
+	}
+
+	target, reason := prTargetFromState(prState)
+	var reasonPtr *string
+	if reason != "" {
+		reasonPtr = &reason
+	}
+	task, changed, err := h.db.ForcePRTransition(project, taskID, target, reasonPtr)
+	if err != nil {
+		return taskOpError(err, "failed to reconcile PR: %v", err), nil
+	}
+	if task == nil {
+		return validationError(CodeNotFound, fmt.Sprintf("task not found: %s", taskID)), nil
+	}
+	if changed {
+		h.events.Emit(MCPEvent{Type: "task", Action: "reconcile_pr", Agent: agent, Project: project, Label: task.Title})
+		name := "task.pr_synced"
+		if target == "done" && prState == "merged" {
+			name = "task.pr_merged"
+		}
+		emitTaskEvent(h.events, name, "reconcile_pr", project, task, map[string]any{
+			"doer": agent, "pr_state": prState, "reconciled": true,
+		})
+	}
+	return h.resultJSONTracked(project, agent, "reconcile_pr", map[string]any{
+		"task": task, "changed": changed,
+	})
+}
+
 // HandleSetRun stamps the run zone on the PARENT task (changeset-per-factory-run
 // S1) — integration_branch and/or a run_state advance. run_state is
 // transition-enforced (open-first, no resurrection of a merged run); a bad edge
