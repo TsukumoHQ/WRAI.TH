@@ -2,7 +2,6 @@ package relay
 
 import (
 	"log"
-	"strings"
 	"sync"
 
 	"github.com/mark3labs/mcp-go/server"
@@ -10,44 +9,53 @@ import (
 
 // SessionRegistry tracks connected agent sessions for push notifications.
 type SessionRegistry struct {
-	mu       sync.RWMutex
-	sessions map[string][]string // "project:agentName" → []sessionID
+	mu sync.RWMutex
+	// sessions is nested project → agentName → []sessionID so a project-scoped
+	// lookup (AgentForSession on every guarded write, NotifyBroadcast) touches
+	// only the sessions IN that project — O(agents-in-project) — instead of a
+	// HasPrefix scan of every session across every project (relay-perf R5).
+	sessions map[string]map[string][]string
 	mcpSrv   *server.MCPServer
 }
 
 func NewSessionRegistry(mcpSrv *server.MCPServer) *SessionRegistry {
 	return &SessionRegistry{
-		sessions: make(map[string][]string),
+		sessions: make(map[string]map[string][]string),
 		mcpSrv:   mcpSrv,
 	}
-}
-
-// registryKey returns the composite key for project-scoped session tracking.
-func registryKey(project, agent string) string {
-	return project + ":" + agent
 }
 
 // Register associates a session ID with an agent in a project.
 func (r *SessionRegistry) Register(project, agentName, sessionID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	key := registryKey(project, agentName)
-	r.sessions[key] = append(r.sessions[key], sessionID)
+	byAgent := r.sessions[project]
+	if byAgent == nil {
+		byAgent = make(map[string][]string)
+		r.sessions[project] = byAgent
+	}
+	byAgent[agentName] = append(byAgent[agentName], sessionID)
 }
 
-// Unregister removes a session ID from an agent.
+// Unregister removes a session ID from an agent. The caller knows only the
+// session id (an agent may hold sessions in multiple projects), so this scans —
+// but it runs on disconnect, never on the hot guarded-write path.
 func (r *SessionRegistry) Unregister(agentName, sessionID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	// Search all keys for this session (agent may be in multiple projects)
-	for key, ids := range r.sessions {
-		for i, id := range ids {
-			if id == sessionID {
-				r.sessions[key] = append(ids[:i], ids[i+1:]...)
-				if len(r.sessions[key]) == 0 {
-					delete(r.sessions, key)
+	for project, byAgent := range r.sessions {
+		for agent, ids := range byAgent {
+			for i, id := range ids {
+				if id == sessionID {
+					byAgent[agent] = append(ids[:i], ids[i+1:]...)
+					if len(byAgent[agent]) == 0 {
+						delete(byAgent, agent)
+					}
+					if len(byAgent) == 0 {
+						delete(r.sessions, project)
+					}
+					return
 				}
-				return
 			}
 		}
 	}
@@ -64,20 +72,16 @@ func (r *SessionRegistry) AgentForSession(project, sessionID string) (string, bo
 	if sessionID == "" {
 		return "", false
 	}
-	prefix := project + ":"
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	found := ""
-	for key, ids := range r.sessions {
-		if !strings.HasPrefix(key, prefix) {
-			continue
-		}
+	for agent, ids := range r.sessions[project] {
 		for _, id := range ids {
 			if id == sessionID {
-				if found != "" && found != key[len(prefix):] {
+				if found != "" && found != agent {
 					return "", false // session bound to >1 agent — ambiguous, fail open
 				}
-				found = key[len(prefix):]
+				found = agent
 				break
 			}
 		}
@@ -90,10 +94,10 @@ func (r *SessionRegistry) AgentForSession(project, sessionID string) (string, bo
 
 // Notify sends a notification to all sessions of the given agent in a project.
 func (r *SessionRegistry) Notify(project, agentName, from, subject, messageID string) {
-	key := registryKey(project, agentName)
 	r.mu.RLock()
-	sessionIDs := make([]string, len(r.sessions[key]))
-	copy(sessionIDs, r.sessions[key])
+	ids := r.sessions[project][agentName]
+	sessionIDs := make([]string, len(ids))
+	copy(sessionIDs, ids)
 	r.mu.RUnlock()
 
 	params := map[string]any{
@@ -111,16 +115,11 @@ func (r *SessionRegistry) Notify(project, agentName, from, subject, messageID st
 
 // NotifyBroadcast sends a notification to all connected agents in the same project, except the sender.
 func (r *SessionRegistry) NotifyBroadcast(project, senderName, subject, messageID string) {
-	prefix := project + ":"
 	r.mu.RLock()
 	agents := make(map[string][]string)
-	for key, ids := range r.sessions {
-		if strings.HasPrefix(key, prefix) {
-			// Extract agent name from key
-			agent := key[len(prefix):]
-			if agent != senderName {
-				agents[key] = append([]string{}, ids...)
-			}
+	for agent, ids := range r.sessions[project] {
+		if agent != senderName {
+			agents[agent] = append([]string{}, ids...)
 		}
 	}
 	r.mu.RUnlock()

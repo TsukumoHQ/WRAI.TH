@@ -48,8 +48,28 @@ func (d *DB) MarkDeliveriesSurfaced(ids []string) {
 		return
 	}
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	for _, id := range ids {
-		_, _ = d.conn.Exec("UPDATE deliveries SET state = 'surfaced', surfaced_at = ? WHERE id = ? AND state = 'queued'", now, id)
+	// ONE UPDATE per batch instead of K single-row UPDATEs (each of which grabbed
+	// the single write-lock) — an inbox read surfaced its deliveries in a lock
+	// storm. Chunked to stay under SQLite's host-parameter limit; behaviour is
+	// identical (only 'queued' rows flip to 'surfaced').
+	const chunk = 900
+	for start := 0; start < len(ids); start += chunk {
+		end := start + chunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[start:end]
+		ph := make([]string, len(batch))
+		args := make([]any, 0, len(batch)+1)
+		args = append(args, now)
+		for i, id := range batch {
+			ph[i] = "?"
+			args = append(args, id)
+		}
+		_, _ = d.conn.Exec(
+			"UPDATE deliveries SET state = 'surfaced', surfaced_at = ? WHERE state = 'queued' AND id IN ("+strings.Join(ph, ",")+")",
+			args...,
+		)
 	}
 }
 
