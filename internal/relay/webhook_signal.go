@@ -2,6 +2,8 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -143,12 +145,20 @@ func (r *Relay) apiSignalWebhook(w http.ResponseWriter, req *http.Request) {
 
 	// Create the ticket through the shared dispatch pipeline, so a signal-created
 	// task is indistinguishable from a hand-dispatched one (notifies the lane,
-	// emits task.dispatched). Free-form ticket: a signal can't supply
-	// goal/AC/dod, so typed-ticket enforcement (an interactive-dispatch policy)
-	// does not apply here.
+	// emits task.dispatched). A signal carries a free-form ticket: it can't supply
+	// goal/AC/dod, so on a typed-ticket project (require_typed_ticket) the single
+	// guard in db.DispatchTask refuses it — bare tickets are impossible on every
+	// path (founder ruling). That refusal is PERMANENT: a redelivery would fail
+	// identically, so we keep the delivery marker (no compensating release) and
+	// return 422, never spin an at-least-once retry into a poison-message loop.
 	task, _, err := r.Handlers.dispatchCore(project, signalAgent, cfg.Profile, title, sig.Description, priority, nil, boardID, db.TypedTicket{})
 	if err != nil {
-		// Compensating action: release the delivery-id reservation so an
+		var tte *db.TypedTicketError
+		if errors.As(err, &tte) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, tte.Error()), http.StatusUnprocessableEntity)
+			return
+		}
+		// Transient failure: release the delivery-id reservation so an
 		// at-least-once redelivery can retry instead of deduping to a no-op.
 		r.DB.DeleteEventByDelivery(project, deliveryID)
 		http.Error(w, `{"error":"create ticket"}`, http.StatusInternalServerError)

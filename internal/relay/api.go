@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -1444,17 +1445,18 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 			acJSON = string(b)
 		}
 	}
-	// Same per-project typed-ticket gate as the MCP handler.
-	if r.DB.ProjectRequiresTypedTicket(body.Project) {
-		if missing := missingTicketFields(body.Goal, acJSON, body.Dod); len(missing) > 0 {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, ticketRefusal(body.Project, missing)), http.StatusBadRequest)
-			return
-		}
-	}
+	// Typed-ticket enforcement is the single guard in db.DispatchTask; an enforced
+	// project refuses a bare ticket there as a *db.TypedTicketError (surfaced as
+	// 400 below). Free-form projects dispatch unchanged.
 	ticket := db.TypedTicket{Goal: body.Goal, AcceptanceCriteria: acJSON, Dod: body.Dod}
 
 	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID, ticket)
 	if err != nil {
+		var tte *db.TypedTicketError
+		if errors.As(err, &tte) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, tte.Error()), http.StatusBadRequest)
+			return
+		}
 		apiError(w, http.StatusInternalServerError, "failed to dispatch task", err)
 		return
 	}

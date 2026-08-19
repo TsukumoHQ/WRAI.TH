@@ -1,6 +1,81 @@
 package db
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
+
+// TypedTicket.Missing is the single source of truth for "what makes a ticket
+// bare". It must name the absent fields in dispatch order and treat an empty /
+// non-array / all-blank acceptance_criteria as absent.
+func TestTypedTicketMissing(t *testing.T) {
+	cases := []struct {
+		name   string
+		ticket TypedTicket
+		want   []string
+	}{
+		{"all missing", TypedTicket{}, []string{"goal", "acceptance_criteria", "dod"}},
+		{"goal only", TypedTicket{Goal: "g"}, []string{"acceptance_criteria", "dod"}},
+		{"complete", TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"}, nil},
+		{"empty array ac", TypedTicket{Goal: "g", AcceptanceCriteria: `[]`, Dod: "d"}, []string{"acceptance_criteria"}},
+		{"blank items ac", TypedTicket{Goal: "g", AcceptanceCriteria: `["  ",""]`, Dod: "d"}, []string{"acceptance_criteria"}},
+		{"non-array ac", TypedTicket{Goal: "g", AcceptanceCriteria: `"x"`, Dod: "d"}, []string{"acceptance_criteria"}},
+		{"whitespace goal/dod", TypedTicket{Goal: "  ", AcceptanceCriteria: `["a"]`, Dod: " "}, []string{"goal", "dod"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := strings.Join(tc.ticket.Missing(), ","); got != strings.Join(tc.want, ",") {
+				t.Fatalf("Missing() = [%s], want [%s]", got, strings.Join(tc.want, ","))
+			}
+		})
+	}
+}
+
+// The single enforcement choke: DispatchTask itself refuses a bare ticket on an
+// enforced project (niwa is seeded on), with a typed *TypedTicketError naming the
+// missing fields — proving the guard is path-agnostic (every caller funnels here,
+// so cron / inbound-signal / self-dispatch cannot bypass it), not a per-handler
+// check. A complete ticket, and any bare ticket on a free-form project, pass.
+func TestDispatchTaskEnforcesTypedTicketAtChoke(t *testing.T) {
+	d := testDB(t)
+
+	// bare on enforced project → refused, all three named, in order.
+	_, err := d.DispatchTask("niwa", "dev", "cto", "bare", "", "P2", nil, nil, TypedTicket{})
+	var tte *TypedTicketError
+	if !errors.As(err, &tte) {
+		t.Fatalf("bare dispatch on enforced project must return *TypedTicketError, got %v", err)
+	}
+	if strings.Join(tte.Missing, ",") != "goal,acceptance_criteria,dod" {
+		t.Fatalf("missing = %v, want all three in order", tte.Missing)
+	}
+	if tte.Project != "niwa" {
+		t.Fatalf("error project = %q, want niwa", tte.Project)
+	}
+
+	// partial on enforced project → names only the absent field.
+	_, err = d.DispatchTask("niwa", "dev", "cto", "partial", "", "P2", nil, nil,
+		TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`})
+	if !errors.As(err, &tte) || strings.Join(tte.Missing, ",") != "dod" {
+		t.Fatalf("partial dispatch should refuse missing [dod], got %v", err)
+	}
+
+	// complete on enforced project → dispatches.
+	task, err := d.DispatchTask("niwa", "dev", "cto", "complete", "", "P2", nil, nil,
+		TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"})
+	if err != nil {
+		t.Fatalf("complete ticket on enforced project must dispatch: %v", err)
+	}
+	if task == nil || task.Status != "pending" {
+		t.Fatalf("expected a pending task, got %+v", task)
+	}
+
+	// bare on a free-form project → dispatches unchanged (retrocompat).
+	d.EnsureProject("free")
+	if _, err := d.DispatchTask("free", "dev", "cto", "bare-ok", "", "P2", nil, nil, TypedTicket{}); err != nil {
+		t.Fatalf("bare dispatch on free-form project must succeed: %v", err)
+	}
+}
 
 // The typed-ticket zone (goal / acceptance_criteria / dod) must round-trip
 // through the column list ↔ scanTask lockstep, exactly like the git zone — the

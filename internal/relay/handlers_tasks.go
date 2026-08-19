@@ -59,54 +59,11 @@ func taskErrorCategory(code string) (category string, retryable bool) {
 	}
 }
 
-// missingTicketFields returns which of goal / acceptance_criteria / dod are
-// absent, in dispatch order. acceptanceCriteria is the raw wire value (a JSON
-// array string); it counts as present only when it parses to a non-empty list
-// with at least one non-blank item. Empty return = a complete typed ticket.
-func missingTicketFields(goal, acceptanceCriteria, dod string) []string {
-	var missing []string
-	if strings.TrimSpace(goal) == "" {
-		missing = append(missing, "goal")
-	}
-	if !hasAcceptanceItems(acceptanceCriteria) {
-		missing = append(missing, "acceptance_criteria")
-	}
-	if strings.TrimSpace(dod) == "" {
-		missing = append(missing, "dod")
-	}
-	return missing
-}
-
-// hasAcceptanceItems is true when raw is a JSON array carrying ≥1 non-blank
-// string — the "list of individually testable items" the review gate verdicts
-// against. A bare string, empty array, or unparseable value is not enough.
-func hasAcceptanceItems(raw string) bool {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return false
-	}
-	var items []string
-	if err := json.Unmarshal([]byte(raw), &items); err != nil {
-		return false
-	}
-	for _, it := range items {
-		if strings.TrimSpace(it) != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// ticketRefusal formats the per-field refusal shown to a dispatcher when a
-// typed-ticket project is missing fields.
-func ticketRefusal(project string, missing []string) string {
-	// The missing list is bracketed so callers (and tests) can read exactly
-	// which fields were absent without tripping on the guidance sentence, which
-	// necessarily names all three field keys.
-	return fmt.Sprintf("typed ticket required for project '%s': missing [%s]. "+
-		"Dispatch with goal (intent), acceptance_criteria (JSON array of individually testable items) and dod (definition of done).",
-		project, strings.Join(missing, ", "))
-}
+// Typed-ticket enforcement (missing-field detection, the per-project refusal, and
+// the refusal message) lives in the db package on TypedTicket — see
+// db.TypedTicket.Missing and db.TypedTicketError. It is enforced at the single
+// creation choke (db.DispatchTask) so no dispatch path can drift or bypass it.
+// Handlers below only translate a *db.TypedTicketError into their response shape.
 
 func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
@@ -137,17 +94,14 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	parentTaskID := optionalString(req.GetString("parent_task_id", ""))
 	boardID := optionalString(req.GetString("board_id", ""))
 
-	// Typed ticket (V-lifecycle). Refuse an incomplete ticket only where the
-	// project opts in — free-form projects dispatch unchanged.
-	goal := req.GetString("goal", "")
-	acceptanceCriteria := req.GetString("acceptance_criteria", "")
-	dod := req.GetString("dod", "")
-	if h.db.ProjectRequiresTypedTicket(project) {
-		if missing := missingTicketFields(goal, acceptanceCriteria, dod); len(missing) > 0 {
-			return toolResultError(ticketRefusal(project, missing)), nil
-		}
+	// Typed ticket (V-lifecycle). Enforcement is the single guard in
+	// db.DispatchTask (fires below): an incomplete ticket on an enforced project
+	// is refused as a *db.TypedTicketError; free-form projects dispatch unchanged.
+	ticket := db.TypedTicket{
+		Goal:               req.GetString("goal", ""),
+		AcceptanceCriteria: req.GetString("acceptance_criteria", ""),
+		Dod:                req.GetString("dod", ""),
 	}
-	ticket := db.TypedTicket{Goal: goal, AcceptanceCriteria: acceptanceCriteria, Dod: dod}
 
 	// Resolve truncated board_id prefix to full UUID
 	if boardID != nil && len(*boardID) < 36 {
@@ -162,6 +116,10 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 
 	task, autoBoard, err := h.dispatchCore(project, agent, profile, title, description, priority, parentTaskID, boardID, ticket)
 	if err != nil {
+		var tte *db.TypedTicketError
+		if errors.As(err, &tte) {
+			return toolResultError(tte.Error()), nil
+		}
 		return toolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
 	}
 
@@ -986,10 +944,9 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		return toolResultError("tasks is required — pass tasks:'[{\"profile\":\"...\",\"title\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\"}]' (JSON string). Only profile and title are required per item."), nil
 	}
 
-	// Same per-project typed-ticket enforcement as dispatch_task; a failing item
-	// lands in errors and the batch continues (per-item, not all-or-nothing).
-	requireTicket := h.db.ProjectRequiresTypedTicket(project)
-
+	// Typed-ticket enforcement is the single guard in db.DispatchTask (below): on
+	// an enforced project a bare item is refused there as a *db.TypedTicketError,
+	// lands in errors, and the batch continues (per-item, not all-or-nothing).
 	var dispatched []map[string]string
 	var errors []string
 	for _, item := range items {
@@ -1003,12 +960,6 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		if len(item.AcceptanceCriteria) > 0 {
 			if b, err := json.Marshal(item.AcceptanceCriteria); err == nil {
 				acJSON = string(b)
-			}
-		}
-		if requireTicket {
-			if missing := missingTicketFields(item.Goal, acJSON, item.Dod); len(missing) > 0 {
-				errors = append(errors, fmt.Sprintf("%s: %s", item.Title, ticketRefusal(project, missing)))
-				continue
 			}
 		}
 		priority := item.Priority

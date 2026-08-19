@@ -1,9 +1,41 @@
 package relay
 
 import (
+	"errors"
 	"strings"
 	"testing"
+
+	"agent-relay/internal/db"
 )
+
+// The loophole this task closes: dispatchCore is the shared create path behind
+// cron scheduled dispatch AND the inbound-signal webhook (which self-dispatches a
+// followup with a BARE db.TypedTicket{}). Those paths skipped the old per-handler
+// guard, so a bare ticket slipped through on an enforced project and every scribe
+// doc built from it rendered empty. Now the single guard in db.DispatchTask fires
+// for dispatchCore too: a bare self-dispatch on niwa is refused as a typed error,
+// and a complete one still lands.
+func TestDispatchCore_TypedTicket_RefusesBareSelfDispatch(t *testing.T) {
+	h := testHandlers(t)
+
+	_, _, err := h.dispatchCore("niwa", "backend-lead", "dev", "review followup", "", "P2", nil, nil, db.TypedTicket{})
+	var tte *db.TypedTicketError
+	if !errors.As(err, &tte) {
+		t.Fatalf("bare self-dispatch via dispatchCore on an enforced project must refuse, got %v", err)
+	}
+	if strings.Join(tte.Missing, ",") != "goal,acceptance_criteria,dod" {
+		t.Fatalf("missing = %v, want all three", tte.Missing)
+	}
+
+	task, _, err := h.dispatchCore("niwa", "backend-lead", "dev", "typed followup", "", "P2", nil, nil,
+		db.TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"})
+	if err != nil {
+		t.Fatalf("complete self-dispatch must land: %v", err)
+	}
+	if task == nil || task.Status != "pending" {
+		t.Fatalf("expected pending task, got %+v", task)
+	}
+}
 
 // On a typed-ticket project (niwa is seeded on) an incomplete dispatch is
 // refused, and the error names exactly the missing field(s).

@@ -88,15 +88,81 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 }
 
 // TypedTicket carries the V-lifecycle dispatch-time fields. Zero value = no
-// ticket recorded (free-form dispatch); the DB layer persists it verbatim and
-// never enforces — enforcement is the handler's job, gated per project.
+// ticket recorded (free-form dispatch). The DB layer persists it verbatim; it
+// also ENFORCES completeness for projects that opt in (require_typed_ticket) —
+// see DispatchTask. Enforcement lives here, at the single creation choke, so no
+// caller path (dispatch_task, batch, HTTP API, cron, inbound-signal webhook,
+// agent self-dispatch/followup) can create a bare ticket on an enforced project.
 type TypedTicket struct {
 	Goal               string // one-line intent
 	AcceptanceCriteria string // json array of testable items ("" normalised to "[]")
 	Dod                string // definition of done
 }
 
+// hasAcceptanceItems reports whether raw is a JSON array carrying ≥1 non-blank
+// item. An empty string, non-array JSON, or an array of only-blank strings all
+// count as "no acceptance criteria".
+func hasAcceptanceItems(raw string) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false
+	}
+	var items []string
+	if err := json.Unmarshal([]byte(raw), &items); err != nil {
+		return false
+	}
+	for _, it := range items {
+		if strings.TrimSpace(it) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// Missing returns which of goal / acceptance_criteria / dod are absent from the
+// ticket, in dispatch order. Empty result = a complete typed ticket. This is the
+// single source of truth for "what makes a ticket bare" — every enforcement site
+// funnels through it, so the definition cannot drift across paths.
+func (t TypedTicket) Missing() []string {
+	var missing []string
+	if strings.TrimSpace(t.Goal) == "" {
+		missing = append(missing, "goal")
+	}
+	if !hasAcceptanceItems(t.AcceptanceCriteria) {
+		missing = append(missing, "acceptance_criteria")
+	}
+	if strings.TrimSpace(t.Dod) == "" {
+		missing = append(missing, "dod")
+	}
+	return missing
+}
+
+// TypedTicketError is returned by DispatchTask when an enforced project receives
+// a dispatch missing one or more required typed-ticket fields. Callers surface it
+// as a refusal (a batch skips the item and reports it; a single dispatch returns
+// the message). errors.As unwraps it so a handler can format field-precisely.
+type TypedTicketError struct {
+	Project string
+	Missing []string
+}
+
+func (e *TypedTicketError) Error() string {
+	return fmt.Sprintf("typed ticket required for project '%s': missing [%s]. "+
+		"Dispatch with goal (intent), acceptance_criteria (JSON array of individually testable items) and dod (definition of done).",
+		e.Project, strings.Join(e.Missing, ", "))
+}
+
 func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket) (*models.Task, error) {
+	// Single typed-ticket guard. Every creation path funnels through DispatchTask,
+	// so enforcing here (before any write or side-effect) makes a bare ticket
+	// impossible on an enforced project — no per-path check to drift or bypass.
+	// Checked on the RAW ticket, before acceptance_criteria is normalised to "[]".
+	if d.ProjectRequiresTypedTicket(project) {
+		if missing := ticket.Missing(); len(missing) > 0 {
+			return nil, &TypedTicketError{Project: project, Missing: missing}
+		}
+	}
+
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	if priority == "" {
 		priority = "P2"

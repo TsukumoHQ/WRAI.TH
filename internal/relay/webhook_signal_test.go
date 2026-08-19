@@ -142,6 +142,45 @@ func TestSignalWebhookRejections(t *testing.T) {
 	}
 }
 
+// On a typed-ticket project a signal can't supply goal/AC/dod, so the single
+// guard in db.DispatchTask refuses it (bare tickets impossible on every path).
+// That refusal is PERMANENT — the handler must return 422 and KEEP the delivery
+// marker so an at-least-once redelivery dedupes to a no-op instead of spinning a
+// poison-message retry loop (contrast the transient/quota path, which releases).
+func TestSignalWebhookTypedTicketRefusedPermanently(t *testing.T) {
+	t.Setenv(RelaySignalWebhookSecretEnv, "s")
+	r := testRelay(t)
+	r.DB.SetSetting("signal_source:ci", `{"profile":"dev","priority":"P1"}`)
+
+	body := `{"title":"CI failed on niwa","description":"no typed fields"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/webhooks/signal?project=niwa", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Signal-Source", "ci")
+	req.Header.Set("X-Signal-Delivery", "niwa-d1")
+	req.Header.Set("X-Signal-Signature-256", hmacSig("s", body))
+	w := httptest.NewRecorder()
+	r.ServeAPI(w, req)
+	if w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status = %d, want 422; body=%s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "typed ticket required") {
+		t.Errorf("body should name the typed-ticket refusal, got %s", w.Body.String())
+	}
+
+	// Redelivery of the SAME delivery id must dedupe to a no-op (marker kept),
+	// never retry into a new create attempt — proving no poison loop.
+	req2 := httptest.NewRequest(http.MethodPost, "/api/webhooks/signal?project=niwa", strings.NewReader(body))
+	req2.Header.Set("Content-Type", "application/json")
+	req2.Header.Set("X-Signal-Source", "ci")
+	req2.Header.Set("X-Signal-Delivery", "niwa-d1")
+	req2.Header.Set("X-Signal-Signature-256", hmacSig("s", body))
+	w2 := httptest.NewRecorder()
+	r.ServeAPI(w2, req2)
+	if w2.Code != http.StatusOK || decodeJSON(t, w2)["duplicate"] != true {
+		t.Errorf("redelivery should dedupe (200 duplicate:true), got %d %s", w2.Code, w2.Body.String())
+	}
+}
+
 // A signed source is quota-gated: past the project task quota it is rejected
 // with 429, and the rejected delivery leaves NO dedup row (retryable later).
 func TestSignalWebhookQuotaExceeded(t *testing.T) {
