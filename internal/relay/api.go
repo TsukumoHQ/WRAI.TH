@@ -832,7 +832,7 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 
 	replyTo := optionalString(body.ReplyTo)
 
-	msg, err := r.DB.InsertMessageWithDeliveries(body.Project, "user", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To})
+	msg, err := r.DB.InsertMessageWithDeliveries(body.Project, "user", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To}, "")
 	if err != nil {
 		http.Error(w, `{"error":"failed to send response"}`, http.StatusInternalServerError)
 		return

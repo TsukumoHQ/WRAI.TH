@@ -29,6 +29,17 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	ttlSeconds := req.GetInt("ttl_seconds", 14400)
 	targetProject := NormalizeProject(req.GetString("target_project", ""))
 
+	// Comms-discipline action tag (DEC-relay-comms-discipline-1). Optional: ""
+	// lets the DB derive it from (type, reply_to). 'none' routes no-wake.
+	actionRequired := req.GetString("action_required", "")
+	if actionRequired != "" {
+		switch actionRequired {
+		case "ask", "do", "decide", "none":
+		default:
+			return validationError(CodeInvalidArgument, "action_required must be one of ask|do|decide|none"), nil
+		}
+	}
+
 	// A message to a project nobody ever created is a black hole: the row
 	// is written (messages have no project FK), no inbox ever reads it, and
 	// the sender walks away believing it was delivered. Fail loud with the
@@ -137,7 +148,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			}
 		}
 
-		msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients)
+		msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired)
 		if err != nil {
 			return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 		}
@@ -165,7 +176,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// Resolve fan-out recipients first, then insert message + deliveries atomically
 	// so a message can never be persisted without its deliveries (silent non-delivery).
 	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
-	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients)
+	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 	}

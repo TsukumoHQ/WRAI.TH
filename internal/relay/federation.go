@@ -387,7 +387,7 @@ func (r *Relay) apiFederationInbound(w http.ResponseWriter, req *http.Request) {
 		replyTo = &s
 	}
 
-	msg, err := r.DB.InsertMessageWithDeliveries(project, fromLabel, to, msgType, subject(fm.Subject), fm.Content, string(metaBytes), priority, ttl, replyTo, nil, []string{to})
+	msg, err := r.DB.InsertMessageWithDeliveries(project, fromLabel, to, msgType, subject(fm.Subject), fm.Content, string(metaBytes), priority, ttl, replyTo, nil, []string{to}, "")
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "failed to deliver federated message", err)
 		return

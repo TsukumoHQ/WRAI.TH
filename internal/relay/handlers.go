@@ -368,7 +368,7 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 	// Insert the message in the DESTINATION project scope — this is what makes
 	// it visible in the recipient's get_inbox(project=dstProject) without any
 	// special routing in the read path.
-	msg, err := h.db.InsertMessageWithDeliveries(dstProject, from, to, msgType, subject, content, string(metaBytes), priority, ttlSeconds, replyTo, nil, []string{to})
+	msg, err := h.db.InsertMessageWithDeliveries(dstProject, from, to, msgType, subject, content, string(metaBytes), priority, ttlSeconds, replyTo, nil, []string{to}, "")
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send cross-project message: %v", err)), nil
 	}

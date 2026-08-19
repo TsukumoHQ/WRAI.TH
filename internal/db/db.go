@@ -329,6 +329,15 @@ func migrate(conn *sql.DB) error {
 		"priority":        "TEXT NOT NULL DEFAULT 'P2'",
 		"ttl_seconds":     "INTEGER NOT NULL DEFAULT 14400",
 		"expired_at":      "TEXT",
+		// --- Comms-discipline (DEC-relay-comms-discipline-1) — the sender's
+		// declared action intent {ask|do|decide|none}. Derived server-side at
+		// insert from (type, reply_to) when the caller omits it. 'none' routes a
+		// message no-wake (still peekable in get_inbox, excluded from the wake
+		// COUNT). Additive + nullable: an old row / older client reads NULL and,
+		// per the wake predicate's COALESCE(...,'do'), keeps WAKING — no fleet
+		// break. A guard clause makes 'none' unable to suppress a
+		// P0/question/task/blocked wake even if mis-tagged.
+		"action_required": "TEXT",
 	})
 
 	ensureColumns(conn, "conversations", map[string]string{

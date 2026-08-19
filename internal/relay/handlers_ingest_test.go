@@ -207,7 +207,7 @@ func TestAPIUnreadCount(t *testing.T) {
 		t.Fatalf("expected 0 unread, got %v", resp["unread"])
 	}
 
-	if _, err := r.DB.InsertMessageWithDeliveries("proj", "alice", "bob", "note", "hi", "body", "", "normal", 0, nil, nil, []string{"bob"}); err != nil {
+	if _, err := r.DB.InsertMessageWithDeliveries("proj", "alice", "bob", "note", "hi", "body", "", "normal", 0, nil, nil, []string{"bob"}, ""); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	w = doAPI(r, "GET", "/inbox/unread-count?agent=bob&project=proj", "")

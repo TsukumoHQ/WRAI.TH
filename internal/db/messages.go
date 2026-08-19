@@ -3,6 +3,7 @@ package db
 import (
 	"agent-relay/internal/models"
 	"agent-relay/internal/normalize"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -30,12 +31,60 @@ func normalizeTTL(priority string, ttlSeconds int) int {
 	return ttlSeconds
 }
 
+// deriveActionRequired computes the effective comms-discipline action tag
+// (DEC-relay-comms-discipline-1) when the caller omits it. Wake-eligible:
+// task->do, question/user_question->ask. No-wake reports:
+// notification/status/fyi/ack/message/other->none. A response inherits: it
+// starts a thread (reply_to nil) => none, else it takes the parent message's
+// stored tag (an answer to a wake is itself wake-worthy); a legacy/untagged
+// parent => 'do' so an answer to an older thread still wakes (backward-safe).
+// The parent read uses the RO pool and never fails the insert.
+func (d *DB) deriveActionRequired(msgType string, replyTo *string, project string) string {
+	switch msgType {
+	case "task":
+		return "do"
+	case "question", "user_question":
+		return "ask"
+	case "response":
+		if replyTo == nil || *replyTo == "" {
+			return "none"
+		}
+		var parent sql.NullString
+		_ = d.ro().QueryRow(
+			"SELECT action_required FROM messages WHERE id = ? AND project = ?",
+			*replyTo, project,
+		).Scan(&parent)
+		if parent.Valid && parent.String != "" {
+			return parent.String
+		}
+		return "do"
+	case "notification", "status", "fyi", "ack", "message":
+		// The named report/no-action types → no-wake.
+		return "none"
+	default:
+		// An UNKNOWN/unlisted type is ambiguous — default it to WAKE, never
+		// silently suppress (the SSOT-must-not-go-silent thesis). Only the named
+		// report types above route no-wake; a new/odd type errs toward waking.
+		return "do"
+	}
+}
+
+// effectiveActionRequired returns the caller-declared tag if set, else the
+// derived one. A declared tag is validated by the handler; this layer trusts it.
+func (d *DB) effectiveActionRequired(declared, msgType string, replyTo *string, project string) string {
+	if declared != "" {
+		return declared
+	}
+	return d.deriveActionRequired(msgType, replyTo, project)
+}
+
 func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string) (*models.Message, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {
 		priority = "P2"
 	}
 	ttlSeconds = normalizeTTL(priority, ttlSeconds)
+	actionRequired := d.deriveActionRequired(msgType, replyTo, project)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -51,11 +100,12 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 		Project:        project,
 		Priority:       priority,
 		TTLSeconds:     ttlSeconds,
+		ActionRequired: &actionRequired,
 	}
 
 	_, err := d.conn.Exec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, actionRequired,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
@@ -69,12 +119,16 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 // silently never delivered. recipients is the already-resolved fan-out list
 // (one entry for a direct send, every active peer for a broadcast). Notifying
 // recipients and team-inbox bookkeeping stay outside — they are best-effort.
-func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string) (*models.Message, error) {
+// actionRequired is the caller-declared comms-discipline tag (ask|do|decide|
+// none); "" means derive it server-side from (type, reply_to). See
+// deriveActionRequired / DEC-relay-comms-discipline-1.
+func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string, actionRequired string) (*models.Message, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {
 		priority = "P2"
 	}
 	ttlSeconds = normalizeTTL(priority, ttlSeconds)
+	effTag := d.effectiveActionRequired(actionRequired, msgType, replyTo, project)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -90,6 +144,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 		Project:        project,
 		Priority:       priority,
 		TTLSeconds:     ttlSeconds,
+		ActionRequired: &effTag,
 	}
 
 	tx, err := d.conn.Begin()
@@ -99,8 +154,8 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	defer func() { _ = tx.Rollback() }() // no-op once committed
 
 	if _, err := tx.Exec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag,
 	); err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
@@ -156,6 +211,16 @@ func (d *DB) UnreadCountForAgent(project, agentName string) (int, error) {
 		// is the wake signal, deliberately narrower than the get_inbox unread view
 		// (queued+surfaced), and is what stops a pile of long-surfaced broadcasts
 		// from waking the whole fleet forever (WRAITH-2).
+		// Comms-discipline wake predicate (DEC-relay-comms-discipline-1),
+		// guard-FIRST: a delivery counts toward the wake signal iff it is P0, OR an
+		// ask/dispatch type (question/user_question/task always wake), OR its
+		// effective action tag is not 'none'. The guard clauses sit BEFORE the tag
+		// check, so a 'none' tag can NEVER suppress a P0/question/task wake even if
+		// mis-tagged. COALESCE(action_required,'do') means a legacy/older-client row
+		// with NULL tag still WAKES — additive, no fleet break. A deliberate
+		// blocker-escalation is a question or an explicitly-tagged send (Ruling-3:
+		// passively listing a blocker is not escalating), so it is already covered
+		// by these clauses — no fragile 'blocked type' special-case needed.
 		err := d.ro().QueryRow(`
 			SELECT COUNT(*)
 			FROM deliveries d
@@ -164,6 +229,11 @@ func (d *DB) UnreadCountForAgent(project, agentName string) (int, error) {
 			  AND d.state = 'queued'
 			  AND m.expired_at IS NULL
 			  AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
+			  AND (
+			        m.priority = 'P0'
+			     OR m.type IN ('question','user_question','task')
+			     OR COALESCE(m.action_required, 'do') != 'none'
+			  )
 		`, project, agentName).Scan(&n)
 		if err != nil {
 			return 0, fmt.Errorf("unread count for agent: %w", err)

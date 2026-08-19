@@ -37,7 +37,7 @@ func TestInsertMessageWithDeliveries_Atomic(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	msg, err := d.InsertMessageWithDeliveries("p1", "alice", "bob", "notification", "hi", "body", "{}", "P2", 3600, nil, nil, []string{"bob"})
+	msg, err := d.InsertMessageWithDeliveries("p1", "alice", "bob", "notification", "hi", "body", "{}", "P2", 3600, nil, nil, []string{"bob"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}

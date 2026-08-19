@@ -63,6 +63,10 @@ func sendMessageTool() mcp.Tool {
 		),
 		mcp.WithNumber("ttl_seconds", mcp.Description("Seconds before expiry (default 14400 = 4h, 0 = never). Expired messages leave the inbox.")),
 		mcp.WithString("target_project", mcp.Description("Cross-project DM: deliver to this agent name in target_project. Both sender and recipient must be is_executive. Message lives in the target project; metadata records the source.")),
+		mcp.WithString("action_required",
+			mcp.Description("Does this need the recipient to act? 'none' routes it no-wake (still in their inbox, never wakes a busy agent) — use it for FYIs, receipts, status, and reports. 'ask'/'do'/'decide' may wake per priority. Omit to let the relay derive it from type (question→ask, task→do, notification/response→none). A question or blocker is never suppressed by 'none'."),
+			mcp.Enum("ask", "do", "decide", "none"),
+		),
 	)
 }
 

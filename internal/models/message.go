@@ -19,6 +19,12 @@ type Message struct {
 	ExpiredAt      *string `json:"expired_at,omitempty"`
 	DeliveryID     *string `json:"delivery_id,omitempty"`
 	DeliveryState  *string `json:"delivery_state,omitempty"`
+	// ActionRequired is the comms-discipline action tag {ask|do|decide|none}
+	// (DEC-relay-comms-discipline-1). Set from the caller or derived server-side
+	// at insert. 'none' = no-wake. Populated only where a query SELECTs it
+	// explicitly (the wake predicate reads it in a WHERE, not a scan), so it is
+	// nil on the existing inbox reads — additive, no scan-lockstep churn.
+	ActionRequired *string `json:"action_required,omitempty"`
 }
 
 // DeliveryStatusRow is one row of the queryable ack state (T4): where a

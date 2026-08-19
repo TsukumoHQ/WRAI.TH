@@ -19,7 +19,7 @@ func expireMessageNow(t *testing.T, d *DB, msgID string) {
 // full metadata, and only UNREAD deliveries are journaled (an acked one is not).
 func TestDeadletterJournalsExpiredUnread(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "urgent", "body", "{}", "P0", 0, nil, nil, []string{"bot-a", "bot-b"})
+	m, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "urgent", "body", "{}", "P0", 0, nil, nil, []string{"bot-a", "bot-b"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestDeadletterJournalsExpiredUnread(t *testing.T) {
 // message_id,to_agent + INSERT OR IGNORE).
 func TestDeadletterIdempotent(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "s", "c", "{}", "P1", 0, nil, nil, []string{"bot-a"})
+	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "s", "c", "{}", "P1", 0, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestDeadletterIdempotent(t *testing.T) {
 // expired message + its deliveries — the whole point (a P0 must not vanish).
 func TestDeadletterSurvivesPurge(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "keeps", "c", "{}", "P0", 0, nil, nil, []string{"bot-a"})
+	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "keeps", "c", "{}", "P0", 0, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
