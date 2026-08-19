@@ -5,6 +5,7 @@ import (
 	"agent-relay/internal/normalize"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -249,36 +250,40 @@ func (d *DB) UnreadCountForAgent(project, agentName string) (int, error) {
 	return len(msgs), nil
 }
 
-// getInboxLegacy is the original inbox query for DBs without deliveries.
+// getInboxLegacy is the inbox query for DBs without deliveries. The recipient
+// set is a UNION ALL of three mutually-exclusive, index-driven branches — direct
+// DM, broadcast, and conversation — instead of one OR-of-everything predicate.
+// The old single OR defeated every index and SCANNED all project messages per
+// call (relay-perf R1); each branch here SEARCHes idx_messages_project_to
+// (project, to_agent) / idx_messages_conversation, so row selection is
+// O(agent-inbox), not O(project). Branches are disjoint (to_agent is one value;
+// conversation_id NULL vs NOT NULL), so UNION ALL is correct and skips a dedup
+// sort. Common filters (expiry/ttl/unread/priority/from/since) + the final
+// priority,created_at ordering wrap the union, preserving the original semantics.
 func (d *DB) getInboxLegacy(project, agentName string, unreadOnly bool, limit int, f InboxFilter) ([]models.Message, error) {
 	if limit <= 0 {
 		limit = 50
 	}
 
-	broadcastClause := "(m.to_agent = '*' AND m.from_agent != ?)"
-	if f.ExcludeBroadcasts {
-		broadcastClause = "0" // never match broadcasts
-	}
+	const cols = "m.id, m.from_agent, m.to_agent, m.reply_to, m.type, m.subject, m.content, m.metadata, m.created_at, m.read_at, m.conversation_id, m.project, m.task_id, m.priority, m.ttl_seconds, m.expired_at"
 
-	query := fmt.Sprintf(`
-		SELECT m.id, m.from_agent, m.to_agent, m.reply_to, m.type, m.subject, m.content, m.metadata, m.created_at, m.read_at, m.conversation_id, m.project, m.task_id, m.priority, m.ttl_seconds, m.expired_at
-		FROM messages m
-		WHERE m.project = ?
-			AND (
-				(m.conversation_id IS NULL AND (m.to_agent = ? OR %s))
-				OR (m.conversation_id IS NOT NULL AND m.conversation_id IN (
-					SELECT conversation_id FROM conversation_members
-					WHERE agent_name = ? AND left_at IS NULL
-				) AND m.from_agent != ?)
-			)
-			AND m.expired_at IS NULL
-			AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))
-	`, broadcastClause)
+	// Branch A — direct DM to this agent.
+	branches := []string{`SELECT ` + cols + ` FROM messages m WHERE m.project = ? AND m.conversation_id IS NULL AND m.to_agent = ?`}
 	args := []any{project, agentName}
+	// Branch B — broadcast (unless excluded).
 	if !f.ExcludeBroadcasts {
-		args = append(args, agentName)
+		branches = append(branches, `SELECT `+cols+` FROM messages m WHERE m.project = ? AND m.conversation_id IS NULL AND m.to_agent = '*' AND m.from_agent != ?`)
+		args = append(args, project, agentName)
 	}
-	args = append(args, agentName, agentName)
+	// Branch C — messages in a conversation this agent is an active member of.
+	branches = append(branches, `SELECT `+cols+` FROM messages m WHERE m.project = ? AND m.conversation_id IS NOT NULL AND m.conversation_id IN (
+			SELECT conversation_id FROM conversation_members WHERE agent_name = ? AND left_at IS NULL
+		) AND m.from_agent != ?`)
+	args = append(args, project, agentName, agentName)
+
+	query := "SELECT m.id, m.from_agent, m.to_agent, m.reply_to, m.type, m.subject, m.content, m.metadata, m.created_at, m.read_at, m.conversation_id, m.project, m.task_id, m.priority, m.ttl_seconds, m.expired_at FROM (\n" +
+		strings.Join(branches, "\nUNION ALL\n") +
+		"\n) m WHERE m.expired_at IS NULL AND (m.ttl_seconds = 0 OR m.priority = 'P0' OR datetime(m.created_at, '+' || m.ttl_seconds || ' seconds') > datetime('now'))"
 
 	if unreadOnly {
 		query += ` AND NOT EXISTS (
@@ -286,7 +291,6 @@ func (d *DB) getInboxLegacy(project, agentName string, unreadOnly bool, limit in
 		)`
 		args = append(args, agentName)
 	}
-
 	if f.MinPriority != "" {
 		query += " AND m.priority <= ?"
 		args = append(args, f.MinPriority)

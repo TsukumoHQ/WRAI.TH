@@ -474,9 +474,14 @@ func (d *DB) PurgeOldDeadletter(shortMaxAge, longMaxAge time.Duration) (int64, e
 
 // HasDeliveries returns true if the deliveries table has any rows.
 func (d *DB) HasDeliveries() bool {
-	var count int
-	_ = d.ro().QueryRow("SELECT COUNT(*) FROM deliveries LIMIT 1").Scan(&count)
-	return count > 0
+	// EXISTENCE, not COUNT: this is called on EVERY default get_inbox poll (the
+	// most-polled path). `SELECT COUNT(*)` visited every row of the whole
+	// deliveries table each time; `SELECT 1 ... LIMIT 1` stops at the first row —
+	// O(1) instead of O(all deliveries). Monotonic in practice (a DB that has
+	// deliveries never loses the table), so a hit on the first row is the norm.
+	var one int
+	_ = d.ro().QueryRow("SELECT 1 FROM deliveries LIMIT 1").Scan(&one)
+	return one == 1
 }
 
 // ResolveRecipients determines the actual recipient agents for a message.

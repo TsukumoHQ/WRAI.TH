@@ -355,6 +355,11 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_name ON agents(project, name)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_agents_cwd ON agents(cwd)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project)`)
+	// Hot path: the legacy get_inbox direct-DM / broadcast branches select by
+	// (project, to_agent) ordered by created_at. Without this the OR-query fell
+	// back to idx_messages_project and SCANNED every message in the project; the
+	// UNION-split branches SEARCH this index by agent instead (relay-perf R1).
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_project_to ON messages(project, to_agent, created_at)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_task ON messages(task_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_priority ON messages(priority)`)
