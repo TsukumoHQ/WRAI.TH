@@ -15,7 +15,7 @@ func TestReassignRecomputesProfileSlug(t *testing.T) {
 		t.Fatalf("register b: %v", err)
 	}
 
-	task, err := d.DispatchTask("default", pa, "cto", "t", "d", "P2", nil, nil, TypedTicket{})
+	task, err := d.DispatchTask("default", pa, "cto", "t", "d", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestReassignToNoProfileKeepsSlug(t *testing.T) {
 	if _, _, err := d.RegisterAgent("default", "agent-c", "r", "", nil, nil, false, nil, "[]", 0, RegisterOptions{}); err != nil {
 		t.Fatalf("register c: %v", err)
 	}
-	task, err := d.DispatchTask("default", pa, "cto", "t", "d", "P2", nil, nil, TypedTicket{})
+	task, err := d.DispatchTask("default", pa, "cto", "t", "d", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestBackfillTaskProfileSlugsIdempotent(t *testing.T) {
 	if _, _, err := d.RegisterAgent("default", "agent-b", "r", "", nil, &pb, false, nil, "[]", 0, RegisterOptions{ProfileSlugSet: true}); err != nil {
 		t.Fatalf("register b: %v", err)
 	}
-	task, err := d.DispatchTask("default", pa, "cto", "t", "d", "P2", nil, nil, TypedTicket{})
+	task, err := d.DispatchTask("default", pa, "cto", "t", "d", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

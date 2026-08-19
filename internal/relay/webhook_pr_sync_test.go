@@ -55,7 +55,7 @@ func TestMagicWordRegex(t *testing.T) {
 // seedLinkedTask dispatches a task and links a PR to it, returning the id.
 func seedLinkedTask(t *testing.T, r *Relay, number int, repo string) string {
 	t.Helper()
-	task, err := r.DB.DispatchTask("p1", "dev", "boss", "pr work", "", "P2", nil, nil, db.TypedTicket{})
+	task, err := r.DB.DispatchTask("p1", "dev", "boss", "pr work", "", "P2", nil, nil, db.TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestSyncNoResurrectTerminal(t *testing.T) {
 // Human-opened PR with the magic-word auto-links + syncs even with no prior link.
 func TestSyncMagicWordAutoLinks(t *testing.T) {
 	r := testRelay(t)
-	task, err := r.DB.DispatchTask("p1", "dev", "boss", "human pr", "", "P2", nil, nil, db.TypedTicket{})
+	task, err := r.DB.DispatchTask("p1", "dev", "boss", "human pr", "", "P2", nil, nil, db.TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -152,7 +152,7 @@ func TestSyncMagicWordAutoLinks(t *testing.T) {
 // An unlinked PR (no stored link, no magic-word) is ignored — no false moves.
 func TestSyncUnlinkedIgnored(t *testing.T) {
 	r := testRelay(t)
-	task, _ := r.DB.DispatchTask("p1", "dev", "boss", "unrelated", "", "P2", nil, nil, db.TypedTicket{})
+	task, _ := r.DB.DispatchTask("p1", "dev", "boss", "unrelated", "", "P2", nil, nil, db.TypedTicket{}, false)
 	r.syncPullRequestToTask("p1", prPayload("closed", 500, "o/repo", true, "no link"))
 	if s := statusOf(t, r, task.ID); s != "pending" {
 		t.Fatalf("unlinked PR moved an unrelated task: %s", s)

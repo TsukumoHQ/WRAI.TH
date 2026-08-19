@@ -130,7 +130,7 @@ func TestComputeDigestStats(t *testing.T) {
 
 	// Register a profile-less set of tasks across statuses.
 	mk := func(status string) {
-		task, err := d.DispatchTask("default", "p1", "cto", "task "+status, "", "P2", nil, nil, TypedTicket{})
+		task, err := d.DispatchTask("default", "p1", "cto", "task "+status, "", "P2", nil, nil, TypedTicket{}, false)
 		if err != nil {
 			t.Fatalf("dispatch: %v", err)
 		}

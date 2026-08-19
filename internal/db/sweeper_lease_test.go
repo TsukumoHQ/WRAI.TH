@@ -30,14 +30,14 @@ func TestMarkStaleAgentsInactive_LeaseHolderGuard(t *testing.T) {
 	future := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
 	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
 
-	t1, err := d.DispatchTask("p1", "dev", "cto", "live-lease", "", "P2", nil, nil, TypedTicket{})
+	t1, err := d.DispatchTask("p1", "dev", "cto", "live-lease", "", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch t1: %v", err)
 	}
 	if _, err := d.conn.Exec("UPDATE tasks SET lease_holder = ?, lease_expires_at = ? WHERE id = ?", "leased-live", future, t1.ID); err != nil {
 		t.Fatalf("set live lease: %v", err)
 	}
-	t2, err := d.DispatchTask("p1", "dev", "cto", "expired-lease", "", "P2", nil, nil, TypedTicket{})
+	t2, err := d.DispatchTask("p1", "dev", "cto", "expired-lease", "", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch t2: %v", err)
 	}

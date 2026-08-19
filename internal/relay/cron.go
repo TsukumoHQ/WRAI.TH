@@ -269,7 +269,7 @@ func (r *Relay) fireCronSchedule(sc CronSchedule, minuteKey string) {
 		log.Printf("cron: dedup marker for %q did not persist; skipping fire to avoid a duplicate ticket", sc.ID)
 		return
 	}
-	if _, _, err := r.Handlers.dispatchCore(project, cronDispatchedBy, sc.Profile, sc.Title, sc.Description, priority, nil, nil, ticket); err != nil {
+	if _, _, err := r.Handlers.dispatchCore(project, cronDispatchedBy, sc.Profile, sc.Title, sc.Description, priority, nil, nil, ticket, false); err != nil {
 		log.Printf("cron: dispatch schedule %q: %v", sc.ID, err)
 		return
 	}

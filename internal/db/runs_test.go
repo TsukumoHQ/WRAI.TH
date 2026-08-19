@@ -18,7 +18,7 @@ func runErrCode(err error) string {
 // column-list ↔ scanTask lockstep and default to nil on a fresh task.
 func TestRunZoneRoundTrip(t *testing.T) {
 	d := testDB(t)
-	parent, err := d.DispatchTask("proj", "lead", "cto", "factory run", "", "P1", nil, nil, TypedTicket{})
+	parent, err := d.DispatchTask("proj", "lead", "cto", "factory run", "", "P1", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestRunZoneRoundTrip(t *testing.T) {
 // versa.
 func TestRunZoneCoalesce(t *testing.T) {
 	d := testDB(t)
-	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{})
+	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
 	branch := "run/keepme"
 	if _, err := d.SetTaskRun(p.ID, "proj", &branch, strptr(RunStateOpen)); err != nil {
 		t.Fatalf("open: %v", err)
@@ -73,7 +73,7 @@ func TestRunStateTransitionEnforced(t *testing.T) {
 	d := testDB(t)
 
 	// First stamp to a non-open state is rejected (must open first).
-	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{})
+	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
 	if _, err := d.SetTaskRun(p.ID, "proj", nil, strptr(RunStateGating)); runErrCode(err) != CodeRunStateInvalid {
 		t.Fatalf("first stamp to gating must be RUN_STATE_INVALID, got %v", err)
 	}
@@ -94,7 +94,7 @@ func TestRunStateTransitionEnforced(t *testing.T) {
 	}
 
 	// A skipping edge (open→merged) is rejected.
-	p2, _ := d.DispatchTask("proj", "lead", "cto", "run2", "", "P1", nil, nil, TypedTicket{})
+	p2, _ := d.DispatchTask("proj", "lead", "cto", "run2", "", "P1", nil, nil, TypedTicket{}, false)
 	_, _ = d.SetTaskRun(p2.ID, "proj", nil, strptr(RunStateOpen))
 	if _, err := d.SetTaskRun(p2.ID, "proj", nil, strptr(RunStateMerged)); runErrCode(err) != CodeRunStateInvalid {
 		t.Fatalf("open→merged must be RUN_STATE_INVALID, got %v", err)
@@ -104,7 +104,7 @@ func TestRunStateTransitionEnforced(t *testing.T) {
 // amputation path: blocked→amputated→gating lets the green subset proceed.
 func TestRunAmputatePath(t *testing.T) {
 	d := testDB(t)
-	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{})
+	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
 	for _, st := range []string{RunStateOpen, RunStateBlocked, RunStateAmputated, RunStateGating, RunStateMerging, RunStateMerged} {
 		if _, err := d.SetTaskRun(p.ID, "proj", nil, strptr(st)); err != nil {
 			t.Fatalf("amputate path step %s: %v", st, err)
@@ -123,7 +123,7 @@ func TestSetRunNotFound(t *testing.T) {
 // slices are.
 func TestRunContainerNotClaimable(t *testing.T) {
 	d := testDB(t)
-	parent, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{})
+	parent, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
 	if _, err := d.SetTaskRun(parent.ID, "proj", nil, strptr(RunStateOpen)); err != nil {
 		t.Fatalf("open run: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestRunContainerNotClaimable(t *testing.T) {
 	}
 
 	// A child slice (no run_state) claims normally.
-	slice, _ := d.DispatchTask("proj", "backend", "cto", "slice", "", "P1", &parent.ID, nil, TypedTicket{})
+	slice, _ := d.DispatchTask("proj", "backend", "cto", "slice", "", "P1", &parent.ID, nil, TypedTicket{}, false)
 	if _, err := d.ClaimTask(slice.ID, "worker", "proj"); err != nil {
 		t.Fatalf("child slice must be claimable, got %v", err)
 	}
@@ -145,10 +145,10 @@ func TestRunContainerNotClaimable(t *testing.T) {
 // GetRun returns the parent (with run zone) plus its subtask chain.
 func TestGetRun(t *testing.T) {
 	d := testDB(t)
-	parent, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{})
+	parent, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
 	_, _ = d.SetTaskRun(parent.ID, "proj", strptr("run/x"), strptr(RunStateOpen))
-	_, _ = d.DispatchTask("proj", "backend", "cto", "slice-a", "", "P1", &parent.ID, nil, TypedTicket{})
-	_, _ = d.DispatchTask("proj", "frontend", "cto", "slice-b", "", "P1", &parent.ID, nil, TypedTicket{})
+	_, _ = d.DispatchTask("proj", "backend", "cto", "slice-a", "", "P1", &parent.ID, nil, TypedTicket{}, false)
+	_, _ = d.DispatchTask("proj", "frontend", "cto", "slice-b", "", "P1", &parent.ID, nil, TypedTicket{}, false)
 
 	run, err := d.GetRun(parent.ID, "proj")
 	if err != nil || run == nil {

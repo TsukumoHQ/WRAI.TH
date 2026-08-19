@@ -16,7 +16,7 @@ func auditEntry(project, actor, action, resource, summary string) models.AuditEn
 func TestReassignTask(t *testing.T) {
 	d := testDB(t)
 
-	task, _ := d.DispatchTask("p1", "dev", "cto", "task", "", "P2", nil, nil, TypedTicket{})
+	task, _ := d.DispatchTask("p1", "dev", "cto", "task", "", "P2", nil, nil, TypedTicket{}, false)
 	if _, err := d.ClaimTask(task.ID, "bot-a", "p1"); err != nil {
 		t.Fatalf("claim: %v", err)
 	}

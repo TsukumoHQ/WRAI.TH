@@ -97,6 +97,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 
 		{server.ServerTool{Tool: dispatchTaskTool(), Handler: h.HandleDispatchTask}, "tasks"},
 		{server.ServerTool{Tool: claimTaskTool(), Handler: h.HandleClaimTask}, "tasks"},
+		{server.ServerTool{Tool: promoteTaskTool(), Handler: h.HandlePromoteTask}, "tasks"},
 		{server.ServerTool{Tool: startTaskTool(), Handler: h.HandleStartTask}, "tasks"},
 		{server.ServerTool{Tool: reviewTaskTool(), Handler: h.HandleReviewTask}, "tasks"},
 		{server.ServerTool{Tool: commentTool(), Handler: h.HandleComment}, "tasks"},

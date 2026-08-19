@@ -8,7 +8,7 @@ import "testing"
 func TestDeleteTask_CleansProgressNotes_KeepsSubtasks(t *testing.T) {
 	d := testDB(t)
 
-	parent, err := d.DispatchTask("p1", "dev", "cto", "parent", "", "P2", nil, nil, TypedTicket{})
+	parent, err := d.DispatchTask("p1", "dev", "cto", "parent", "", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch parent: %v", err)
 	}
@@ -18,7 +18,7 @@ func TestDeleteTask_CleansProgressNotes_KeepsSubtasks(t *testing.T) {
 	if err := d.AddProgressNote(parent.ID, "p1", "cto", "note2"); err != nil {
 		t.Fatalf("note2: %v", err)
 	}
-	sub, err := d.DispatchTask("p1", "dev", "cto", "child", "", "P2", &parent.ID, nil, TypedTicket{})
+	sub, err := d.DispatchTask("p1", "dev", "cto", "child", "", "P2", &parent.ID, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch subtask: %v", err)
 	}

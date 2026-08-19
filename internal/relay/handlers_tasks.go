@@ -114,7 +114,8 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	task, autoBoard, err := h.dispatchCore(project, agent, profile, title, description, priority, parentTaskID, boardID, ticket)
+	backlog := req.GetBool("backlog", false)
+	task, autoBoard, err := h.dispatchCore(project, agent, profile, title, description, priority, parentTaskID, boardID, ticket, backlog)
 	if err != nil {
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {
@@ -156,7 +157,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 // emits the task.dispatched event that drives the normal dispatch pipeline.
 // Callers own quota/ticket-validation/dedup-warning; this is the create+announce
 // core so a signal-created task is indistinguishable from a hand-dispatched one.
-func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, description, priority string, parentTaskID, boardID *string, ticket db.TypedTicket) (*models.Task, *models.Board, error) {
+func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, description, priority string, parentTaskID, boardID *string, ticket db.TypedTicket, backlog bool) (*models.Task, *models.Board, error) {
 	// Typed-ticket guard, hoisted AHEAD of the profile/board auto-create below.
 	// db.DispatchTask is the authoritative choke and would refuse a bare ticket on
 	// an enforced project regardless — but by then this function may already have
@@ -193,17 +194,34 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 		}
 	}
 
-	task, err := h.db.DispatchTask(project, profile, dispatchedBy, title, description, priority, parentTaskID, boardID, ticket)
+	task, err := h.db.DispatchTask(project, profile, dispatchedBy, title, description, priority, parentTaskID, boardID, ticket, backlog)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	// Push notification for P0/P1 tasks.
+	// A backlog task is groomed-but-not-claimable: emit only the visual event so
+	// the board shows it, and SKIP every claim-signal (P0/P1 push, the per-agent
+	// inbox delivery, and the task.dispatched event that drives auto-claim). It
+	// becomes claimable + surfaced only when promote_task lifts it to pending.
+	if backlog {
+		h.events.Emit(MCPEvent{Type: "task", Action: "backlog", Agent: dispatchedBy, Project: project, Target: profile, Label: title})
+		return task, autoBoard, nil
+	}
+
+	h.announceClaimable(project, dispatchedBy, profile, title, description, priority, task)
+	return task, autoBoard, nil
+}
+
+// announceClaimable fires the claim signals for a now-claimable task: the P0/P1
+// push, the durable per-agent inbox delivery (niwa's idle-wake poll counts queued
+// deliveries), and the task.dispatched event that drives the normal auto-claim
+// pipeline. Shared by dispatchCore (a pending dispatch) and promote_task (a
+// backlog task lifted to pending) so a promoted task is surfaced exactly like a
+// freshly-dispatched one.
+func (h *Handlers) announceClaimable(project, dispatchedBy, profile, title, description, priority string, task *models.Task) {
 	if priority == "P0" || priority == "P1" {
 		h.registry.NotifyProfile(project, profile, dispatchedBy, fmt.Sprintf("[%s] %s", priority, title), task.ID)
 	}
-
-	// Auto-notification: inbox message to every agent running this profile.
 	agents, _ := h.db.GetAgentsByProfile(project, profile)
 	for _, a := range agents {
 		if a.Name == dispatchedBy {
@@ -214,17 +232,10 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 		if description != "" && len(description) <= 200 {
 			content += "\n\n" + description
 		}
-		// InsertMessageWithDeliveries (not InsertMessage) so a durable 'queued'
-		// delivery row lands: the inbox is delivery-based, and UnreadCountForAgent
-		// counts queued deliveries — that count is niwa's idle-wake poll signal
-		// (bug 6509668c).
 		_, _ = h.db.InsertMessageWithDeliveries(project, dispatchedBy, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, task.ID), "P2", 14400, nil, nil, []string{a.Name}, "")
 	}
-
 	h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: dispatchedBy, Project: project, Target: profile, Label: title})
 	emitTaskEvent(h.events, "task.dispatched", "dispatch", project, task)
-
-	return task, autoBoard, nil
 }
 
 func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -247,6 +258,35 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
 	pushStatusAsync(h.getConnector(), task, "accepted", nil)
 	return h.resultJSONTracked(project, agent, "claim_task", task)
+}
+
+// HandlePromoteTask lifts a groomed 'backlog' task to 'pending' (claimable) and
+// announces it exactly like a fresh dispatch, so an agent picks it up only once a
+// human/lead has promoted it. Lifecycle-enforced by db.PromoteTask (only
+// backlog→pending); any other origin returns an invalid-transition error.
+func (h *Handlers) HandlePromoteTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	if taskID == "" {
+		return toolResultError("task_id is required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+
+	task, changed, err := h.db.PromoteTask(taskID, agent, project)
+	if err != nil {
+		return taskOpError(err, "failed to promote task: %v", err), nil
+	}
+	// Announce only on a real backlog→pending promotion. A no-op promote of an
+	// already-pending task must NOT re-fire the fleet wake / task.dispatched / P0
+	// push (idempotency).
+	if changed {
+		h.announceClaimable(project, agent, task.ProfileSlug, task.Title, task.Description, task.Priority, task)
+	}
+	return h.resultJSONTracked(project, agent, "promote_task", task)
 }
 
 // HandleReclaimTask takes over a DEAD holder's task — the primitive niwa's
@@ -979,7 +1019,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 			priority = "P2"
 		}
 		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod}
-		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket)
+		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, false)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", item.Title, err))
 			continue

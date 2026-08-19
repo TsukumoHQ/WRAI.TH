@@ -31,7 +31,7 @@ func registerHeldTask(t *testing.T, d *DB, project, agent string) string {
 	if _, _, err := d.RegisterAgent(project, agent, "", "", nil, nil, false, nil, "", 0, RegisterOptions{}); err != nil {
 		t.Fatalf("register %s: %v", agent, err)
 	}
-	task, err := d.DispatchTask(project, "prof", "lead", "held work", "", "P2", nil, nil, TypedTicket{})
+	task, err := d.DispatchTask(project, "prof", "lead", "held work", "", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

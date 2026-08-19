@@ -41,7 +41,7 @@ func TestDispatchTaskEnforcesTypedTicketAtChoke(t *testing.T) {
 	d := testDB(t)
 
 	// bare on enforced project → refused, all three named, in order.
-	_, err := d.DispatchTask("niwa", "dev", "cto", "bare", "", "P2", nil, nil, TypedTicket{})
+	_, err := d.DispatchTask("niwa", "dev", "cto", "bare", "", "P2", nil, nil, TypedTicket{}, false)
 	var tte *TypedTicketError
 	if !errors.As(err, &tte) {
 		t.Fatalf("bare dispatch on enforced project must return *TypedTicketError, got %v", err)
@@ -55,14 +55,14 @@ func TestDispatchTaskEnforcesTypedTicketAtChoke(t *testing.T) {
 
 	// partial on enforced project → names only the absent field.
 	_, err = d.DispatchTask("niwa", "dev", "cto", "partial", "", "P2", nil, nil,
-		TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`})
+		TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`}, false)
 	if !errors.As(err, &tte) || strings.Join(tte.Missing, ",") != "dod" {
 		t.Fatalf("partial dispatch should refuse missing [dod], got %v", err)
 	}
 
 	// complete on enforced project → dispatches.
 	task, err := d.DispatchTask("niwa", "dev", "cto", "complete", "", "P2", nil, nil,
-		TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"})
+		TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"}, false)
 	if err != nil {
 		t.Fatalf("complete ticket on enforced project must dispatch: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestDispatchTaskEnforcesTypedTicketAtChoke(t *testing.T) {
 
 	// bare on a free-form project → dispatches unchanged (retrocompat).
 	d.EnsureProject("free")
-	if _, err := d.DispatchTask("free", "dev", "cto", "bare-ok", "", "P2", nil, nil, TypedTicket{}); err != nil {
+	if _, err := d.DispatchTask("free", "dev", "cto", "bare-ok", "", "P2", nil, nil, TypedTicket{}, false); err != nil {
 		t.Fatalf("bare dispatch on free-form project must succeed: %v", err)
 	}
 }
@@ -88,7 +88,7 @@ func TestTypedTicketRoundTrip(t *testing.T) {
 		AcceptanceCriteria: `["refuses without goal","get_task renders the fields"]`,
 		Dod:                "go test ./... green",
 	}
-	task, err := d.DispatchTask("proj", "backend", "cto", "typed ticket", "", "P1", nil, nil, ticket)
+	task, err := d.DispatchTask("proj", "backend", "cto", "typed ticket", "", "P1", nil, nil, ticket, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestTypedTicketRoundTrip(t *testing.T) {
 func TestTypedTicketDefaultsWhenAbsent(t *testing.T) {
 	d := testDB(t)
 
-	task, err := d.DispatchTask("proj", "backend", "cto", "no ticket", "", "P2", nil, nil, TypedTicket{})
+	task, err := d.DispatchTask("proj", "backend", "cto", "no ticket", "", "P2", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

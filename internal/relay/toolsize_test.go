@@ -10,15 +10,16 @@ import (
 // fatter description pushes the total over the cap, trim descriptions or
 // raise the cap deliberately in the same PR.
 //
-// Raised 48000 -> 49152 -> 51200 -> 52224 -> 54272 -> 55296 (54 KiB) across the
-// WRAITH sprint, which added genuinely new SURFACE (not fat descriptions):
-// reclaim_task (T1), is_eligible (T2), T5 temporal params, delivery_status (T4),
-// deadletter (T6), identity_check (identity-failclosed), rank=mempalace
-// (MemPalace S2), link_pr (PR-link S1), set_run + get_run (changeset-per-run S1),
-// reconcile_pr (PR-link S3 poll convergence). Descriptions are trimmed to the
-// bone each time; the growth is real tools the fleet needs, so the cap moves
-// deliberately in-PR.
-const toolSchemaBudgetBytes = 55296
+// Raised 48000 -> 49152 -> 51200 -> 52224 -> 54272 -> 55296 -> 56320 (55 KiB)
+// across the WRAITH sprint, which added genuinely new SURFACE (not fat
+// descriptions): reclaim_task (T1), is_eligible (T2), T5 temporal params,
+// delivery_status (T4), deadletter (T6), identity_check (identity-failclosed),
+// rank=mempalace (MemPalace S2), link_pr (PR-link S1), set_run + get_run
+// (changeset-per-run S1), reconcile_pr (PR-link S3 poll convergence), promote_task
+// + dispatch_task backlog flag (native backlog status). Descriptions are trimmed
+// to the bone each time; the growth is real tools the fleet needs, so the cap
+// moves deliberately in-PR.
+const toolSchemaBudgetBytes = 56320
 
 // Discovery mode replaces the full list with two tools; their combined
 // schema must stay tiny or the mode loses its point.

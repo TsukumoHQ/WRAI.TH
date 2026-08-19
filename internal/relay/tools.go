@@ -460,6 +460,7 @@ func dispatchTaskTool() mcp.Tool {
 		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required for projects that enforce typed tickets (e.g. niwa); optional elsewhere.")),
 		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array string of individually testable items, e.g. '[\"builds green\",\"refuses without goal\"]'. The review gate verdicts per item. Required where typed tickets are enforced.")),
 		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done (the merge bar). Required where typed tickets are enforced.")),
+		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog' (groomed; promote_task lifts it to pending). Default false.")),
 	)
 }
 
@@ -467,6 +468,16 @@ func claimTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"claim_task",
 		mcp.WithDescription("Claim a pending task → 'accepted'."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+	)
+}
+
+func promoteTaskTool() mcp.Tool {
+	return mcp.NewTool(
+		"promote_task",
+		mcp.WithDescription("Promote a 'backlog' task → 'pending' (claimable), announced like a dispatch."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),

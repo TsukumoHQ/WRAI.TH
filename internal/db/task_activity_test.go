@@ -10,7 +10,7 @@ func TestLastActivityAt_BumpsOnActivity(t *testing.T) {
 	d := testDB(t)
 	const project = "p1"
 
-	task, err := d.DispatchTask(project, "", "dispatcher", "build me", "", "P1", nil, nil, TypedTicket{})
+	task, err := d.DispatchTask(project, "", "dispatcher", "build me", "", "P1", nil, nil, TypedTicket{}, false)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

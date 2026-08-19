@@ -161,8 +161,8 @@ func TestDiscoverSchemasValidJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		t.Fatalf("discover output not valid JSON: %v", err)
 	}
-	if len(parsed.Tools) != 21 {
-		t.Errorf("tasks tools = %d, want 21", len(parsed.Tools))
+	if len(parsed.Tools) != 22 {
+		t.Errorf("tasks tools = %d, want 22", len(parsed.Tools))
 	}
 	for _, tool := range parsed.Tools {
 		if tool.InputSchema["type"] != "object" {

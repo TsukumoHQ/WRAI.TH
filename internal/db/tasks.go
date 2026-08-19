@@ -52,7 +52,12 @@ func closeBlockedPeriod(existing, now string) string {
 // "done" and "cancelled" are reachable from any state (flexible cleanup)
 // "in-review" sits between in-progress and done (the agent's "PR up" signal).
 var validTransitions = map[string][]string{
-	"pending":     {"accepted", "in-progress", "done", "cancelled"},
+	// backlog = groomed but NOT yet claimable. It reaches only pending (promote)
+	// or cancelled — never accepted/in-progress directly, so a claim (→accepted)
+	// on a backlog task fails validation and the task cannot be picked up until
+	// promoted. pending can be sent back to backlog (de-groom).
+	"backlog":     {"pending", "cancelled"},
+	"pending":     {"accepted", "in-progress", "done", "cancelled", "backlog"},
 	"accepted":    {"in-progress", "done", "cancelled"},
 	"in-progress": {"in-review", "done", "blocked", "cancelled"},
 	"in-review":   {"in-progress", "done", "blocked", "cancelled"},
@@ -152,7 +157,7 @@ func (e *TypedTicketError) Error() string {
 		e.Project, strings.Join(e.Missing, ", "))
 }
 
-func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket) (*models.Task, error) {
+func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket, backlog bool) (*models.Task, error) {
 	// Single typed-ticket guard. Every creation path funnels through DispatchTask,
 	// so enforcing here (before any write or side-effect) makes a bare ticket
 	// impossible on an enforced project — no per-path check to drift or bypass.
@@ -172,6 +177,13 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		acceptanceCriteria = "[]"
 	}
 
+	// Groomed work can be born straight into 'backlog' (visible, not claimable)
+	// so grooming doesn't require a follow-up move; promote_task lifts it to pending.
+	status := "pending"
+	if backlog {
+		status = "backlog"
+	}
+
 	task := &models.Task{
 		ID:                 uuid.New().String(),
 		ProfileSlug:        profileSlug,
@@ -179,7 +191,7 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		Title:              title,
 		Description:        description,
 		Priority:           priority,
-		Status:             "pending",
+		Status:             status,
 		Project:            project,
 		DispatchedAt:       now,
 		ParentTaskID:       parentTaskID,
@@ -382,6 +394,34 @@ func (d *DB) ClaimTask(taskID, agentName, project string) (*models.Task, error) 
 	return d.transitionTask(taskID, agentName, project, "accepted", nil, nil)
 }
 
+// PromoteTask lifts a groomed 'backlog' task to 'pending' (claimable). It is
+// lifecycle-enforced: transitionTask only allows backlog→pending (or, harmlessly,
+// pending→pending as an idempotent no-op via the same edge), and refuses any
+// other origin with an invalid-transition error.
+// PromoteTask returns (task, changed, error): changed is true only when it
+// actually moved a backlog task to pending. Promoting an already-pending task is
+// a harmless no-op with changed=false so the caller does NOT re-announce (a
+// double-promote must not duplicate the fleet wake / task.dispatched / P0 push).
+func (d *DB) PromoteTask(taskID, agentName, project string) (*models.Task, bool, error) {
+	task, err := d.GetTask(taskID, project)
+	if err != nil {
+		return nil, false, err
+	}
+	if task == nil {
+		return nil, false, fmt.Errorf("task not found: %s", taskID)
+	}
+	// Already claimable — no-op (also avoids an invalid pending→pending transition;
+	// transitionTask has no same-status edge).
+	if task.Status == "pending" {
+		return task, false, nil
+	}
+	updated, err := d.transitionTask(taskID, agentName, project, "pending", nil, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	return updated, true, nil
+}
+
 func (d *DB) StartTask(taskID, agentName, project string) (*models.Task, error) {
 	if err := d.guardNotRunContainer(taskID, project); err != nil {
 		return nil, err
@@ -429,6 +469,10 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 			// so the caller parks instead of hot-looping on a bare-string error.
 			// This makes every double-claim loser get the typed code regardless of
 			// whether it read the pre- or post-commit state.
+			if newStatus == "accepted" && task.Status == "backlog" {
+				return nil, newTaskError(CodeTaskStateConflict,
+					"task %s is in backlog (groomed, not yet active); promote it to pending before claiming", taskID)
+			}
 			if newStatus == "accepted" && task.Status != "pending" {
 				return nil, newTaskError(CodeTaskStateConflict,
 					"task %s already claimed (status %q) before claim by %q could apply", taskID, task.Status, agentName)
@@ -455,6 +499,18 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	task.Status = newStatus
 	var res sql.Result
 	switch newStatus {
+	case "backlog":
+		// De-groom: a task sent to backlog is pre-active, so clear any claim/lease
+		// state exactly like pending. (A direct-to-backlog dispatch never has any.)
+		task.AssignedTo = nil
+		task.AcceptedAt = nil
+		task.StartedAt = nil
+		task.ClaimedBy = nil
+		task.ClaimedAt = nil
+		res, err = d.conn.Exec(
+			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, claimed_by = NULL, claimed_at = NULL, lease_holder = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL WHERE id = ? AND project = ? AND status = ?",
+			newStatus, taskID, project, oldStatus,
+		)
 	case "pending":
 		task.AssignedTo = nil
 		task.AcceptedAt = nil
