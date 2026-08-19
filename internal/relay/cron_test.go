@@ -108,6 +108,24 @@ func TestCronTickFiresAndIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestPersistFireMarker covers the dedup read-back gate: a normal write is
+// confirmed durable (true), but when the underlying write fails (here the DB is
+// closed to inject the failure SetSetting silently swallows) the read-back
+// returns false so fireCronSchedule skips the fire instead of risking a
+// duplicate on the next tick.
+func TestPersistFireMarker(t *testing.T) {
+	r := testRelay(t)
+	if !r.persistFireMarker("cron:lastfire:ok", "2026-08-19T09:30:00Z") {
+		t.Fatal("a normal marker write must confirm durable")
+	}
+	// Inject a write failure: a closed DB makes SetSetting's write a no-op (its
+	// error is swallowed) and GetSetting read nothing back.
+	_ = r.DB.Close()
+	if r.persistFireMarker("cron:lastfire:fail", "2026-08-19T09:30:00Z") {
+		t.Fatal("a non-durable marker write must report false so the fire is skipped")
+	}
+}
+
 // TestCronDisabledAndEmpty: a disabled schedule and an empty setting both fire
 // nothing.
 func TestCronDisabledAndEmpty(t *testing.T) {

@@ -228,6 +228,16 @@ func (r *Relay) runCronTick(now time.Time) {
 	}
 }
 
+// persistFireMarker writes the per-schedule dedup marker and confirms it is
+// durable by reading it back. SetSetting swallows its write error (projects.go),
+// so the read-back is the guarantee: a true result means the same-minute guard
+// will see the marker on the next tick, so the fire cannot be duplicated. A
+// false result (the write silently failed) tells the caller to skip the fire.
+func (r *Relay) persistFireMarker(key, minuteKey string) bool {
+	r.DB.SetSetting(key, minuteKey)
+	return r.DB.GetSetting(key) == minuteKey
+}
+
 // fireCronSchedule creates the typed ticket through the normal dispatch pipeline
 // and records the dedup marker. The marker is written FIRST, then read back and
 // CONFIRMED durable BEFORE the dispatch: SetSetting swallows its write error
@@ -253,9 +263,7 @@ func (r *Relay) fireCronSchedule(sc CronSchedule, minuteKey string) {
 	}
 	ticket := db.TypedTicket{Goal: sc.Goal, AcceptanceCriteria: ac, Dod: sc.Dod}
 
-	fireKey := cronLastFirePfx + sc.ID
-	r.DB.SetSetting(fireKey, minuteKey)
-	if r.DB.GetSetting(fireKey) != minuteKey {
+	if !r.persistFireMarker(cronLastFirePfx+sc.ID, minuteKey) {
 		// The dedup marker did not persist — firing now risks a duplicate on the
 		// next tick, so skip this occurrence instead.
 		log.Printf("cron: dedup marker for %q did not persist; skipping fire to avoid a duplicate ticket", sc.ID)
