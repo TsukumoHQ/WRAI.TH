@@ -229,9 +229,13 @@ func (r *Relay) runCronTick(now time.Time) {
 }
 
 // fireCronSchedule creates the typed ticket through the normal dispatch pipeline
-// and records the dedup marker. The marker is written FIRST so a crash mid-fire
-// cannot produce a duplicate on the next tick (at-most-once; a lost create is
-// visible as a missing ticket, preferable to a double-dispatch storm).
+// and records the dedup marker. The marker is written FIRST, then read back and
+// CONFIRMED durable BEFORE the dispatch: SetSetting swallows its write error
+// (projects.go), so a silent write failure would leave the same-minute guard
+// blind and the next 30s tick would re-fire a duplicate. Gating the dispatch on
+// a confirmed-persisted marker makes at-most-once hold even if the write fails —
+// we would rather skip a fire (a missing ticket, self-corrects next occurrence)
+// than emit a duplicate. A confirmed marker means the next tick's guard sees it.
 func (r *Relay) fireCronSchedule(sc CronSchedule, minuteKey string) {
 	project := sc.Project
 	if project == "" {
@@ -249,7 +253,14 @@ func (r *Relay) fireCronSchedule(sc CronSchedule, minuteKey string) {
 	}
 	ticket := db.TypedTicket{Goal: sc.Goal, AcceptanceCriteria: ac, Dod: sc.Dod}
 
-	r.DB.SetSetting(cronLastFirePfx+sc.ID, minuteKey)
+	fireKey := cronLastFirePfx + sc.ID
+	r.DB.SetSetting(fireKey, minuteKey)
+	if r.DB.GetSetting(fireKey) != minuteKey {
+		// The dedup marker did not persist — firing now risks a duplicate on the
+		// next tick, so skip this occurrence instead.
+		log.Printf("cron: dedup marker for %q did not persist; skipping fire to avoid a duplicate ticket", sc.ID)
+		return
+	}
 	if _, _, err := r.Handlers.dispatchCore(project, cronDispatchedBy, sc.Profile, sc.Title, sc.Description, priority, nil, nil, ticket); err != nil {
 		log.Printf("cron: dispatch schedule %q: %v", sc.ID, err)
 		return
