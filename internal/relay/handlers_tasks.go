@@ -160,63 +160,10 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	// Auto-create "human" profile if dispatching to it for the first time
-	if profile == "human" {
-		existing, _ := h.db.GetProfile(project, "human")
-		if existing == nil {
-			_, _ = h.db.RegisterProfile(project, "human", "Human Operator",
-				"Tasks that require human action (API keys, approvals, purchases, manual config)",
-				"[]")
-		}
-	}
-
-	// Auto-create a default "backlog" board if none specified and none exist
-	var autoBoard *models.Board
-	if boardID == nil {
-		boards, _ := h.db.ListBoards(project)
-		if len(boards) == 0 {
-			autoBoard, _ = h.db.CreateBoard(project, "Backlog", "backlog", "Auto-created default board", agent)
-			if autoBoard != nil {
-				boardID = &autoBoard.ID
-			}
-		} else {
-			// Use the first existing board as default
-			boardID = &boards[0].ID
-		}
-	}
-
-	task, err := h.db.DispatchTask(project, profile, agent, title, description, priority, parentTaskID, boardID, ticket)
+	task, autoBoard, err := h.dispatchCore(project, agent, profile, title, description, priority, parentTaskID, boardID, ticket)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
 	}
-
-	// Push notification for P0/P1 tasks
-	if priority == "P0" || priority == "P1" {
-		h.registry.NotifyProfile(project, profile, agent, fmt.Sprintf("[%s] %s", priority, title), task.ID)
-	}
-
-	// Auto-notification: send inbox message to agents running this profile
-	agents, _ := h.db.GetAgentsByProfile(project, profile)
-	for _, a := range agents {
-		if a.Name == agent {
-			continue // don't notify the dispatcher
-		}
-		subject := fmt.Sprintf("New task: %s", title)
-		content := fmt.Sprintf("[%s] %s\n\nTask ID: %s\nProfile: %s\nDispatched by: %s", priority, title, task.ID, profile, agent)
-		if description != "" && len(description) <= 200 {
-			content += "\n\n" + description
-		}
-		taskID := task.ID
-		// InsertMessageWithDeliveries (not InsertMessage) so a durable 'queued'
-		// delivery row lands: the inbox is delivery-based, and UnreadCountForAgent
-		// counts queued deliveries — that count is niwa's idle-wake poll signal.
-		// A bare message with no delivery is invisible to the delivery-based inbox
-		// and unpollable, so an idle/inactive lane never wakes on it (bug 6509668c).
-		_, _ = h.db.InsertMessageWithDeliveries(project, agent, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, taskID), "P2", 14400, nil, nil, []string{a.Name}, "")
-	}
-
-	h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: agent, Project: project, Target: profile, Label: title})
-	emitTaskEvent(h.events, "task.dispatched", "dispatch", project, task)
 
 	resp := map[string]any{"task": task}
 	if autoBoard != nil {
@@ -241,6 +188,73 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	}
 
 	return h.resultJSONTracked(project, agent, "dispatch_task", resp)
+}
+
+// dispatchCore is the shared task-creation pipeline behind both dispatch_task
+// (MCP) and the inbound-signal webhook (steal #9): it auto-creates the 'human'
+// profile and a default 'backlog' board when needed, creates the task, pushes a
+// P0/P1 notification, delivers an inbox message to every agent running the
+// profile (a durable 'queued' delivery so an idle lane's wake-poll sees it), and
+// emits the task.dispatched event that drives the normal dispatch pipeline.
+// Callers own quota/ticket-validation/dedup-warning; this is the create+announce
+// core so a signal-created task is indistinguishable from a hand-dispatched one.
+func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, description, priority string, parentTaskID, boardID *string, ticket db.TypedTicket) (*models.Task, *models.Board, error) {
+	// Auto-create "human" profile if dispatching to it for the first time.
+	if profile == "human" {
+		existing, _ := h.db.GetProfile(project, "human")
+		if existing == nil {
+			_, _ = h.db.RegisterProfile(project, "human", "Human Operator",
+				"Tasks that require human action (API keys, approvals, purchases, manual config)",
+				"[]")
+		}
+	}
+
+	// Auto-create a default "backlog" board if none specified and none exist.
+	var autoBoard *models.Board
+	if boardID == nil {
+		boards, _ := h.db.ListBoards(project)
+		if len(boards) == 0 {
+			autoBoard, _ = h.db.CreateBoard(project, "Backlog", "backlog", "Auto-created default board", dispatchedBy)
+			if autoBoard != nil {
+				boardID = &autoBoard.ID
+			}
+		} else {
+			boardID = &boards[0].ID
+		}
+	}
+
+	task, err := h.db.DispatchTask(project, profile, dispatchedBy, title, description, priority, parentTaskID, boardID, ticket)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Push notification for P0/P1 tasks.
+	if priority == "P0" || priority == "P1" {
+		h.registry.NotifyProfile(project, profile, dispatchedBy, fmt.Sprintf("[%s] %s", priority, title), task.ID)
+	}
+
+	// Auto-notification: inbox message to every agent running this profile.
+	agents, _ := h.db.GetAgentsByProfile(project, profile)
+	for _, a := range agents {
+		if a.Name == dispatchedBy {
+			continue // don't notify the dispatcher
+		}
+		subject := fmt.Sprintf("New task: %s", title)
+		content := fmt.Sprintf("[%s] %s\n\nTask ID: %s\nProfile: %s\nDispatched by: %s", priority, title, task.ID, profile, dispatchedBy)
+		if description != "" && len(description) <= 200 {
+			content += "\n\n" + description
+		}
+		// InsertMessageWithDeliveries (not InsertMessage) so a durable 'queued'
+		// delivery row lands: the inbox is delivery-based, and UnreadCountForAgent
+		// counts queued deliveries — that count is niwa's idle-wake poll signal
+		// (bug 6509668c).
+		_, _ = h.db.InsertMessageWithDeliveries(project, dispatchedBy, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, task.ID), "P2", 14400, nil, nil, []string{a.Name}, "")
+	}
+
+	h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: dispatchedBy, Project: project, Target: profile, Label: title})
+	emitTaskEvent(h.events, "task.dispatched", "dispatch", project, task)
+
+	return task, autoBoard, nil
 }
 
 func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -218,6 +218,9 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 	// event outbox. Reachable on loopback via a host relay (smee/poller).
 	case path == "/webhooks/github" && req.Method == http.MethodPost:
 		r.apiGitHubWebhook(w, req)
+	// Generic signed inbound signal → typed ticket → normal dispatch (steal #9).
+	case path == "/webhooks/signal" && req.Method == http.MethodPost:
+		r.apiSignalWebhook(w, req)
 	case path == "/agents/avatar" && req.Method == http.MethodPut:
 		r.apiSetAgentAvatar(w, req)
 	default:
