@@ -808,10 +808,33 @@ func (d *DB) UpdateTaskFields(taskID, project string, title, description, priori
 	return task, nil
 }
 
+// DeleteTask hard-deletes a task and its owned child rows. task_progress_notes is
+// the only table whose rows are OWNED by (reachable only via) a task, so a bare
+// task-row delete leaves them as logical orphans keyed to a vanished task id —
+// never queryable, never cleanable. Delete them child-first in one tx (the
+// DeleteProject-cascade precedent; ordering satisfies any FK at each step).
+//
+// NOT touched, on purpose: messages.task_id is a soft cross-reference — a message
+// about a task is an independent entity with its own deliveries (the one enforced
+// FK) + reads, and legitimately outlives the task; cascading into it would over-
+// delete. tasks.parent_task_id (subtasks) is a soft link — deleting a parent must
+// not silently nuke its children. Both are left inert. No schema migration
+// (52f7502d precedent).
 func (d *DB) DeleteTask(taskID, project string) error {
-	_, err := d.conn.Exec("DELETE FROM tasks WHERE id = ? AND project = ?", taskID, project)
+	tx, err := d.conn.Begin()
 	if err != nil {
+		return fmt.Errorf("delete task begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.Exec("DELETE FROM task_progress_notes WHERE task_id = ? AND project = ?", taskID, project); err != nil {
+		return fmt.Errorf("delete task progress notes: %w", err)
+	}
+	if _, err := tx.Exec("DELETE FROM tasks WHERE id = ? AND project = ?", taskID, project); err != nil {
 		return fmt.Errorf("delete task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete task commit: %w", err)
 	}
 	return nil
 }

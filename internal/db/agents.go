@@ -232,6 +232,15 @@ func (d *DB) DeactivateAgent(project, name string) error {
 }
 
 // DeleteAgent soft-deletes an agent (disappears from UI, stays in DB).
+//
+// This is a DELIBERATE tombstone, not an oversight (bug 6509668c / 52f7502d
+// follow-up): the agent row is flipped to status='deleted' and KEPT, so every
+// agent-scoped dependent (messages, deliveries, memories, team_members, tasks)
+// still references a present-but-tombstoned row — no logical orphan is created,
+// and nothing needs child cleanup. It is also T5-consistent (degrade, don't
+// destroy) and reversible: re-registering the same name flips status back to
+// 'active' (RegisterAgent) and the history stays intact. A hard purge of an
+// agent's rows only ever happens via the ordered DeleteProject cascade.
 func (d *DB) DeleteAgent(project, name string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := d.conn.Exec(
