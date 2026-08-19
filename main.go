@@ -208,6 +208,11 @@ func startServer() {
 	// "cron_schedules" setting is populated.
 	r.StartCronScheduler(cleanupDone)
 
+	// Start the task maintenance sweeper (G3/G4): converge tasks whose PR merged
+	// but never transitioned, and requeue tasks held by a dead agent past lease
+	// expiry — self-healing, no external poller required.
+	r.StartTaskMaintenanceSweeper(cleanupDone)
+
 	// Wire the Linear connector from effective config (env or settings table).
 	// Inert when unconfigured; hot-reloaded on settings changes without restart.
 	r.ReconfigureLinear()

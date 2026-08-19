@@ -301,6 +301,46 @@ func (d *DB) ListPRReconcileCandidates(project string, limit int) ([]models.Task
 	return out, rows.Err()
 }
 
+// ListStrandedPRTasks returns tasks whose LINKED PR has already reached a
+// terminal state (pr_state 'merged' or 'closed', persisted by a received
+// pull_request webhook or a poll write-back) but whose TASK is still non-terminal
+// — the stranded set the internal reconcile sweep converges (merged→done,
+// closed-unmerged→blocked). This is the gap ListPRReconcileCandidates (pr_state
+// 'open' only) cannot see: once a webhook flips pr_state to 'merged' but the task
+// transition is missed, the task drops out of the open-only candidate set and
+// strands in-review forever. The sweep converges off the ALREADY-PERSISTED
+// pr_state, no gh call — the relay stays inbound-only. Global across projects (the
+// sweep is project-agnostic maintenance). Already-settled rows (closed→blocked) are
+// excluded so the set does not grow unbounded; merged→done settles by leaving the
+// non-terminal filter. Bounded to keep the read small.
+func (d *DB) ListStrandedPRTasks(limit int) ([]models.Task, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+	rows, err := d.ro().Query(
+		"SELECT "+taskColumns+" FROM tasks "+
+			"WHERE archived_at IS NULL AND pr_number IS NOT NULL "+
+			"AND pr_state IN ('merged','closed') "+
+			"AND status NOT IN ('done','cancelled') "+
+			"AND NOT (pr_state = 'closed' AND status = 'blocked') "+
+			"ORDER BY last_activity_at DESC LIMIT ?",
+		limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []models.Task
+	for rows.Next() {
+		t, err := scanTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
 // ForcePRTransition applies a PR-driven state change as the supervisor, with a
 // NO-RESURRECT guard: a terminal task (done/cancelled) is never moved back by a
 // late/duplicate webhook, and an already-in-target task is a no-op. Runs the

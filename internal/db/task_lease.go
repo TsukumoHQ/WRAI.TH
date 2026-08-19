@@ -176,6 +176,93 @@ func (d *DB) auditLeaseTransfer(project, taskID, actor string, t *models.LeaseTr
 	})
 }
 
+// SweptLease records one task auto-recovered by SweepExpiredLeases, so the relay
+// loop can emit an event / escalation for it.
+type SweptLease struct {
+	TaskID   string
+	Project  string
+	Title    string
+	From     string // the dead holder the task was recovered from
+	Priority string
+	Profile  string
+}
+
+// SweepExpiredLeases auto-recovers tasks whose lease has EXPIRED and whose holder
+// is DEAD (deregistered/inactive), requeuing them to 'pending' so the profile's
+// live agents can re-claim. It is the internal, unattended counterpart to
+// ReclaimTask (a supervisor naming a specific new holder): here no new agent is
+// named, the task simply returns to the claimable pool and an event escalates it.
+//
+// Conservative by design:
+//   - A LIVE holder on an expired lease is LEFT ALONE. The generous TTL is a
+//     dead-holder backstop, not a liveness probe (DefaultLeaseTTL doc), so a
+//     heads-down agent on a long build never loses its task to the sweeper.
+//   - NO-RESURRECT: only the held states (accepted/in-progress/in-review) are
+//     swept; a terminal (done/cancelled) or released (blocked) task is never
+//     touched — the WHERE clause excludes them and the CAS re-checks status.
+//   - Each requeue is CAS-guarded on (id, project, lease_holder, status) so a
+//     concurrent claim/heartbeat/transition wins the race instead of being
+//     clobbered (RowsAffected==0 → skip).
+//
+// Global across projects (project-agnostic maintenance). Returns the recovered
+// set. Candidates are read fully before any write so the RO cursor isn't held
+// open across the writer's UPDATEs.
+func (d *DB) SweepExpiredLeases() ([]SweptLease, error) {
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	rows, err := d.ro().Query(
+		"SELECT id, project, title, COALESCE(lease_holder,''), status, priority, profile_slug FROM tasks "+
+			"WHERE status IN ('accepted','in-progress','in-review') "+
+			"AND COALESCE(lease_holder,'') != '' "+
+			"AND COALESCE(lease_expires_at,'') != '' AND lease_expires_at < ? "+
+			"AND archived_at IS NULL",
+		now,
+	)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct{ id, project, title, holder, status, priority, profile string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err := rows.Scan(&c.id, &c.project, &c.title, &c.holder, &c.status, &c.priority, &c.profile); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, c)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	_ = rows.Close()
+
+	var swept []SweptLease
+	for _, c := range candidates {
+		if d.agentLive(c.project, c.holder) {
+			continue // live holder — the lease is generous on purpose; leave it
+		}
+		res, err := d.conn.Exec(
+			`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
+			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?
+			 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,
+			now, c.id, c.project, c.holder, c.status,
+		)
+		if err != nil {
+			continue // best-effort; the next sweep retries
+		}
+		if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
+			continue // lost a race to a live claim/transition — correct to skip
+		}
+		d.auditLeaseTransfer(c.project, c.id, "relay-sweeper",
+			&models.LeaseTransfer{From: c.holder, To: "", Reason: "expired-swept"})
+		swept = append(swept, SweptLease{
+			TaskID: c.id, Project: c.project, Title: c.title,
+			From: c.holder, Priority: c.priority, Profile: c.profile,
+		})
+	}
+	return swept, nil
+}
+
 func orNone(s string) string {
 	if s == "" {
 		return "(none)"
