@@ -201,11 +201,37 @@ func (d *DB) GetAgentStats(project, cycleID, agentFilter string) (*AgentStats, e
 	return out, nil
 }
 
-// statsTasks loads the columns needed for stats from non-archived tasks.
+// statsTaskColumns is the minimal column set the stats aggregation actually reads
+// (see the field accesses in GetAgentStats and its compute* helpers) — 18 columns
+// vs the ~50 of taskColumns, so each dashboard poll scans and allocates far less
+// per row. Order MUST match scanStatsTask.
+const statsTaskColumns = "id, assigned_to, assignee, title, status, points, " +
+	"dispatched_at, completed_at, done_at, in_review_at, claimed_by, claimed_at, blocked_periods, " +
+	"cycle_id, cycle_name, cycle_start, cycle_end, linear_key"
+
+// scanStatsTask scans a statsTaskColumns row into a partial models.Task (only the
+// stats-relevant fields; the rest stay zero). Column order matches statsTaskColumns.
+func scanStatsTask(row interface{ Scan(...any) error }) (models.Task, error) {
+	var t models.Task
+	err := row.Scan(&t.ID, &t.AssignedTo, &t.Assignee, &t.Title, &t.Status, &t.Points,
+		&t.DispatchedAt, &t.CompletedAt, &t.DoneAt, &t.InReviewAt, &t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods,
+		&t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd, &t.LinearKey)
+	return t, err
+}
+
+// statsTaskCap bounds the per-poll stats read against pathological unbounded
+// growth. It is a safety ceiling, not a functional filter: it sits far above any
+// real project's task count, and rows are taken newest-first so a project that
+// ever did exceed it keeps its most relevant (recent) tasks.
+const statsTaskCap = 20000
+
+// statsTasks loads the minimal columns needed for stats from non-archived tasks,
+// newest-first and bounded by statsTaskCap.
 func (d *DB) statsTasks(project string) ([]models.Task, error) {
 	rows, err := d.ro().Query(
-		"SELECT "+taskColumns+" FROM tasks WHERE project = ? AND archived_at IS NULL",
-		project,
+		"SELECT "+statsTaskColumns+" FROM tasks WHERE project = ? AND archived_at IS NULL "+
+			"ORDER BY dispatched_at DESC LIMIT ?",
+		project, statsTaskCap,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("stats tasks: %w", err)
@@ -213,7 +239,7 @@ func (d *DB) statsTasks(project string) ([]models.Task, error) {
 	defer func() { _ = rows.Close() }()
 	var out []models.Task
 	for rows.Next() {
-		t, err := scanTask(rows)
+		t, err := scanStatsTask(rows)
 		if err != nil {
 			return nil, fmt.Errorf("scan stats task: %w", err)
 		}

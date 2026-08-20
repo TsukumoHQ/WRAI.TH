@@ -658,6 +658,13 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_board ON tasks(board_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_linear_issue ON tasks(linear_issue_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_cycle ON tasks(cycle_id)`)
+	// R2 relay-perf: index the two periodic sweeper queries that were full-table
+	// SCANs (EQP-confirmed). Partial index for ListStrandedPRTasks — scoped to the
+	// PR-linked, non-archived candidate set, so it stays tiny (most tasks have no
+	// PR) and the query's WHERE implies its partial predicate.
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_pr ON tasks(pr_state) WHERE pr_number IS NOT NULL AND archived_at IS NULL`)
+	// Composite for GetUnackedTasks: SEARCH status='pending' then range dispatched_at.
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_status_dispatched ON tasks(status, dispatched_at)`)
 	// Goals subsystem removed — drop the table and its stale index for existing DBs.
 	_, _ = conn.Exec(`DROP INDEX IF EXISTS idx_tasks_goal`)
 	_, _ = conn.Exec(`DROP TABLE IF EXISTS goals`)
