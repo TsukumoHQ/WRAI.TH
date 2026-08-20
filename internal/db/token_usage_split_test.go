@@ -148,40 +148,87 @@ func TestLegacyTokenUsageBackfill(t *testing.T) {
 
 // TestTokenUsageDailyRollup asserts the rollup aggregates raw rows and survives a
 // raw purge, so shortened retention keeps aggregate history.
-func TestTokenUsageDailyRollup(t *testing.T) {
-	dir := t.TempDir()
-	d, err := NewTestDB(filepath.Join(dir, "relay.db"))
+// rollupDayCount returns how many token_usage_daily rows exist for a UTC day.
+func rollupDayCount(t *testing.T, d *DB, day string) int {
+	t.Helper()
+	var n int
+	if err := d.ro().QueryRow(`SELECT COUNT(*) FROM token_usage_daily WHERE day=?`, day).Scan(&n); err != nil {
+		t.Fatalf("rollup count %s: %v", day, err)
+	}
+	return n
+}
+
+// TestRollupSkipsPartialBoundaryDay asserts RollupTokenUsage summarizes only
+// fully-retained calendar days and SKIPS the day straddling the purge boundary
+// (now - retention). Rolling that partial day up would overwrite a complete
+// aggregate with a shrinking partial and freeze the undercount once it purges —
+// the boundary-day bug this fix closes (review-de1ee790 finding).
+func TestRollupSkipsPartialBoundaryDay(t *testing.T) {
+	d, err := NewTestDB(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
 		t.Fatalf("NewTestDB: %v", err)
 	}
 	defer func() { _ = d.Close() }()
 
-	// Rows aged 20 days: inside a 30-day rollup window but outside a 14-day raw
-	// retention, so the purge below actually removes them.
-	old := time.Now().UTC().AddDate(0, 0, -20)
-	oldTS := old.Format(time.RFC3339)
+	now := time.Now().UTC()
+	full := now.AddDate(0, 0, -10) // wholly inside a 14d retention
+	// Last second of the calendar day that straddles the purge boundary (now-14d):
+	// deterministically inside that day and before the first fully-retained
+	// midnight, so the fix must exclude it regardless of the current time-of-day.
+	cutoff := now.AddDate(0, 0, -14)
+	bDay := time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
+	boundary := bDay.AddDate(0, 0, 1).Add(-time.Second)
 	if err := d.InsertTokenUsageBatch([]TokenRecord{
-		{Project: "p", Agent: "a", Input: 100, Output: 50, CreatedAt: oldTS},
-		{Project: "p", Agent: "a", Input: 10, Output: 5, CreatedAt: oldTS},
+		{Project: "p", Agent: "a", Input: 100, Output: 50, CreatedAt: full.Format(time.RFC3339)},
+		{Project: "p", Agent: "a", Input: 9, Output: 1, CreatedAt: boundary.Format(time.RFC3339)},
 	}); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	if err := d.RollupTokenUsage(30); err != nil {
+	if err := d.RollupTokenUsage(14); err != nil {
 		t.Fatalf("rollup: %v", err)
 	}
-	// Purge raw rows older than 14 days; the rollup must still report the aggregate.
-	purged, err := d.PurgeOldTokenUsage(14 * 24 * time.Hour)
+
+	if got := rollupDayCount(t, d, full.Format("2006-01-02")); got != 1 {
+		t.Errorf("fully-retained day: expected 1 rollup row, got %d", got)
+	}
+	if got := rollupDayCount(t, d, boundary.Format("2006-01-02")); got != 0 {
+		t.Errorf("partial boundary day must be skipped, but got %d rollup row(s)", got)
+	}
+}
+
+// TestRollupPreservesPurgedDayAggregate asserts a day that has fully purged from
+// raw keeps its stored aggregate: with no raw rows the SELECT yields nothing, so
+// the ON CONFLICT never overwrites the prior full value (non-shrinking history).
+func TestRollupPreservesPurgedDayAggregate(t *testing.T) {
+	d, err := NewTestDB(filepath.Join(t.TempDir(), "relay.db"))
 	if err != nil {
-		t.Fatalf("purge: %v", err)
+		t.Fatalf("NewTestDB: %v", err)
 	}
-	if purged != 2 {
-		t.Fatalf("expected 2 raw rows purged, got %d", purged)
+	defer func() { _ = d.Close() }()
+
+	now := time.Now().UTC()
+	day := now.AddDate(0, 0, -5)
+	if err := d.InsertTokenUsageBatch([]TokenRecord{
+		{Project: "p", Agent: "a", Input: 100, Output: 50, CreatedAt: day.Format(time.RFC3339)},
+		{Project: "p", Agent: "a", Input: 10, Output: 5, CreatedAt: day.Format(time.RFC3339)},
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
 	}
-	agg, err := d.GetTokenUsageDailyByProject(old.Format("2006-01-02"))
+	if err := d.RollupTokenUsage(14); err != nil {
+		t.Fatalf("rollup: %v", err)
+	}
+	// Simulate that day (and all raw) having fully purged, then roll up again.
+	if _, err := d.conn.Exec(`DELETE FROM token_usage`); err != nil {
+		t.Fatalf("purge raw: %v", err)
+	}
+	if err := d.RollupTokenUsage(14); err != nil {
+		t.Fatalf("rollup after purge: %v", err)
+	}
+	agg, err := d.GetTokenUsageDailyByProject(day.Format("2006-01-02"))
 	if err != nil {
 		t.Fatalf("rollup read: %v", err)
 	}
 	if len(agg) != 1 || agg[0].CallCount != 2 || agg[0].Tokens != 165 {
-		t.Fatalf("expected rollup 2 calls / 165 tokens, got %+v", agg)
+		t.Fatalf("purged day aggregate must survive intact: got %+v", agg)
 	}
 }

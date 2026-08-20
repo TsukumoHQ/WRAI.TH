@@ -154,15 +154,27 @@ func (d *DB) PurgeOldTokenUsage(maxAge time.Duration) (int64, error) {
 }
 
 // RollupTokenUsage refreshes the daily aggregate table (analytics.token_usage_daily)
-// from the raw token_usage rows of the trailing `days` days, so the raw table can
-// be pruned to a short retention window while the per-day/project/agent/model
-// rollup keeps longer history for dashboards. Idempotent: the current window is
-// re-summed and upserted each call. Writer path (analytics attached read-write).
-func (d *DB) RollupTokenUsage(days int) error {
-	if days < 1 {
-		days = 14
+// from raw token_usage, summing ONLY calendar days whose rows are all still present
+// in raw — i.e. strictly newer than the raw-retention purge boundary (now minus
+// retentionDays). The single calendar day that straddles that instant is skipped:
+// its raw rows are being purged piecemeal, so re-summing it would overwrite an
+// already-complete aggregate with a shrinking partial sum and then freeze that
+// undercount once the day fully purges. Each day was captured in full on earlier
+// ticks while it sat wholly inside retention, and a fully-purged day yields no
+// SELECT row (so its stored aggregate is never overwritten) — together that keeps
+// the rollup a faithful, non-shrinking history. Idempotent; writer path.
+//
+// retentionDays MUST match the raw-retention window (cleanup.TokenUsageRetention);
+// passing a larger value would try to sum days already purged from raw.
+func (d *DB) RollupTokenUsage(retentionDays int) error {
+	if retentionDays < 1 {
+		retentionDays = 14
 	}
-	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	// The calendar day containing the purge instant (now - retentionDays) is only
+	// partially retained; the first FULLY-retained day is the midnight after it.
+	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
+	boundaryDay := time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
+	since := boundaryDay.AddDate(0, 0, 1).Format(time.RFC3339)
 	_, err := d.conn.Exec(`
 		INSERT INTO token_usage_daily (day, project, agent, model, bytes, tokens, call_count)
 		SELECT strftime('%Y-%m-%d', created_at) AS day, project, agent, COALESCE(model, ''),
