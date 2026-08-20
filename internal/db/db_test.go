@@ -14,9 +14,10 @@ import (
 func testDB(t *testing.T) *DB {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	drv := registerAttachDriver(analyticsDBPath(dbPath))
 
 	// Writer pool (matches production config)
-	writer, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_txlock=immediate")
+	writer, err := sql.Open(drv, dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_txlock=immediate")
 	if err != nil {
 		t.Fatalf("open writer: %v", err)
 	}
@@ -24,7 +25,7 @@ func testDB(t *testing.T) *DB {
 	writer.SetMaxIdleConns(1)
 
 	// Reader pool (matches production config)
-	reader, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
+	reader, err := sql.Open(drv, dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
 	if err != nil {
 		t.Fatalf("open reader: %v", err)
 	}
@@ -305,13 +306,14 @@ func TestMixedReadWriteFunction(t *testing.T) {
 
 func TestCloseCheckpoint(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
+	drv := registerAttachDriver(analyticsDBPath(dbPath))
 
-	writer, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_foreign_keys=ON&_txlock=immediate")
+	writer, err := sql.Open(drv, dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_foreign_keys=ON&_txlock=immediate")
 	if err != nil {
 		t.Fatalf("open writer: %v", err)
 	}
 	writer.SetMaxOpenConns(1)
-	reader, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
+	reader, err := sql.Open(drv, dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
 	if err != nil {
 		t.Fatalf("open reader: %v", err)
 	}

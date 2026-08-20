@@ -153,6 +153,56 @@ func (d *DB) PurgeOldTokenUsage(maxAge time.Duration) (int64, error) {
 	return res.RowsAffected()
 }
 
+// RollupTokenUsage refreshes the daily aggregate table (analytics.token_usage_daily)
+// from the raw token_usage rows of the trailing `days` days, so the raw table can
+// be pruned to a short retention window while the per-day/project/agent/model
+// rollup keeps longer history for dashboards. Idempotent: the current window is
+// re-summed and upserted each call. Writer path (analytics attached read-write).
+func (d *DB) RollupTokenUsage(days int) error {
+	if days < 1 {
+		days = 14
+	}
+	since := time.Now().UTC().AddDate(0, 0, -days).Format(time.RFC3339)
+	_, err := d.conn.Exec(`
+		INSERT INTO token_usage_daily (day, project, agent, model, bytes, tokens, call_count)
+		SELECT strftime('%Y-%m-%d', created_at) AS day, project, agent, COALESCE(model, ''),
+		       SUM(bytes), `+tokenSum+`, COUNT(*)
+		FROM token_usage
+		WHERE created_at >= ?
+		GROUP BY day, project, agent, model
+		ON CONFLICT(day, project, agent, model) DO UPDATE SET
+			bytes=excluded.bytes, tokens=excluded.tokens, call_count=excluded.call_count`,
+		since)
+	return err
+}
+
+// GetTokenUsageDailyByProject returns per-project totals from the daily rollup
+// since a UTC day (YYYY-MM-DD) — the read for dashboard windows wider than the
+// raw retention. Scans the pre-aggregated rollup, not the raw row table.
+func (d *DB) GetTokenUsageDailyByProject(sinceDay string) ([]TokenUsageSummary, error) {
+	rows, err := d.ro().Query(`
+		SELECT project, SUM(bytes), SUM(tokens), SUM(call_count)
+		FROM token_usage_daily
+		WHERE day >= ?
+		GROUP BY project
+		ORDER BY SUM(bytes) DESC
+	`, sinceDay)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []TokenUsageSummary
+	for rows.Next() {
+		var s TokenUsageSummary
+		if err := rows.Scan(&s.Key, &s.Bytes, &s.Tokens, &s.CallCount); err != nil {
+			return nil, err
+		}
+		results = append(results, s)
+	}
+	return results, rows.Err()
+}
+
 // GetProjectTokens24h returns total tokens (bytes/4) per project for the last 24 hours.
 // Returns a map of project name → tokens.
 func (d *DB) GetProjectTokens24h() (map[string]int64, error) {

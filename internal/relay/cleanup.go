@@ -34,7 +34,7 @@ const (
 	//   messages/deliveries/message_reads — purged MessageRetention after a
 	//     message's TTL elapses (ttl_seconds=0 = never expires = never purged).
 	//   audit_log — kept AuditLogRetention (accountability record; far longer).
-	//   token_usage — 30d (PurgeOldTokenUsage).
+	//   token_usage — 14d raw (PurgeOldTokenUsage), older kept as the daily rollup.
 	//   events — bounded by PruneDeliveredEvents(keep).
 	//   activity — ephemeral, never persisted (in-memory ingest Detector + SSE).
 	//
@@ -51,6 +51,12 @@ const (
 	// human may still need to audit, so they are kept far longer (180 days) before
 	// reclamation — bounded, but never dropped early.
 	DeadletterLongRetention = 180 * 24 * time.Hour
+	// TokenUsageRetention: raw telemetry rows are kept 14 days (down from 30). The
+	// raw table is the largest in the fleet DB, so a shorter window keeps it small;
+	// the daily rollup (token_usage_daily) retains older aggregates for dashboards.
+	TokenUsageRetention = 14 * 24 * time.Hour
+	// TokenUsageRetentionDays is TokenUsageRetention in days, for the rollup window.
+	TokenUsageRetentionDays = 14
 )
 
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
@@ -91,7 +97,12 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 				} else if expired > 0 {
 					log.Printf("expired %d elevation(s)", expired)
 				}
-				if purged, err := database.PurgeOldTokenUsage(30 * 24 * time.Hour); err != nil {
+				// Refresh the daily rollup BEFORE pruning raw rows, so shortening the
+				// raw window never drops aggregate history the dashboards still show.
+				if err := database.RollupTokenUsage(TokenUsageRetentionDays); err != nil {
+					log.Printf("token usage rollup error: %v", err)
+				}
+				if purged, err := database.PurgeOldTokenUsage(TokenUsageRetention); err != nil {
 					log.Printf("purge token usage error: %v", err)
 				} else if purged > 0 {
 					log.Printf("purged %d old token usage record(s)", purged)

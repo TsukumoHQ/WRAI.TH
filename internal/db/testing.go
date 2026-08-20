@@ -2,13 +2,16 @@ package db
 
 import (
 	"database/sql"
-
-	_ "github.com/mattn/go-sqlite3"
 )
 
-// NewTestDB creates a database at the given path for testing.
+// NewTestDB creates a database at the given path for testing. It mirrors New():
+// every connection ATTACHes the sibling analytics DB (where token_usage lives),
+// and the reader pool is opened after migrate() so the analytics file exists for
+// its read-only attach.
 func NewTestDB(path string) (*DB, error) {
-	conn, err := sql.Open("sqlite3", path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	driverName := registerAttachDriver(analyticsDBPath(path))
+
+	conn, err := sql.Open(driverName, path+"?_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
 	if err != nil {
 		return nil, err
 	}
@@ -17,7 +20,7 @@ func NewTestDB(path string) (*DB, error) {
 		_ = conn.Close()
 		return nil, err
 	}
-	reader, err := sql.Open("sqlite3", path+"?mode=ro&_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
+	reader, err := sql.Open(driverName, path+"?mode=ro&_journal_mode=WAL&_busy_timeout=5000&_foreign_keys=ON")
 	if err != nil {
 		_ = conn.Close()
 		return nil, err

@@ -17,13 +17,14 @@ import (
 func soakDB(tb testing.TB) *DB {
 	tb.Helper()
 	dbPath := filepath.Join(tb.TempDir(), "soak.db")
-	writer, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_txlock=immediate")
+	drv := registerAttachDriver(analyticsDBPath(dbPath))
+	writer, err := sql.Open(drv, dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_txlock=immediate")
 	if err != nil {
 		tb.Fatalf("open writer: %v", err)
 	}
 	writer.SetMaxOpenConns(1)
 	writer.SetMaxIdleConns(1)
-	reader, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
+	reader, err := sql.Open(drv, dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
 	if err != nil {
 		tb.Fatalf("open reader: %v", err)
 	}

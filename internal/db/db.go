@@ -1,14 +1,19 @@
 package db
 
 import (
+	"crypto/sha1"
 	"database/sql"
+	"database/sql/driver"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	sqlite3 "github.com/mattn/go-sqlite3"
 )
 
 type DB struct {
@@ -32,6 +37,51 @@ func resolveDBPath() (string, error) {
 	return filepath.Join(home, ".agent-relay", "relay.db"), nil
 }
 
+// analyticsDBPath derives the sibling analytics DB path for a coordination DB
+// path: relay.db -> relay.analytics.db. Telemetry (token_usage) lives here, off
+// the coordination hot path, so hourly backups + 5-min checkpoints never churn
+// its ~1.6M rows (R0 relay-perf split).
+func analyticsDBPath(coordPath string) string {
+	if strings.HasSuffix(coordPath, ".db") {
+		return strings.TrimSuffix(coordPath, ".db") + ".analytics.db"
+	}
+	return coordPath + ".analytics.db"
+}
+
+var (
+	attachDriverMu   sync.Mutex
+	attachDriverDone = map[string]bool{}
+)
+
+// registerAttachDriver registers (once per analytics path) a sqlite3 driver whose
+// every new connection ATTACHes the analytics DB as schema "analytics". Because a
+// connection pool opens connections lazily, the ATTACH must run per-connection —
+// a ConnectHook is the only reliable place. SQLite opens the attached file with
+// the main connection's access mode, so a read-only pool attaches it read-only
+// (and a read-only attach of a *missing* file fails — callers must ensure the
+// writer creates it first, or guard with os.Stat). Returns the driver name.
+func registerAttachDriver(analyticsPath string) string {
+	name := "sqlite3_analytics_" + shortHash(analyticsPath)
+	attachDriverMu.Lock()
+	defer attachDriverMu.Unlock()
+	if attachDriverDone[name] {
+		return name
+	}
+	sql.Register(name, &sqlite3.SQLiteDriver{
+		ConnectHook: func(c *sqlite3.SQLiteConn) error {
+			_, err := c.Exec("ATTACH DATABASE ? AS analytics", []driver.Value{analyticsPath})
+			return err
+		},
+	})
+	attachDriverDone[name] = true
+	return name
+}
+
+func shortHash(s string) string {
+	sum := sha1.Sum([]byte(s))
+	return hex.EncodeToString(sum[:6])
+}
+
 func New() (*DB, error) {
 	dbPath, err := resolveDBPath()
 	if err != nil {
@@ -42,8 +92,14 @@ func New() (*DB, error) {
 		return nil, fmt.Errorf("create db dir: %w", err)
 	}
 
+	// Every connection ATTACHes the analytics DB (telemetry lives there, off the
+	// coordination hot path). The writer creates the analytics file on its first
+	// connection; the reader pool is opened AFTER migrate() so the file already
+	// exists when its read-only connections attach it.
+	driverName := registerAttachDriver(analyticsDBPath(dbPath))
+
 	// Writer pool: single connection serializes writes at Go level (SQLite only allows 1 writer).
-	writer, err := sql.Open("sqlite3", dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_txlock=immediate")
+	writer, err := sql.Open(driverName, dbPath+"?_journal_mode=WAL&_busy_timeout=10000&_synchronous=NORMAL&_cache_size=-20000&_foreign_keys=ON&_txlock=immediate")
 	if err != nil {
 		return nil, fmt.Errorf("open writer db: %w", err)
 	}
@@ -51,8 +107,14 @@ func New() (*DB, error) {
 	writer.SetMaxIdleConns(1)
 	_, _ = writer.Exec("PRAGMA temp_store = MEMORY")
 
-	// Reader pool: multiple connections for concurrent reads via WAL.
-	reader, err := sql.Open("sqlite3", dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
+	if err := migrate(writer); err != nil {
+		_ = writer.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
+	}
+
+	// Reader pool: multiple connections for concurrent reads via WAL. Opened after
+	// migrate so the analytics file exists for the read-only ATTACH.
+	reader, err := sql.Open(driverName, dbPath+"?mode=ro&_journal_mode=WAL&_busy_timeout=10000&_foreign_keys=ON")
 	if err != nil {
 		_ = writer.Close()
 		return nil, fmt.Errorf("open reader db: %w", err)
@@ -63,17 +125,14 @@ func New() (*DB, error) {
 	_, _ = reader.Exec("PRAGMA temp_store = MEMORY")
 	_, _ = reader.Exec("PRAGMA cache_size = -20000") // 20MB
 
-	if err := migrate(writer); err != nil {
-		_ = writer.Close()
-		_ = reader.Close()
-		return nil, fmt.Errorf("migrate: %w", err)
-	}
-
 	return &DB{conn: writer, reader: reader, path: dbPath}, nil
 }
 
 func (d *DB) Close() error {
 	_, _ = d.conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)")
+	// Checkpoint the attached analytics WAL too (no-op if not attached, e.g. a
+	// plain read-only handle) so its -wal file is folded back on shutdown.
+	_, _ = d.conn.Exec("PRAGMA analytics.wal_checkpoint(TRUNCATE)")
 	if d.reader != nil && d.reader != d.conn {
 		_ = d.reader.Close()
 	}
@@ -95,6 +154,9 @@ func (d *DB) Path() string {
 func (d *DB) Optimize() {
 	_, _ = d.conn.Exec("PRAGMA optimize")
 	_, _ = d.conn.Exec("PRAGMA wal_checkpoint(PASSIVE)")
+	// The analytics WAL is small (telemetry deltas) and separate from the coord
+	// DB — checkpointing it here never churns the coordination file (R0).
+	_, _ = d.conn.Exec("PRAGMA analytics.wal_checkpoint(PASSIVE)")
 }
 
 // Backup writes a consistent snapshot of the database next to it via SQLite's
@@ -153,7 +215,16 @@ func NewReadOnly() (*DB, error) {
 		return nil, fmt.Errorf("database not found at %s (relay never started?)", dbPath)
 	}
 
-	conn, err := sql.Open("sqlite3", dbPath+"?mode=ro&_busy_timeout=5000")
+	// Attach the analytics DB read-only so CLI queries that read token_usage still
+	// resolve it (it moved out of the coordination DB, R0). Only when the file
+	// exists — a read-only attach of a missing file fails, and a box that never
+	// wrote telemetry has no analytics DB and no token_usage rows to query.
+	driverName := "sqlite3"
+	if apath := analyticsDBPath(dbPath); fileExists(apath) {
+		driverName = registerAttachDriver(apath)
+	}
+
+	conn, err := sql.Open(driverName, dbPath+"?mode=ro&_busy_timeout=5000")
 	if err != nil {
 		return nil, fmt.Errorf("open db readonly: %w", err)
 	}
@@ -161,6 +232,11 @@ func NewReadOnly() (*DB, error) {
 	conn.SetMaxOpenConns(1)
 
 	return &DB{conn: conn, reader: conn, path: dbPath}, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 // ensureColumns checks a table for missing columns and adds them via ALTER TABLE.
@@ -699,30 +775,12 @@ func migrate(conn *sql.DB) error {
 		return fmt.Errorf("migrate vault: %w", err)
 	}
 
-	// Token usage tracking
-	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS token_usage (
-		id         INTEGER PRIMARY KEY AUTOINCREMENT,
-		project    TEXT NOT NULL DEFAULT 'default',
-		agent      TEXT NOT NULL DEFAULT '',
-		tool       TEXT NOT NULL DEFAULT '',
-		bytes      INTEGER NOT NULL DEFAULT 0,
-		created_at TEXT NOT NULL
-	)`)
-	// Real token counts from the Claude Code transcript (hook-POSTed), vs the
-	// legacy bytes/4 estimate. Rows from the old relay-payload path leave these 0;
-	// reporting prefers real counts per-row and falls back to bytes/4.
-	ensureColumns(conn, "token_usage", map[string]string{
-		"input_tokens":          "INTEGER NOT NULL DEFAULT 0",
-		"output_tokens":         "INTEGER NOT NULL DEFAULT 0",
-		"cache_read_tokens":     "INTEGER NOT NULL DEFAULT 0",
-		"cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
-		// model tier the turn ran on (e.g. "claude-opus-4-8") — drives per-tier $
-		// cost. Empty when the hook didn't report it → costed at the default tier.
-		"model": "TEXT NOT NULL DEFAULT ''",
-	})
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_project_time ON token_usage(project, created_at)`)
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_agent_time ON token_usage(project, agent, created_at)`)
-	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_token_usage_created ON token_usage(created_at)`)
+	// Token usage (telemetry) lives in the ATTACHed analytics DB, off the
+	// coordination hot path — Backup()'s VACUUM INTO and the periodic checkpoint
+	// then never churn its ~1.6M rows (R0 relay-perf split).
+	if err := migrateTokenUsageToAnalytics(conn); err != nil {
+		return fmt.Errorf("migrate token_usage to analytics: %w", err)
+	}
 
 	// Spawn children tracking
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS spawn_children (
@@ -1091,6 +1149,85 @@ func backfillProjects(conn *sql.DB) {
 		planet := planetPool[h%len(planetPool)]
 		_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES (?, ?, datetime('now'))", p, planet)
 	}
+}
+
+// migrateTokenUsageToAnalytics creates the token_usage schema (and the daily
+// rollup) in the ATTACHed analytics DB and, if a legacy token_usage table still
+// lives in the main (coordination) DB, copies its rows across, drops it, and
+// VACUUMs the coordination DB once to reclaim the freed pages. Non-destructive
+// (rows are copied before the drop) and idempotent (safe to run every boot: once
+// the legacy table is gone the backfill branch is skipped). conn is the writer,
+// which has the analytics DB attached read-write.
+func migrateTokenUsageToAnalytics(conn *sql.DB) error {
+	// Analytics in its own WAL so telemetry writes never contend on the coord DB.
+	_, _ = conn.Exec("PRAGMA analytics.journal_mode=WAL")
+
+	if _, err := conn.Exec(`CREATE TABLE IF NOT EXISTS analytics.token_usage (
+		id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+		project               TEXT NOT NULL DEFAULT 'default',
+		agent                 TEXT NOT NULL DEFAULT '',
+		tool                  TEXT NOT NULL DEFAULT '',
+		bytes                 INTEGER NOT NULL DEFAULT 0,
+		input_tokens          INTEGER NOT NULL DEFAULT 0,
+		output_tokens         INTEGER NOT NULL DEFAULT 0,
+		cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+		cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+		model                 TEXT NOT NULL DEFAULT '',
+		created_at            TEXT NOT NULL
+	)`); err != nil {
+		return err
+	}
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS analytics.idx_token_usage_project_time ON token_usage(project, created_at)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS analytics.idx_token_usage_agent_time ON token_usage(project, agent, created_at)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS analytics.idx_token_usage_created ON token_usage(created_at)`)
+
+	// Daily rollup for dashboard aggregates: per-day/project/agent/model sums so
+	// the raw table can be pruned to a short window without losing history and the
+	// wide-window dashboard reads stop scanning ~1.6M raw rows.
+	if _, err := conn.Exec(`CREATE TABLE IF NOT EXISTS analytics.token_usage_daily (
+		day        TEXT NOT NULL,
+		project    TEXT NOT NULL,
+		agent      TEXT NOT NULL,
+		model      TEXT NOT NULL DEFAULT '',
+		bytes      INTEGER NOT NULL DEFAULT 0,
+		tokens     INTEGER NOT NULL DEFAULT 0,
+		call_count INTEGER NOT NULL DEFAULT 0,
+		PRIMARY KEY (day, project, agent, model)
+	)`); err != nil {
+		return err
+	}
+
+	// One-time backfill: if the legacy table still sits in the coordination DB,
+	// move its rows into analytics, drop it, and reclaim the pages. sqlite_master
+	// (unqualified) is the main DB's; after the drop this branch is a no-op.
+	var legacy int
+	_ = conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='token_usage'`).Scan(&legacy)
+	if legacy > 0 {
+		// Guarantee the legacy table has the real-count columns before copying —
+		// a DB that predates them would otherwise fail the column-listed INSERT.
+		ensureColumns(conn, "token_usage", map[string]string{
+			"input_tokens":          "INTEGER NOT NULL DEFAULT 0",
+			"output_tokens":         "INTEGER NOT NULL DEFAULT 0",
+			"cache_read_tokens":     "INTEGER NOT NULL DEFAULT 0",
+			"cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
+			"model":                 "TEXT NOT NULL DEFAULT ''",
+		})
+		if _, err := conn.Exec(`INSERT INTO analytics.token_usage
+			(id, project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model, created_at)
+			SELECT id, project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model, created_at
+			FROM main.token_usage`); err != nil {
+			return fmt.Errorf("backfill token_usage into analytics: %w", err)
+		}
+		if _, err := conn.Exec(`DROP TABLE main.token_usage`); err != nil {
+			return fmt.Errorf("drop legacy token_usage: %w", err)
+		}
+		// Reclaim the freed pages so the coordination DB actually shrinks (402->~85MB).
+		if _, err := conn.Exec(`VACUUM main`); err != nil {
+			return fmt.Errorf("vacuum coordination DB after token_usage move: %w", err)
+		}
+		log.Printf("[db] moved token_usage to analytics DB and reclaimed the coordination DB")
+	}
+	return nil
 }
 
 // migrateVault creates the vault_docs table, FTS5 virtual table, and sync triggers.
