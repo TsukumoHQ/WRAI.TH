@@ -580,7 +580,7 @@ func buildOnboardingPrompt(name, description, cwd string, interactive, linearMod
 	b.WriteString("The relay can't see what agents do until the **hooks** are installed. They run from `~/.claude` and POST activity, real token usage, and identity to the relay. The `install.sh` path already wired them; this is idempotent, so run it once per machine to be sure (`agent-relay hooks status` to check):\n\n")
 	b.WriteString("```bash\nagent-relay hooks install   # writes the activity/identity/token hooks + merges settings.json\n```\n\n")
 	b.WriteString("Then confirm the MCP server is wired (the `.mcp.json` in this repo should have an `agent-relay` entry — `agent-relay init " + name + "` adds it if missing), and run `/mcp` in Claude Code to reload the connection.\n\n")
-	b.WriteString("**Identity binds on `cwd` (the worktree), not `session_id`.** That is why `/clear` keeps your identity and why every `register_agent` call MUST pass `cwd`. One agent = one worktree.\n\n")
+	b.WriteString("**Identity binds on `cwd` (the worktree), not `session_id`.** That is why `/clear` keeps your identity and why every `register_agent` call MUST pass `cwd`. A worktree can hold more than one agent (a team co-located by design) — each still resolves independently by name.\n\n")
 
 	b.WriteString("---\n\n")
 

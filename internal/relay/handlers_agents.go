@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -136,7 +137,14 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	// names, if any, purely as an informational cohabitant list.
 	var cwdCohabitants []string
 	if cwd := strings.TrimSpace(req.GetString("cwd", "")); cwd != "" {
-		cwdCohabitants, _ = h.db.ClaimCwd(project, name, cwd)
+		var claimErr error
+		cwdCohabitants, claimErr = h.db.ClaimCwd(project, name, cwd)
+		if claimErr != nil {
+			// Non-fatal: registration already succeeded. But a failed bind leaves
+			// this agent's cwd column unset — a ghost with no cwd, no signal — so
+			// this must not be silent.
+			log.Printf("register_agent: claim cwd failed for %s/%s (cwd=%s): %v", project, name, cwd, claimErr)
+		}
 	}
 
 	// Use the effective (post-merge) executive flag and profile slug so a respawn that

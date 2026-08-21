@@ -77,7 +77,8 @@ agent-relay hooks status      # show what's installed / wired
 ` + "```" + `
 
 Identity binds on the working directory (cwd), not the session id — so ` + "`/clear`" + `
-keeps your identity, and one agent = one worktree.
+keeps your identity. A worktree can hold more than one agent, each still
+resolves independently by name.
 
 ## 3. Register the MCP server for this project
 
