@@ -477,6 +477,22 @@ func (d *DB) CanMessage(project, sender, target string) (bool, error) {
 	return false, nil
 }
 
+// RecipientIsFleetExpected reports whether `name` is a fleet-known identity that
+// simply hasn't registered YET — as opposed to a genuinely unknown recipient
+// (typo, never dispatched). A task dispatched with profile_slug = name proves
+// the orchestrator already expects this exact identity to exist, even before
+// its own register_agent call lands (the boot-race behind the "not bound" NACK,
+// task 0464d6cb / e6a2ada0 FIX #4). Any status/archival counts — the signal is
+// "this name was addressed on purpose", not "the task is still open".
+func (d *DB) RecipientIsFleetExpected(project, name string) bool {
+	var count int
+	_ = d.ro().QueryRow(
+		`SELECT COUNT(*) FROM tasks WHERE project = ? AND profile_slug = ?`,
+		project, name,
+	).Scan(&count)
+	return count > 0
+}
+
 // CanReplyTo reports whether `sender` has a scoped reply-path to `target` —
 // i.e. `target` has previously had a message delivered to `sender`. Exposed so
 // the send path can give a precise, pre-check-style reason when a send is

@@ -115,7 +115,20 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 				return toolResultError(fmt.Sprintf("permission check failed: %v", err)), nil
 			}
 			if !allowed {
-				return toolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
+				// A name nobody has ever registered AND nobody ever dispatched a
+				// task to is a genuine unknown — refuse. But a name that was
+				// dispatched a task (profile_slug = to) and simply hasn't called
+				// register_agent yet is a boot-race, not a bad address: queue the
+				// send instead of hard-refusing. Deliveries key on to_agent by
+				// name (no agent-row FK), so it surfaces the moment the recipient
+				// registers and calls get_inbox — no separate flush required.
+				expected := false
+				if existing, _ := h.db.GetAgent(project, to); existing == nil {
+					expected = h.db.RecipientIsFleetExpected(project, to)
+				}
+				if !expected {
+					return toolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
+				}
 			}
 		}
 	}

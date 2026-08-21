@@ -431,6 +431,63 @@ func TestDMReplyPathGrant(t *testing.T) {
 	}
 }
 
+// TestSendMessageQueuesForFleetExpectedRecipient covers task 0464d6cb: a
+// recipient that was dispatched a task (profile_slug = name) but hasn't called
+// register_agent yet — a boot-race, not a bad address — must be queued
+// instead of hard-refused. TestSendMessageRefusesUnknownRecipient below
+// verifies the opposite: a name with no agent row and no dispatched task
+// still gets the hard refusal.
+func TestSendMessageQueuesForFleetExpectedRecipient(t *testing.T) {
+	h := testHandlers(t)
+	// is_executive auto-creates the admin team, so hasTeams=true and the
+	// permission check is enforced. "requester" is a plain, unrelated agent —
+	// no admin bypass — so the send below actually exercises CanMessage.
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "cto", "is_executive": true}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "requester"}))
+	// Dispatch a task to "new-hire" (profile_slug=name, this fleet's own
+	// pattern) before that identity has ever registered — the boot-race.
+	if res, _ := h.HandleDispatchTask(ctx, call(map[string]any{
+		"project": "p1", "as": "cto", "profile": "new-hire", "title": "onboard",
+	})); res.IsError {
+		t.Fatalf("dispatch_task failed: %s", expectError(t, res))
+	}
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "requester", "to": "new-hire", "content": "welcome",
+	}))
+	if res.IsError {
+		t.Fatalf("expected send to a fleet-expected-but-unregistered recipient to queue, got: %s", expectError(t, res))
+	}
+
+	// Deliver on bind: once "new-hire" registers and reads its inbox, the
+	// message that was queued before it existed must be there.
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "new-hire"}))
+	inbox, _ := h.HandleGetInbox(ctx, call(map[string]any{"project": "p1", "as": "new-hire", "format": "json"}))
+	data := parseJSON(t, inbox)
+	msgs, _ := data["messages"].([]any)
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 message delivered on bind, got %d (%v)", len(msgs), data)
+	}
+}
+
+// TestSendMessageRefusesUnknownRecipient: a name nobody ever registered AND
+// nobody ever dispatched a task to is a genuine unknown — the hard refusal
+// must be preserved (not every unregistered name gets a free pass).
+func TestSendMessageRefusesUnknownRecipient(t *testing.T) {
+	h := testHandlers(t)
+	// is_executive auto-creates the admin team so hasTeams=true; "requester"
+	// is a plain agent (no admin bypass) so CanMessage is actually exercised.
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "cto", "is_executive": true}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "requester"}))
+
+	res, _ := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "requester", "to": "totally-unknown", "content": "hi",
+	}))
+	if !res.IsError {
+		t.Fatal("expected send to a genuinely unknown recipient to still be refused")
+	}
+}
+
 func TestMarkRead(t *testing.T) {
 	h := testHandlers(t)
 	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
