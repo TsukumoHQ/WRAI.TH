@@ -1,0 +1,50 @@
+# [relay] fix TestToolSchemaBudget 31-byte overage on main
+
+## Team : wraith-backend-2 (tsukumo)
+## Branch : wraith-backend-2/schema-budget-trim (from main)
+## Relay task : d7080bc2-f42d-4bcf-a022-5c2127260477
+## Status : 🔵 SUBMITTED
+
+## 1. Product Brief
+
+### Acceptance Criteria
+- [ ] 1. go test -tags fts5 ./internal/relay/... -run TestToolSchemaBudget passes on the branch
+- [ ] 2. no behavior change, description-only trim
+- [ ] 3. full go test -tags fts5 ./... green
+
+## 2. Root cause & decisions
+
+ROOT_CAUSE: dispatchTaskTool()'s description (internal/relay/tools.go) grew in 30a455fc to explain the new board_id refuse-on-multi-board contract. My pre-merge worktree for that task branched off origin/main BEFORE 8e65593 (c229fe44, the update_task typed-ticket schema additions) had landed, so its local TestToolSchemaBudget run measured an under-counted base and passed at exactly 56320. Once merged, main's true total (base including 8e65593's additions + my dispatch_task description growth) came out 31 bytes over the 56320 cap — a race between two concurrently-in-flight PRs each individually within budget, not caught until the next full run.
+
+DECISION: trim dispatchTaskTool()'s description by 31+ bytes, no behavior change, wording only. Discovered while starting d601ac41 (a routine build/vet/test run on a fresh worktree off main failed on this test before I'd touched anything).
+
+REJECTED ALTERNATIVE: raising toolSchemaBudgetBytes. Not pursued — the test's own doc comment reserves that for genuinely new surface, not fat descriptions; this is pure prose fat from a wording change, trim was the right call.
+
+Repro: `go test -tags fts5 ./internal/relay/... -run TestToolSchemaBudget` — FAILs on origin/main HEAD (a0de115) before this fix (56351/56320), passes after (56320 exact).
+
+## review-agent-runtime verdict: SHIP
+Scope: internal/relay/tools.go (dispatchTaskTool description only)
+Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (583 passed, 12 packages)
+
+BLOCKERS (must fix before merge):
+- none
+
+NITS (non-blocking):
+- Pure wording trim, zero functional surface — no §1-6 concerns apply (no schema/scan, no concurrency, no writer, no auth/route, no tool-registry, no lifecycle change).
+
+## 3. Files changed
+
+```
+internal/relay/tools.go | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+```
+
+## 4. QA Log
+
+_(no review round yet)_
+
+## 5. Timeline
+
+
+---
+_Auto-assembled by the niwa scribe from the Q&A gate. Task `d7080bc2-f42d-4bcf-a022-5c2127260477`._

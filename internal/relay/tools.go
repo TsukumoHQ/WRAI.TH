@@ -445,7 +445,7 @@ func findProfilesTool() mcp.Tool {
 func dispatchTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"dispatch_task",
-		mcp.WithDescription("Dispatch a task to a profile (state 'pending', claimable by agents running it). profile='human' for tasks needing human action (auto-created on first use). Without board_id: auto-assigned on 0 boards ('backlog' created) or 1 board; refused (lists boards) if more than 1 exists."),
+		mcp.WithDescription("Dispatch a task to a profile (state 'pending', claimable by agents running it). profile='human' for human-action tasks (auto-created on first use). No board_id: auto-assigned on 0/1 boards ('backlog' if 0); refused (lists boards) if >1."),
 		asParam,
 		projectParam,
 		mcp.WithString("profile", mcp.Description("Profile slug to dispatch to"), mcp.Required()),
