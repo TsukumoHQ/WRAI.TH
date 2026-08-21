@@ -2,7 +2,10 @@ package relay
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
+
+	"github.com/mark3labs/mcp-go/mcp"
 )
 
 // Typed-status caps (DEC-relay-comms-discipline-1 mechanism B). These are
@@ -96,6 +99,52 @@ func buildStatusPayload(done, doing, blockers []string, note string) (content, m
 		b = []byte(`{"status_schema":1,"done":[],"doing":[],"blockers":[]}`)
 	}
 	return renderStatusContent(p), string(b), len(p.Blockers)
+}
+
+// statusSlotArg reads a done/doing/blockers arg as its well-formed string
+// array, folding anything that ISN'T shaped that way into prose instead of
+// dropping it: GetStringSlice silently falls back to nil on a type mismatch
+// (a bare string, a number, an object), which would otherwise silently lose
+// the caller's data. A malformed slot is accept-and-slotted into the note via
+// foldMalformedIntoNote, never rejected and never discarded.
+func statusSlotArg(req mcp.CallToolRequest, key string) (items []string, prose string) {
+	raw, ok := req.GetArguments()[key]
+	if !ok {
+		return nil, ""
+	}
+	switch v := raw.(type) {
+	case []any:
+		items = make([]string, 0, len(v))
+		var stray []string
+		for _, it := range v {
+			if s, ok := it.(string); ok {
+				items = append(items, s)
+			} else {
+				stray = append(stray, fmt.Sprintf("%v", it))
+			}
+		}
+		return items, strings.Join(stray, ", ")
+	case []string:
+		return v, ""
+	case nil:
+		return nil, ""
+	default:
+		return nil, fmt.Sprintf("%v", v)
+	}
+}
+
+// foldMalformedIntoNote appends a labeled "[slot: prose]" fragment onto note
+// when a slot arrived malformed — a no-op when prose is empty, so the ordinary
+// well-formed-array path is untouched.
+func foldMalformedIntoNote(note, slot, prose string) string {
+	if prose == "" {
+		return note
+	}
+	fragment := fmt.Sprintf("[%s: %s]", slot, prose)
+	if note == "" {
+		return fragment
+	}
+	return note + " " + fragment
 }
 
 // renderStatusContent produces the inbox-visible text. Empty slots are omitted;

@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -71,6 +72,70 @@ func TestSendStatusP0StillWakes(t *testing.T) {
 	n, _ := h.db.UnreadCountForAgent("p1", "lead")
 	if n != 1 {
 		t.Errorf("P0 status unread=%d, want 1 (P0 always wakes)", n)
+	}
+}
+
+// A malformed slot (prose instead of an array) is NEVER a 400 and never
+// silently dropped — it's folded into the note, so the caller's data survives
+// even when the shape is wrong (accept-and-slot, d601ac41).
+func TestSendStatusMalformedSlotFoldedIntoNote(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "worker", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "lead", "role": "lead"}))
+
+	res, _ := h.HandleSendStatus(ctx, call(map[string]any{
+		"project": "p1", "as": "worker", "to": "lead",
+		"done": "finished the auth work", // prose, not an array — malformed shape
+	}))
+	if res.IsError {
+		t.Fatalf("malformed slot must never 400: %v", res)
+	}
+	sent := parseJSON(t, res)
+	id, _ := sent["id"].(string)
+
+	got := parseJSON(t, mustGetMessage(t, h, "p1", "lead", id))
+	meta, _ := got["metadata"].(string)
+	var p statusPayload
+	if err := json.Unmarshal([]byte(meta), &p); err != nil {
+		t.Fatalf("metadata not a status schema: %v (%q)", err, meta)
+	}
+	if len(p.Done) != 0 {
+		t.Errorf("malformed done must not parse as a slot item, got %v", p.Done)
+	}
+	if p.Note == "" || !strings.Contains(p.Note, "finished the auth work") {
+		t.Errorf("malformed done text must survive in the note, got %q", p.Note)
+	}
+}
+
+// A stray non-string item inside an otherwise well-formed array is folded into
+// the note too, not silently skipped — the well-formed items still slot
+// normally.
+func TestSendStatusStrayItemFoldedIntoNote(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "worker", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "lead", "role": "lead"}))
+
+	res, _ := h.HandleSendStatus(ctx, call(map[string]any{
+		"project": "p1", "as": "worker", "to": "lead",
+		"blockers": []any{"real blocker", float64(3)},
+	}))
+	if res.IsError {
+		t.Fatalf("stray item must never 400: %v", res)
+	}
+	sent := parseJSON(t, res)
+	id, _ := sent["id"].(string)
+
+	got := parseJSON(t, mustGetMessage(t, h, "p1", "lead", id))
+	meta, _ := got["metadata"].(string)
+	var p statusPayload
+	if err := json.Unmarshal([]byte(meta), &p); err != nil {
+		t.Fatalf("metadata not a status schema: %v (%q)", err, meta)
+	}
+	if len(p.Blockers) != 1 || p.Blockers[0] != "real blocker" {
+		t.Errorf("well-formed item must still slot normally, got %v", p.Blockers)
+	}
+	if p.Note == "" || !strings.Contains(p.Note, "3") {
+		t.Errorf("stray non-string item must survive in the note, got %q", p.Note)
 	}
 }
 

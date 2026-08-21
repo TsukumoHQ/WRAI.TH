@@ -246,12 +246,19 @@ func (h *Handlers) HandleSendStatus(ctx context.Context, req mcp.CallToolRequest
 
 	priority := mapPriority(req.GetString("priority", "P2"))
 	ttlSeconds := req.GetInt("ttl_seconds", 14400)
-	content, metadata, _ := buildStatusPayload(
-		req.GetStringSlice("done", nil),
-		req.GetStringSlice("doing", nil),
-		req.GetStringSlice("blockers", nil),
-		req.GetString("note", ""),
-	)
+
+	// Accept-and-slot: a malformed done/doing/blockers arg (prose instead of an
+	// array, a stray non-string item) is never silently dropped — it's folded
+	// into the note valve instead, so nothing the caller sent is lost.
+	doneItems, doneProse := statusSlotArg(req, "done")
+	doingItems, doingProse := statusSlotArg(req, "doing")
+	blockersItems, blockersProse := statusSlotArg(req, "blockers")
+	note := req.GetString("note", "")
+	note = foldMalformedIntoNote(note, "done", doneProse)
+	note = foldMalformedIntoNote(note, "doing", doingProse)
+	note = foldMalformedIntoNote(note, "blockers", blockersProse)
+
+	content, metadata, _ := buildStatusPayload(doneItems, doingItems, blockersItems, note)
 
 	// Unknown-project guard (mirrors send_message): a status to a project nobody
 	// created is a black hole. "default" stays grandfathered.
