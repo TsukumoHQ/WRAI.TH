@@ -120,6 +120,13 @@ type Task struct {
 	// once. Set only on Linear-sourced refused rows.
 	RefusalNotifiedAt *string `json:"refusal_notified_at,omitempty"`
 
+	// TraceID is the correlation grouping key (trace_id v1) for this dispatch's
+	// causal chain: task -> messages -> events -> gate. Minted at DispatchTask if
+	// absent, inherited by a subtask from its parent. Deliberately NOT scanned by
+	// taskColumns/scanTask (see tasks.go) — populated only by DispatchTask's own
+	// return value or GetTask's dedicated lookup, never a widened shared column.
+	TraceID *string `json:"trace_id,omitempty"`
+
 	Subtasks []Task `json:"subtasks,omitempty"`
 }
 
@@ -147,6 +154,10 @@ type AuditEntry struct {
 	Details      string `json:"details,omitempty"` // optional json blob (old/new)
 	Reason       string `json:"reason,omitempty"`
 	CreatedAt    string `json:"created_at"`
+	// TraceID (trace_id v1) is auto-derived from the resource's task when
+	// ResourceType=="task" and the caller left it unset — see RecordAudit
+	// (audit.go). Empty when the resource is untraceable or has no trace.
+	TraceID string `json:"trace_id,omitempty"`
 }
 
 type Board struct {

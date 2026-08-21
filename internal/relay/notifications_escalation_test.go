@@ -34,7 +34,7 @@ func TestResolveManager_FallsBackToDispatcher(t *testing.T) {
 
 	// No manager AND no dispatcher in the payload → resolve dispatcher from the
 	// task record (task_id only).
-	task, err := database.DispatchTask("p1", "worker", "lead2", "blocked thing", "", "P1", nil, nil, db.TypedTicket{}, false)
+	task, err := database.DispatchTask("p1", "worker", "lead2", "blocked thing", "", "P1", nil, nil, db.TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestResolveDispatcher(t *testing.T) {
 		t.Fatalf("dispatcher from payload, got %v", got)
 	}
 
-	task, err := database.DispatchTask("p1", "prof", "the-dispatcher", "t", "", "P2", nil, nil, db.TypedTicket{}, false)
+	task, err := database.DispatchTask("p1", "prof", "the-dispatcher", "t", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

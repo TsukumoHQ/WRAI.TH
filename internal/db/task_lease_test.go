@@ -20,7 +20,7 @@ func regAgent(t *testing.T, d *DB, project, name string) {
 func dispatchClaimed(t *testing.T, d *DB, project, holder string) string {
 	t.Helper()
 	regAgent(t, d, project, holder)
-	task, err := d.DispatchTask(project, "", "dispatcher", "lease me", "", "P1", nil, nil, TypedTicket{}, false)
+	task, err := d.DispatchTask(project, "", "dispatcher", "lease me", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestReclaimNonReclaimableStateRefused(t *testing.T) {
 	regAgent(t, d, project, taker)
 
 	// (a) a pending task — has no holder; claim_task is the right call.
-	pend, err := d.DispatchTask(project, "", "dispatcher", "pending", "", "P1", nil, nil, TypedTicket{}, false)
+	pend, err := d.DispatchTask(project, "", "dispatcher", "pending", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch pending: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestReclaimNonReclaimableStateRefused(t *testing.T) {
 func TestDoubleClaimTypedConflict(t *testing.T) {
 	d := testDB(t)
 	const project = "p1"
-	task, err := d.DispatchTask(project, "", "dispatcher", "race", "", "P1", nil, nil, TypedTicket{}, false)
+	task, err := d.DispatchTask(project, "", "dispatcher", "race", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

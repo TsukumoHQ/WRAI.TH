@@ -1450,7 +1450,7 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 	// 400 below). Free-form projects dispatch unchanged.
 	ticket := db.TypedTicket{Goal: body.Goal, AcceptanceCriteria: acJSON, Dod: body.Dod}
 
-	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID, ticket, false)
+	task, err := r.DB.DispatchTask(body.Project, body.Profile, "user", body.Title, body.Description, body.Priority, body.ParentTaskID, body.BoardID, ticket, false, nil)
 	if err != nil {
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {

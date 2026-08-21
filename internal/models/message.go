@@ -25,6 +25,13 @@ type Message struct {
 	// explicitly (the wake predicate reads it in a WHERE, not a scan), so it is
 	// nil on the existing inbox reads — additive, no scan-lockstep churn.
 	ActionRequired *string `json:"action_required,omitempty"`
+	// TraceID (trace_id v1) is inherited, never caller-required: a reply takes
+	// its parent message's trace_id, a task-announcement message takes its
+	// task's (see deriveTraceID, messages.go). Populated at insert time on the
+	// two message-creation paths; nil on existing inbox/thread reads (not yet
+	// added to their column lists — same additive-not-scanned shape as
+	// ActionRequired above).
+	TraceID *string `json:"trace_id,omitempty"`
 }
 
 // DeliveryStatusRow is one row of the queryable ack state (T4): where a

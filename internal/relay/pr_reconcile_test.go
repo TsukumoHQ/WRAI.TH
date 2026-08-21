@@ -13,22 +13,22 @@ func TestPRReconcileCandidates(t *testing.T) {
 	r := testRelay(t)
 
 	// (1) open PR, non-terminal task → candidate.
-	open, _ := r.DB.DispatchTask("p1", "dev", "boss", "open pr", "", "P2", nil, nil, db.TypedTicket{}, false)
+	open, _ := r.DB.DispatchTask("p1", "dev", "boss", "open pr", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	_, _ = r.DB.SetTaskPR(open.ID, "p1", ptr("u1"), intp(1), ptr("open"), ptr("o/r"))
 
 	// (2) merged PR → excluded (terminal PR state).
-	merged, _ := r.DB.DispatchTask("p1", "dev", "boss", "merged pr", "", "P2", nil, nil, db.TypedTicket{}, false)
+	merged, _ := r.DB.DispatchTask("p1", "dev", "boss", "merged pr", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	_, _ = r.DB.SetTaskPR(merged.ID, "p1", ptr("u2"), intp(2), ptr("merged"), ptr("o/r"))
 
 	// (3) open PR but task done → excluded (terminal task).
-	doneTask, _ := r.DB.DispatchTask("p1", "dev", "boss", "done task", "", "P2", nil, nil, db.TypedTicket{}, false)
+	doneTask, _ := r.DB.DispatchTask("p1", "dev", "boss", "done task", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	_, _ = r.DB.SetTaskPR(doneTask.ID, "p1", ptr("u3"), intp(3), ptr("open"), ptr("o/r"))
 	if _, _, err := r.DB.ForcePRTransition("p1", doneTask.ID, "done", nil); err != nil {
 		t.Fatalf("force done: %v", err)
 	}
 
 	// (4) no PR linked → excluded.
-	_, _ = r.DB.DispatchTask("p1", "dev", "boss", "no pr", "", "P2", nil, nil, db.TypedTicket{}, false)
+	_, _ = r.DB.DispatchTask("p1", "dev", "boss", "no pr", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 
 	cands, err := r.DB.ListPRReconcileCandidates("p1", 200)
 	if err != nil {

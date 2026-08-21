@@ -152,7 +152,7 @@ func (r *Relay) apiSignalWebhook(w http.ResponseWriter, req *http.Request) {
 	// PERMANENT: a redelivery would fail
 	// identically, so we keep the delivery marker (no compensating release) and
 	// return 422, never spin an at-least-once retry into a poison-message loop.
-	task, _, err := r.Handlers.dispatchCore(project, signalAgent, cfg.Profile, title, sig.Description, priority, nil, boardID, db.TypedTicket{}, false)
+	task, _, err := r.Handlers.dispatchCore(project, signalAgent, cfg.Profile, title, sig.Description, priority, nil, boardID, db.TypedTicket{}, false, nil)
 	if err != nil {
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {

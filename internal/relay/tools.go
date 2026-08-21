@@ -457,10 +457,11 @@ func dispatchTaskTool() mcp.Tool {
 		),
 		mcp.WithString("parent_task_id", mcp.Description("Parent task ID (subtasks)")),
 		mcp.WithString("board_id", mcp.Description("Board to assign to")),
-		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required for projects that enforce typed tickets (e.g. niwa); optional elsewhere.")),
-		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array string of individually testable items, e.g. '[\"builds green\",\"refuses without goal\"]'. The review gate verdicts per item. Required where typed tickets are enforced.")),
-		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done (the merge bar). Required where typed tickets are enforced.")),
+		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required where typed tickets are enforced (e.g. niwa); optional elsewhere.")),
+		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array of testable items, e.g. '[\"builds green\"]'. Review gate verdicts per item. Required where enforced.")),
+		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done. Required where enforced.")),
 		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog' (groomed; promote_task lifts it to pending). Default false.")),
+		mcp.WithString("trace_id", mcp.Description("32-hex correlation id; auto-minted if omitted.")),
 	)
 }
 

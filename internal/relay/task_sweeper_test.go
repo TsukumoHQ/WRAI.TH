@@ -12,7 +12,7 @@ import (
 func TestSweepStrandedPRTasks_Relay(t *testing.T) {
 	r := testRelay(t)
 
-	task, err := r.DB.DispatchTask("p1", "dev", "cto", "merged pr", "", "P2", nil, nil, db.TypedTicket{}, false)
+	task, err := r.DB.DispatchTask("p1", "dev", "cto", "merged pr", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

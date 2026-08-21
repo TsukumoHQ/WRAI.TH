@@ -18,7 +18,7 @@ import (
 func TestDispatchCore_TypedTicket_RefusesBareSelfDispatch(t *testing.T) {
 	h := testHandlers(t)
 
-	_, _, err := h.dispatchCore("niwa", "backend-lead", "dev", "review followup", "", "P2", nil, nil, db.TypedTicket{}, false)
+	_, _, err := h.dispatchCore("niwa", "backend-lead", "dev", "review followup", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	var tte *db.TypedTicketError
 	if !errors.As(err, &tte) {
 		t.Fatalf("bare self-dispatch via dispatchCore on an enforced project must refuse, got %v", err)
@@ -28,7 +28,7 @@ func TestDispatchCore_TypedTicket_RefusesBareSelfDispatch(t *testing.T) {
 	}
 
 	task, _, err := h.dispatchCore("niwa", "backend-lead", "dev", "typed followup", "", "P2", nil, nil,
-		db.TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"}, false)
+		db.TypedTicket{Goal: "g", AcceptanceCriteria: `["a"]`, Dod: "d"}, false, nil)
 	if err != nil {
 		t.Fatalf("complete self-dispatch must land: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestDispatchCore_TypedTicket_RefusalLeavesNoStrayBoard(t *testing.T) {
 	}
 	// boardID nil → dispatchCore would auto-create a Backlog board if it reached
 	// that far. A bare ticket must be refused before that.
-	if _, _, err := h.dispatchCore("niwa", "cto", "dev", "bare", "", "P2", nil, nil, db.TypedTicket{}, false); err == nil {
+	if _, _, err := h.dispatchCore("niwa", "cto", "dev", "bare", "", "P2", nil, nil, db.TypedTicket{}, false, nil); err == nil {
 		t.Fatal("bare dispatch must be refused")
 	}
 	if boards, _ := h.db.ListBoards("niwa"); len(boards) != 0 {

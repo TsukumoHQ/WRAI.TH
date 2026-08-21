@@ -11,7 +11,7 @@ import (
 func TestBacklogLifecycle(t *testing.T) {
 	d := testDB(t)
 
-	task, err := d.DispatchTask("p", "dev", "cto", "groomed", "", "P2", nil, nil, TypedTicket{}, true)
+	task, err := d.DispatchTask("p", "dev", "cto", "groomed", "", "P2", nil, nil, TypedTicket{}, true, nil)
 	if err != nil {
 		t.Fatalf("dispatch backlog: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestBacklogLifecycle(t *testing.T) {
 // existing path is unchanged.
 func TestDispatchDefaultPendingClaimable(t *testing.T) {
 	d := testDB(t)
-	task, err := d.DispatchTask("p", "dev", "cto", "normal", "", "P2", nil, nil, TypedTicket{}, false)
+	task, err := d.DispatchTask("p", "dev", "cto", "normal", "", "P2", nil, nil, TypedTicket{}, false, nil)
 	if err != nil || task.Status != "pending" {
 		t.Fatalf("default dispatch status = %v, err = %v; want pending", task.Status, err)
 	}
@@ -63,7 +63,7 @@ func TestDispatchDefaultPendingClaimable(t *testing.T) {
 // and refuses to pull an in-progress task back to pending.
 func TestPromoteLifecycleEnforced(t *testing.T) {
 	d := testDB(t)
-	task, _ := d.DispatchTask("p", "dev", "cto", "t", "", "P2", nil, nil, TypedTicket{}, false)
+	task, _ := d.DispatchTask("p", "dev", "cto", "t", "", "P2", nil, nil, TypedTicket{}, false, nil)
 	// pending → promote is an idempotent no-op: still pending, no error, changed=false
 	// so the caller doesn't re-announce (double-promote must not re-wake the fleet).
 	if got, changed, err := d.PromoteTask(task.ID, "cto", "p"); err != nil || changed || got.Status != "pending" {

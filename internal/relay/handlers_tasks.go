@@ -108,6 +108,14 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	parentTaskID := optionalString(req.GetString("parent_task_id", ""))
 	boardID := optionalString(req.GetString("board_id", ""))
 
+	// Correlation (trace_id v1): an explicit trace_id must be well-formed (32
+	// lowercase hex) — refused, never silently accepted-as-garbage or dropped.
+	// Omitted is the normal case: DispatchTask mints or inherits one.
+	traceID := optionalString(req.GetString("trace_id", ""))
+	if traceID != nil && !db.ValidTraceID(*traceID) {
+		return validationError(CodeInvalidArgument, "trace_id must be 32 lowercase hex characters"), nil
+	}
+
 	// Typed ticket (V-lifecycle). Enforcement is the single guard in
 	// db.DispatchTask (fires below): an incomplete ticket on an enforced project
 	// is refused as a *db.TypedTicketError; free-form projects dispatch unchanged.
@@ -131,7 +139,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	}
 
 	backlog := req.GetBool("backlog", false)
-	task, autoBoard, err := h.dispatchCore(project, agent, profile, title, description, priority, parentTaskID, boardID, ticket, backlog)
+	task, autoBoard, err := h.dispatchCore(project, agent, profile, title, description, priority, parentTaskID, boardID, ticket, backlog, traceID)
 	if err != nil {
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {
@@ -177,7 +185,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 // emits the task.dispatched event that drives the normal dispatch pipeline.
 // Callers own quota/ticket-validation/dedup-warning; this is the create+announce
 // core so a signal-created task is indistinguishable from a hand-dispatched one.
-func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, description, priority string, parentTaskID, boardID *string, ticket db.TypedTicket, backlog bool) (*models.Task, *models.Board, error) {
+func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, description, priority string, parentTaskID, boardID *string, ticket db.TypedTicket, backlog bool, traceID *string) (*models.Task, *models.Board, error) {
 	// Typed-ticket guard, hoisted AHEAD of the profile/board auto-create below.
 	// db.DispatchTask is the authoritative choke and would refuse a bare ticket on
 	// an enforced project regardless — but by then this function may already have
@@ -216,7 +224,7 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 		}
 	}
 
-	task, err := h.db.DispatchTask(project, profile, dispatchedBy, title, description, priority, parentTaskID, boardID, ticket, backlog)
+	task, err := h.db.DispatchTask(project, profile, dispatchedBy, title, description, priority, parentTaskID, boardID, ticket, backlog, traceID)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1071,7 +1079,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 			priority = "P2"
 		}
 		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod}
-		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, false)
+		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, false, nil)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", item.Title, err))
 			continue

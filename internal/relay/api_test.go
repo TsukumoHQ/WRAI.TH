@@ -423,7 +423,7 @@ func TestAPITaskTransition(t *testing.T) {
 	r := testRelay(t)
 	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
 
-	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "task1", "", "P2", nil, nil, db.TypedTicket{}, false)
+	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "task1", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 
 	// Claim (status=accepted)
 	w := doAPI(r, "POST", "/tasks/"+task.ID+"/transition", `{"project":"p1","agent":"bot-a","status":"accepted"}`)
@@ -459,8 +459,8 @@ func TestAPITaskTransition(t *testing.T) {
 func TestAPIGetAllTasks(t *testing.T) {
 	r := testRelay(t)
 	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
-	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "task1", "", "P2", nil, nil, db.TypedTicket{}, false)
-	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "task2", "", "P1", nil, nil, db.TypedTicket{}, false)
+	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "task1", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
+	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "task2", "", "P1", nil, nil, db.TypedTicket{}, false, nil)
 
 	w := doAPI(r, "GET", "/tasks/all", "")
 	if w.Code != http.StatusOK {
@@ -502,7 +502,7 @@ func seedCycleTask(t *testing.T, r *Relay, id, project, title, state, cycleID, c
 func TestAPIGetBoardTasks(t *testing.T) {
 	r := testRelay(t)
 	// One native task + two Linear tasks across two cycles.
-	_, _ = r.DB.DispatchTask("p1", "dev", "user", "native task", "", "P2", nil, nil, db.TypedTicket{}, false)
+	_, _ = r.DB.DispatchTask("p1", "dev", "user", "native task", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	seedCycleTask(t, r, "1", "p1", "cycle-A task", "In Progress", "cyc-a", "Cycle A", "2026-06-01", "2026-06-14", 3)
 	seedCycleTask(t, r, "2", "p1", "cycle-B task", "Todo", "cyc-b", "Cycle B", "2026-05-01", "2026-05-14", 5)
 
@@ -532,8 +532,8 @@ func TestAPIGetBoardTasks(t *testing.T) {
 
 func TestAPIGetBoardTasksExcludesCancelledAndArchived(t *testing.T) {
 	r := testRelay(t)
-	tk, _ := r.DB.DispatchTask("p1", "dev", "user", "keep me", "", "P2", nil, nil, db.TypedTicket{}, false)
-	cn, _ := r.DB.DispatchTask("p1", "dev", "user", "cancel me", "", "P2", nil, nil, db.TypedTicket{}, false)
+	tk, _ := r.DB.DispatchTask("p1", "dev", "user", "keep me", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
+	cn, _ := r.DB.DispatchTask("p1", "dev", "user", "cancel me", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	_, _ = r.DB.CancelTask(cn.ID, "user", "p1", nil)
 	_ = tk // keep alive
 
@@ -609,7 +609,7 @@ func TestAPIGetCycles(t *testing.T) {
 
 func TestAPIGetCyclesEmptyNative(t *testing.T) {
 	r := testRelay(t)
-	_, _ = r.DB.DispatchTask("p1", "dev", "user", "native only", "", "P2", nil, nil, db.TypedTicket{}, false)
+	_, _ = r.DB.DispatchTask("p1", "dev", "user", "native only", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 
 	w := doAPI(r, "GET", "/cycles?project=p1", "")
 	if w.Code != http.StatusOK {
@@ -778,7 +778,7 @@ func TestAPIGetLatestMessagesAllProjects(t *testing.T) {
 func TestAPIGetLatestTasks(t *testing.T) {
 	r := testRelay(t)
 	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
-	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "recent task", "", "P2", nil, nil, db.TypedTicket{}, false)
+	_, _ = r.DB.DispatchTask("p1", "dev", "bot-a", "recent task", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 
 	w := doAPI(r, "GET", "/tasks/latest?project=p1", "")
 	if w.Code != http.StatusOK {
@@ -789,7 +789,7 @@ func TestAPIGetLatestTasks(t *testing.T) {
 func TestAPIUpdateTask(t *testing.T) {
 	r := testRelay(t)
 	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
-	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "old title", "", "P2", nil, nil, db.TypedTicket{}, false)
+	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "old title", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 
 	w := doAPI(r, "PUT", "/tasks/"+task.ID, `{"project":"p1","title":"new title"}`)
 	if w.Code != http.StatusOK {
@@ -804,7 +804,7 @@ func TestAPIUpdateTask(t *testing.T) {
 func TestAPIDeleteTask(t *testing.T) {
 	r := testRelay(t)
 	_, _, _ = r.DB.RegisterAgent("p1", "bot-a", "dev", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{})
-	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "to delete", "", "P2", nil, nil, db.TypedTicket{}, false)
+	task, _ := r.DB.DispatchTask("p1", "dev", "bot-a", "to delete", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 
 	w := doAPI(r, "DELETE", "/tasks/"+task.ID+"?project=p1", "")
 	if w.Code != http.StatusOK {

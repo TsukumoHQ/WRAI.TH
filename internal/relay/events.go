@@ -152,6 +152,14 @@ func emitTaskEvent(events *EventBus, name, action, project string, t *models.Tas
 	if t.LinearKey != nil && *t.LinearKey != "" {
 		semantic["linear_key"] = *t.LinearKey
 	}
+	// Correlation (trace_id v1) — carried when the caller's task object already
+	// has it (the freshly-DispatchTask'd task on the dispatch event). Other
+	// lifecycle transitions (claim/start/complete/...) fetch their *models.Task
+	// via taskColumns/scanTask, which deliberately does NOT scan trace_id (see
+	// tasks.go), so those events don't carry it yet — scoped out of v1.
+	if t.TraceID != nil && *t.TraceID != "" {
+		semantic["trace_id"] = *t.TraceID
+	}
 	for _, m := range extra {
 		for k, v := range m {
 			semantic[k] = v

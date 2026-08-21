@@ -20,8 +20,8 @@ func backdateDispatchedAt(t *testing.T, d *DB, taskID string, age time.Duration)
 // the ACK checker nags/escalates a container that was never meant to be claimed.
 func TestGetUnackedTasksExcludesRunContainers(t *testing.T) {
 	d := testDB(t)
-	plain, _ := d.DispatchTask("proj", "lead", "cto", "plain", "", "P1", nil, nil, TypedTicket{}, false)
-	container, _ := d.DispatchTask("proj", "lead", "cto", "container", "", "P1", nil, nil, TypedTicket{}, false)
+	plain, _ := d.DispatchTask("proj", "lead", "cto", "plain", "", "P1", nil, nil, TypedTicket{}, false, nil)
+	container, _ := d.DispatchTask("proj", "lead", "cto", "container", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	backdateDispatchedAt(t, d, plain.ID, time.Hour)
 	backdateDispatchedAt(t, d, container.ID, time.Hour)
 
@@ -45,7 +45,7 @@ func TestGetUnackedTasksExcludesRunContainers(t *testing.T) {
 // is no longer true — this is the CAS guard that closes that window.
 func TestAckMarkNoOpsWhenTaskBecomesRunContainerMidScan(t *testing.T) {
 	d := testDB(t)
-	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
+	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	backdateDispatchedAt(t, d, p.ID, time.Hour)
 
 	// The scanner's read: task is a plain unacked pending task (no run_state).
@@ -84,7 +84,7 @@ func TestAckMarkNoOpsWhenTaskBecomesRunContainerMidScan(t *testing.T) {
 // ticks of the checker must not both mark+notify the same task.
 func TestAckMarkIdempotentAcrossConcurrentTicks(t *testing.T) {
 	d := testDB(t)
-	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
+	p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	backdateDispatchedAt(t, d, p.ID, time.Hour)
 
 	ok1, err := d.MarkTaskAckNotified(p.ID)

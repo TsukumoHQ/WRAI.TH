@@ -4,6 +4,7 @@ import (
 	"agent-relay/internal/models"
 	"agent-relay/internal/normalize"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -79,6 +80,45 @@ func (d *DB) effectiveActionRequired(declared, msgType string, replyTo *string, 
 	return d.deriveActionRequired(msgType, replyTo, project)
 }
 
+// deriveTraceID computes a message's trace_id: a reply inherits its parent
+// message's trace_id; a task-announcement message (metadata carries a
+// "task_id" key — the shape announceClaimable already writes) inherits the
+// task's trace_id. Anything else has no trace (nil) — trace_id groups a
+// dispatch's causal chain, it isn't stamped on every message. Best-effort: a
+// lookup miss just leaves nil, mirroring deriveActionRequired's shape above.
+func (d *DB) deriveTraceID(metadata string, replyTo *string, project string) *string {
+	if replyTo != nil && *replyTo != "" {
+		var t sql.NullString
+		_ = d.ro().QueryRow("SELECT trace_id FROM messages WHERE id = ? AND project = ?", *replyTo, project).Scan(&t)
+		if t.Valid && t.String != "" {
+			v := t.String
+			return &v
+		}
+	}
+	if taskID := extractTaskIDFromMetadata(metadata); taskID != "" {
+		var t sql.NullString
+		_ = d.ro().QueryRow("SELECT trace_id FROM tasks WHERE id = ? AND project = ?", taskID, project).Scan(&t)
+		if t.Valid && t.String != "" {
+			v := t.String
+			return &v
+		}
+	}
+	return nil
+}
+
+// extractTaskIDFromMetadata pulls "task_id" out of a message's metadata JSON
+// (the shape announceClaimable writes: {"task_id":"<uuid>"}). "" if absent or
+// unparseable — best-effort, never errors the insert.
+func extractTaskIDFromMetadata(metadata string) string {
+	var m struct {
+		TaskID string `json:"task_id"`
+	}
+	if err := json.Unmarshal([]byte(metadata), &m); err != nil {
+		return ""
+	}
+	return m.TaskID
+}
+
 func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string) (*models.Message, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {
@@ -86,6 +126,8 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 	}
 	ttlSeconds = normalizeTTL(priority, ttlSeconds)
 	actionRequired := d.deriveActionRequired(msgType, replyTo, project)
+	normalizedMetadata := normalize.JSONKeys(metadata)
+	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -95,18 +137,19 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 		Type:           msgType,
 		Subject:        subject,
 		Content:        normalize.JSONKeys(content),
-		Metadata:       normalize.JSONKeys(metadata),
+		Metadata:       normalizedMetadata,
 		CreatedAt:      now,
 		ConversationID: conversationID,
 		Project:        project,
 		Priority:       priority,
 		TTLSeconds:     ttlSeconds,
 		ActionRequired: &actionRequired,
+		TraceID:        traceID,
 	}
 
 	_, err := d.conn.Exec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, actionRequired,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, actionRequired, traceID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
@@ -130,6 +173,8 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	}
 	ttlSeconds = normalizeTTL(priority, ttlSeconds)
 	effTag := d.effectiveActionRequired(actionRequired, msgType, replyTo, project)
+	normalizedMetadata := normalize.JSONKeys(metadata)
+	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -139,13 +184,14 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 		Type:           msgType,
 		Subject:        subject,
 		Content:        normalize.JSONKeys(content),
-		Metadata:       normalize.JSONKeys(metadata),
+		Metadata:       normalizedMetadata,
 		CreatedAt:      now,
 		ConversationID: conversationID,
 		Project:        project,
 		Priority:       priority,
 		TTLSeconds:     ttlSeconds,
 		ActionRequired: &effTag,
+		TraceID:        traceID,
 	}
 
 	tx, err := d.conn.Begin()
@@ -155,8 +201,8 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	defer func() { _ = tx.Rollback() }() // no-op once committed
 
 	if _, err := tx.Exec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag, traceID,
 	); err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}

@@ -282,7 +282,7 @@ func TestMixedReadWriteFunction(t *testing.T) {
 	}
 
 	// Dispatch + complete task — tests transitionTask mixed read/write
-	task, err := d.DispatchTask("default", "dev", "bot-a", "test task", "desc", "P2", nil, nil, TypedTicket{}, false)
+	task, err := d.DispatchTask("default", "dev", "bot-a", "test task", "desc", "P2", nil, nil, TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

@@ -420,6 +420,10 @@ func migrate(conn *sql.DB) error {
 		// break. A guard clause makes 'none' unable to suppress a
 		// P0/question/task/blocked wake even if mis-tagged.
 		"action_required": "TEXT",
+		// --- Correlation (trace_id v1) — inherited, never caller-required: a
+		// reply takes its parent message's trace_id, a task-announcement message
+		// takes its task's. See deriveTraceID (messages.go). NULL = no trace.
+		"trace_id": "TEXT",
 	})
 
 	ensureColumns(conn, "conversations", map[string]string{
@@ -652,6 +656,13 @@ func migrate(conn *sql.DB) error {
 		// cycle re-comments. Cleared when the issue becomes conforming, so a later
 		// regression re-notifies exactly once. Nullable, additive.
 		"refusal_notified_at": "TEXT",
+
+		// --- Correlation (trace_id v1) — the W3C-trace-id-shaped (32 lowercase
+		// hex, crypto/rand) grouping key for one dispatch's causal chain: task ->
+		// messages -> events -> gate. NULL = no trace. Deliberately kept OUT of
+		// taskColumns/scanTask (see tasks.go DispatchTask/GetTask) — a dedicated
+		// query populates it only where read, never a widened shared column list.
+		"trace_id": "TEXT",
 	})
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
@@ -695,6 +706,9 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_log(project, resource_id, created_at)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_audit_project ON audit_log(project, created_at)`)
+	// Correlation (trace_id v1) — auto-derived in RecordAudit from the task's
+	// trace_id when resource_type="task", never a required caller field.
+	ensureColumns(conn, "audit_log", map[string]string{"trace_id": "TEXT"})
 
 	// Linear connector sync log (capped audit trail of write-back outcomes).
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS linear_sync_log (

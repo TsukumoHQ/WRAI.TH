@@ -25,7 +25,7 @@ func setPRState(t *testing.T, d *DB, taskID, project, prState, status string) {
 func TestListStrandedPRTasks(t *testing.T) {
 	d := testDB(t)
 	mk := func(title, prState, status string) string {
-		task, err := d.DispatchTask("p1", "dev", "cto", title, "", "P2", nil, nil, TypedTicket{}, false)
+		task, err := d.DispatchTask("p1", "dev", "cto", title, "", "P2", nil, nil, TypedTicket{}, false, nil)
 		if err != nil {
 			t.Fatalf("dispatch %s: %v", title, err)
 		}
@@ -56,7 +56,7 @@ func TestListStrandedPRTasks(t *testing.T) {
 // sweeper calls) moves it to done; a terminal task is never resurrected.
 func TestStrandedPRConvergence(t *testing.T) {
 	d := testDB(t)
-	task, err := d.DispatchTask("p1", "dev", "cto", "merged", "", "P2", nil, nil, TypedTicket{}, false)
+	task, err := d.DispatchTask("p1", "dev", "cto", "merged", "", "P2", nil, nil, TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

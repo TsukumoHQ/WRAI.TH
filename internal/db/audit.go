@@ -2,6 +2,7 @@ package db
 
 import (
 	"agent-relay/internal/models"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -23,11 +24,21 @@ func (d *DB) RecordAudit(e models.AuditEntry) error {
 	if e.Project == "" {
 		e.Project = "default"
 	}
+	// Correlation (trace_id v1) — auto-derived from the task when the caller
+	// left it unset, never a required field. Best-effort: a lookup miss just
+	// leaves it empty, mirroring messages' deriveTraceID idiom.
+	if e.TraceID == "" && e.ResourceType == "task" && e.ResourceID != "" {
+		var t sql.NullString
+		_ = d.ro().QueryRow("SELECT trace_id FROM tasks WHERE id = ? AND project = ?", e.ResourceID, e.Project).Scan(&t)
+		if t.Valid {
+			e.TraceID = t.String
+		}
+	}
 	_, err := d.conn.Exec(
-		`INSERT INTO audit_log (id, project, actor, action, resource_type, resource_id, summary, details, reason, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO audit_log (id, project, actor, action, resource_type, resource_id, summary, details, reason, created_at, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Project, e.Actor, e.Action, e.ResourceType, e.ResourceID,
-		e.Summary, e.Details, e.Reason, e.CreatedAt,
+		e.Summary, e.Details, e.Reason, e.CreatedAt, e.TraceID,
 	)
 	return err
 }
@@ -38,7 +49,7 @@ func (d *DB) ListAudit(project, resourceID string, limit int) ([]models.AuditEnt
 	if limit <= 0 || limit > 500 {
 		limit = 100
 	}
-	query := `SELECT id, project, actor, action, resource_type, resource_id, summary, details, reason, created_at
+	query := `SELECT id, project, actor, action, resource_type, resource_id, summary, details, reason, created_at, trace_id
 		FROM audit_log WHERE project = ?`
 	args := []any{project}
 	if resourceID != "" {
@@ -57,10 +68,12 @@ func (d *DB) ListAudit(project, resourceID string, limit int) ([]models.AuditEnt
 	out := []models.AuditEntry{}
 	for rows.Next() {
 		var e models.AuditEntry
+		var traceID sql.NullString
 		if err := rows.Scan(&e.ID, &e.Project, &e.Actor, &e.Action, &e.ResourceType,
-			&e.ResourceID, &e.Summary, &e.Details, &e.Reason, &e.CreatedAt); err != nil {
+			&e.ResourceID, &e.Summary, &e.Details, &e.Reason, &e.CreatedAt, &traceID); err != nil {
 			return nil, err
 		}
+		e.TraceID = traceID.String
 		out = append(out, e)
 	}
 	return out, rows.Err()

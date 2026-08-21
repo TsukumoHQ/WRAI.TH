@@ -176,7 +176,7 @@ func (e *BoardRequiredError) Error() string {
 		e.Project, len(e.Boards), strings.Join(names, ", "))
 }
 
-func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket, backlog bool) (*models.Task, error) {
+func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket, backlog bool, traceID *string) (*models.Task, error) {
 	// Single typed-ticket guard. Every creation path funnels through DispatchTask,
 	// so enforcing here (before any write or side-effect) makes a bare ticket
 	// impossible on an enforced project — no per-path check to drift or bypass.
@@ -215,6 +215,26 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		acceptanceCriteria = "[]"
 	}
 
+	// Correlation (trace_id v1): a caller-supplied trace_id wins (validated by
+	// the handler, not here — this stays pure data like the rest of this
+	// function); else a subtask inherits its parent's trace_id (one dedicated
+	// PK lookup, never a widened taskColumns scan); else mint a fresh one. Every
+	// dispatched task always carries a trace_id — NULL only ever occurs on rows
+	// created before this migration.
+	tid := ""
+	if traceID != nil && *traceID != "" {
+		tid = *traceID
+	} else if parentTaskID != nil {
+		var parentTrace sql.NullString
+		_ = d.ro().QueryRow("SELECT trace_id FROM tasks WHERE id = ? AND project = ?", *parentTaskID, project).Scan(&parentTrace)
+		if parentTrace.Valid && parentTrace.String != "" {
+			tid = parentTrace.String
+		}
+	}
+	if tid == "" {
+		tid = newTraceID()
+	}
+
 	// Groomed work can be born straight into 'backlog' (visible, not claimable)
 	// so grooming doesn't require a follow-up move; promote_task lifts it to pending.
 	status := "pending"
@@ -240,14 +260,15 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		Goal:               ticket.Goal,
 		AcceptanceCriteria: acceptanceCriteria,
 		Dod:                ticket.Dod,
+		TraceID:            &tid,
 	}
 
 	_, err := d.conn.Exec(
-		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?)`,
+		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?)`,
 		task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
 		task.Priority, task.Status, task.Project, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
-		task.Goal, task.AcceptanceCriteria, task.Dod,
+		task.Goal, task.AcceptanceCriteria, task.Dod, tid,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch task: %w", err)
@@ -725,6 +746,14 @@ func (d *DB) GetTask(taskID, project string) (*models.Task, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get task: %w", err)
+	}
+	// Correlation (trace_id v1): a dedicated PK lookup, deliberately NOT folded
+	// into taskColumns/scanTask (see DispatchTask) — this is the single-task
+	// read API named by the trace_id AC, not the wide list/sweeper queries.
+	var tid sql.NullString
+	_ = d.ro().QueryRow("SELECT trace_id FROM tasks WHERE id = ? AND project = ?", taskID, project).Scan(&tid)
+	if tid.Valid && tid.String != "" {
+		t.TraceID = &tid.String
 	}
 	return &t, nil
 }

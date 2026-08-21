@@ -8,7 +8,7 @@ import "testing"
 func TestTaskGitZoneRoundTrip(t *testing.T) {
 	d := testDB(t)
 
-	task, err := d.DispatchTask("proj", "backend", "cto", "add rate limiting", "", "P1", nil, nil, TypedTicket{}, false)
+	task, err := d.DispatchTask("proj", "backend", "cto", "add rate limiting", "", "P1", nil, nil, TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatalf("dispatch: %v", err)
 	}

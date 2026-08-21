@@ -20,7 +20,7 @@ func TestWatchdogEndpoints(t *testing.T) {
 	if _, _, err := r.DB.RegisterAgent(project, "stuck", "", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	task, err := r.DB.DispatchTask(project, "prof", "lead", "held work", "", "P2", nil, nil, db.TypedTicket{}, false)
+	task, err := r.DB.DispatchTask(project, "prof", "lead", "held work", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
