@@ -978,7 +978,17 @@ func (d *DB) ListAllTasks(limit int) ([]models.Task, error) {
 	return tasks, rows.Err()
 }
 
-func (d *DB) UpdateTaskFields(taskID, project string, title, description, priority, boardID *string) (*models.Task, error) {
+// UpdateTaskFields patches the free-form task fields (title/description/
+// priority/board) plus, when the caller passes them, the typed-ticket contract
+// (goal/acceptance_criteria/dod). Contract fields are audited: a re-scope
+// appends an old→new snapshot to the durable audit_log (RecordAudit) so the
+// pre-rescope contract stays consultable (GET /api/audit?resource=<task_id>)
+// instead of being silently overwritten. actor is the audit "who" — callers
+// that never touch the contract fields (e.g. move_task) may pass "" since no
+// audit entry is written when goal/acceptanceCriteria/dod are all nil.
+// PERMISSION (who may re-scope the contract) is the caller's job — enforced in
+// the handler, not here, so this stays a pure data + audit write.
+func (d *DB) UpdateTaskFields(taskID, project, actor string, title, description, priority, boardID, goal, acceptanceCriteria, dod *string) (*models.Task, error) {
 	task, err := d.GetTask(taskID, project)
 	if err != nil {
 		return nil, err
@@ -1000,12 +1010,40 @@ func (d *DB) UpdateTaskFields(taskID, project string, title, description, priori
 		task.BoardID = boardID
 	}
 
+	contractChanged := goal != nil || acceptanceCriteria != nil || dod != nil
+	oldGoal, oldAC, oldDod := task.Goal, task.AcceptanceCriteria, task.Dod
+	if goal != nil {
+		task.Goal = *goal
+	}
+	if acceptanceCriteria != nil {
+		task.AcceptanceCriteria = *acceptanceCriteria
+	}
+	if dod != nil {
+		task.Dod = *dod
+	}
+
 	_, err = d.conn.Exec(
-		"UPDATE tasks SET title = ?, description = ?, priority = ?, board_id = ? WHERE id = ? AND project = ?",
-		task.Title, task.Description, task.Priority, task.BoardID, taskID, project,
+		"UPDATE tasks SET title = ?, description = ?, priority = ?, board_id = ?, goal = ?, acceptance_criteria = ?, dod = ? WHERE id = ? AND project = ?",
+		task.Title, task.Description, task.Priority, task.BoardID, task.Goal, task.AcceptanceCriteria, task.Dod, taskID, project,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update task: %w", err)
+	}
+
+	if contractChanged {
+		details, _ := json.Marshal(map[string]any{
+			"old": map[string]string{"goal": oldGoal, "acceptance_criteria": oldAC, "dod": oldDod},
+			"new": map[string]string{"goal": task.Goal, "acceptance_criteria": task.AcceptanceCriteria, "dod": task.Dod},
+		})
+		_ = d.RecordAudit(models.AuditEntry{
+			Project:      project,
+			Actor:        actor,
+			Action:       "contract_updated",
+			ResourceType: "task",
+			ResourceID:   taskID,
+			Summary:      fmt.Sprintf("re-scoped typed ticket for %q", task.Title),
+			Details:      string(details),
+		})
 	}
 	return task, nil
 }

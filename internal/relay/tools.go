@@ -729,7 +729,7 @@ func deleteBoardTool() mcp.Tool {
 func updateTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"update_task",
-		mcp.WithDescription("Update task fields without changing status (assignee/claim/history preserved). progress_note appends a timestamped update shown in the web UI — use it to signal progress on long tasks."),
+		mcp.WithDescription("Update task fields without changing status. progress_note appends a timestamped update. goal/acceptance_criteria/dod: dispatcher-only, audited"),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -738,6 +738,9 @@ func updateTaskTool() mcp.Tool {
 		mcp.WithString("priority", mcp.Description("New priority"), mcp.Enum("P0", "P1", "P2", "P3")),
 		mcp.WithString("board_id", mcp.Description("Move to board")),
 		mcp.WithString("progress_note", mcp.Description("Short progress note (does not change status)")),
+		mcp.WithString("goal", mcp.Description("Intent")),
+		mcp.WithString("acceptance_criteria", mcp.Description("JSON array")),
+		mcp.WithString("dod", mcp.Description("Done bar")),
 	)
 }
 

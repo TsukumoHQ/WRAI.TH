@@ -844,8 +844,38 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	priority := optionalString(req.GetString("priority", ""))
 	boardID := optionalString(req.GetString("board_id", ""))
 	progressNote := req.GetString("progress_note", "")
+	goal := optionalString(req.GetString("goal", ""))
+	acceptanceCriteria := optionalString(req.GetString("acceptance_criteria", ""))
+	dod := optionalString(req.GetString("dod", ""))
 
-	task, err := h.db.UpdateTaskFields(taskID, project, title, description, priority, boardID)
+	// The typed-ticket contract (goal/acceptance_criteria/dod) is the review
+	// gate's bar for this task. Re-scoping it is a DISPATCHER decision — the
+	// assignee doing the work never rewrites their own contract — and every
+	// re-scope must land in the audit trail (UpdateTaskFields records it), never
+	// silently overwrite it. This used to silently DROP these three fields
+	// (neither parsed nor written); refuse explicitly instead.
+	if goal != nil || acceptanceCriteria != nil || dod != nil {
+		existing, gErr := h.db.GetTask(taskID, project)
+		if gErr != nil {
+			return toolResultError(fmt.Sprintf("failed to update task: %v", gErr)), nil
+		}
+		if existing == nil {
+			return toolResultError(fmt.Sprintf("task not found: %s", taskID)), nil
+		}
+		if agent != existing.DispatchedBy {
+			return permissionError(CodeForbidden, fmt.Sprintf(
+				"goal/acceptance_criteria/dod can only be updated by this task's dispatcher (%s), not the assignee (%s) — re-dispatch instead of re-scoping your own contract",
+				existing.DispatchedBy, agent)), nil
+		}
+		if acceptanceCriteria != nil {
+			var items []string
+			if err := json.Unmarshal([]byte(*acceptanceCriteria), &items); err != nil {
+				return validationError(CodeInvalidArgument, "acceptance_criteria must be a JSON array of testable items"), nil
+			}
+		}
+	}
+
+	task, err := h.db.UpdateTaskFields(taskID, project, agent, title, description, priority, boardID, goal, acceptanceCriteria, dod)
 	if err != nil {
 		return taskOpError(err, "failed to update task: %v", err), nil
 	}
@@ -909,7 +939,7 @@ func (h *Handlers) HandleMoveTask(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
-	task, err := h.db.UpdateTaskFields(taskID, project, nil, nil, nil, boardID)
+	task, err := h.db.UpdateTaskFields(taskID, project, agent, nil, nil, nil, boardID, nil, nil, nil)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to move task: %v", err)), nil
 	}
