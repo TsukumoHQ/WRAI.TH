@@ -1457,6 +1457,11 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, tte.Error()), http.StatusBadRequest)
 			return
 		}
+		var bre *db.BoardRequiredError
+		if errors.As(err, &bre) {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, bre.Error()), http.StatusBadRequest)
+			return
+		}
 		apiError(w, http.StatusInternalServerError, "failed to dispatch task", err)
 		return
 	}

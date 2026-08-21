@@ -90,7 +90,21 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		return toolResultError("title is required"), nil
 	}
 	description := req.GetString("description", "")
-	priority := req.GetString("priority", "P2")
+
+	// GetString silently falls back to the default when the arg is present but
+	// the wrong JSON type (e.g. priority sent as the integer 1) — a task landed
+	// P2 without anyone asking for it (repro: task 7670216a). Check the raw
+	// argument so a wrong-typed or invalid priority is refused, never coerced.
+	priority := "P2"
+	if raw, given := req.GetArguments()["priority"]; given {
+		str, isStr := raw.(string)
+		if !isStr || !isValidPriority(str) {
+			return validationError(CodeInvalidArgument, fmt.Sprintf(
+				"priority must be a string, one of P0, P1, P2, P3 (got %#v)", raw)), nil
+		}
+		priority = str
+	}
+
 	parentTaskID := optionalString(req.GetString("parent_task_id", ""))
 	boardID := optionalString(req.GetString("board_id", ""))
 
@@ -103,11 +117,13 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		Dod:                req.GetString("dod", ""),
 	}
 
-	// Resolve truncated board_id prefix to full UUID
+	// Resolve a truncated board_id UUID prefix, or a board slug, to the full UUID
+	// — so a caller can copy either column straight out of a BoardRequiredError
+	// refusal (which lists both) without a separate lookup round-trip.
 	if boardID != nil && len(*boardID) < 36 {
 		boards, _ := h.db.ListBoards(project)
 		for _, b := range boards {
-			if strings.HasPrefix(b.ID, *boardID) {
+			if strings.HasPrefix(b.ID, *boardID) || b.Slug == *boardID {
 				boardID = &b.ID
 				break
 			}
@@ -120,6 +136,10 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {
 			return toolResultError(tte.Error()), nil
+		}
+		var bre *db.BoardRequiredError
+		if errors.As(err, &bre) {
+			return validationError(CodeInvalidArgument, bre.Error()), nil
 		}
 		return toolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
 	}
@@ -180,7 +200,11 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 		}
 	}
 
-	// Auto-create a default "backlog" board if none specified and none exist.
+	// Auto-create a default "backlog" board only when the project has none yet.
+	// One or more existing boards with board_id omitted is now db.DispatchTask's
+	// call: the sole board unambiguously, or a *db.BoardRequiredError refusal
+	// naming every board when more than one exists — never a silent first-board
+	// pick (that was the bug: tasks mis-filed onto the oldest board unnoticed).
 	var autoBoard *models.Board
 	if boardID == nil {
 		boards, _ := h.db.ListBoards(project)
@@ -189,8 +213,6 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 			if autoBoard != nil {
 				boardID = &autoBoard.ID
 			}
-		} else {
-			boardID = &boards[0].ID
 		}
 	}
 

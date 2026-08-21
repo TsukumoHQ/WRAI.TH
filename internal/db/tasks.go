@@ -157,6 +157,25 @@ func (e *TypedTicketError) Error() string {
 		e.Project, strings.Join(e.Missing, ", "))
 }
 
+// BoardRequiredError is returned by DispatchTask when board_id is omitted on a
+// project with more than one board — an omitted board_id used to silently land
+// the task on the oldest board (creation-order), mis-filing it. An unambiguous
+// single-board project keeps its implicit default; a bare/zero-board project is
+// unaffected (the caller, e.g. dispatchCore, auto-creates the first board).
+type BoardRequiredError struct {
+	Project string
+	Boards  []models.Board
+}
+
+func (e *BoardRequiredError) Error() string {
+	names := make([]string, len(e.Boards))
+	for i, b := range e.Boards {
+		names[i] = fmt.Sprintf("%s (%s)", b.Slug, b.ID)
+	}
+	return fmt.Sprintf("board_id is required on project '%s' (%d boards exist): %s",
+		e.Project, len(e.Boards), strings.Join(names, ", "))
+}
+
 func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket, backlog bool) (*models.Task, error) {
 	// Single typed-ticket guard. Every creation path funnels through DispatchTask,
 	// so enforcing here (before any write or side-effect) makes a bare ticket
@@ -165,6 +184,25 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 	if d.ProjectRequiresTypedTicket(project) {
 		if missing := ticket.Missing(); len(missing) > 0 {
 			return nil, &TypedTicketError{Project: project, Missing: missing}
+		}
+	}
+
+	// Single board-resolution guard — every creation path funnels through
+	// DispatchTask, so an omitted board_id can never silently pick the wrong
+	// board again. 0 boards: leave nil (a caller like dispatchCore auto-creates
+	// one first, so this never actually fires there). Exactly 1: unambiguous,
+	// keep the implicit default. More than 1: refuse — the caller must name one.
+	if boardID == nil {
+		boards, bErr := d.ListBoards(project)
+		if bErr != nil {
+			return nil, fmt.Errorf("list boards: %w", bErr)
+		}
+		switch len(boards) {
+		case 0:
+		case 1:
+			boardID = &boards[0].ID
+		default:
+			return nil, &BoardRequiredError{Project: project, Boards: boards}
 		}
 	}
 
