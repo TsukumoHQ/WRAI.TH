@@ -52,7 +52,7 @@ func taskErrorCategory(code string) (category string, retryable bool) {
 	case db.CodeTaskLeaseHeld:
 		return CategoryTransient, false
 	case db.CodeTaskStateConflict, db.CodeTaskNotFound,
-		db.CodeRunStateInvalid, db.CodeRunContainer:
+		db.CodeRunStateInvalid, db.CodeRunContainer, db.CodeRunStateConflict:
 		return CategoryValidation, false
 	default:
 		return CategoryValidation, false

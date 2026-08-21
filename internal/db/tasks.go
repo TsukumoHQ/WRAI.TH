@@ -810,11 +810,19 @@ func (d *DB) queryTasks(query string, args ...any) ([]models.Task, error) {
 	return tasks, rows.Err()
 }
 
-// GetUnackedTasks returns pending tasks older than minAge that haven't been notified yet.
+// GetUnackedTasks returns pending tasks older than minAge that haven't been
+// notified yet. Excludes run containers (run_state set): a container parent
+// deliberately stays status='pending' while its run_state advances through the
+// run lifecycle — it is never claimed/started (guardNotRunContainer refuses
+// that), so treating it as an unacked idle task and nagging/escalating it to
+// "consider re-dispatching" would be a false alarm every tick. This is a
+// point-in-time filter only; a container can still start (or finish) a run
+// after this read, which is why the mark* calls below re-check before acting.
 func (d *DB) GetUnackedTasks(minAge time.Duration) ([]models.Task, error) {
 	cutoff := time.Now().UTC().Add(-minAge).Format(memoryTimeFmt)
 	rows, err := d.ro().Query(
-		"SELECT "+taskColumns+" FROM tasks WHERE status = 'pending' AND archived_at IS NULL AND dispatched_at < ?",
+		"SELECT "+taskColumns+" FROM tasks WHERE status = 'pending' AND archived_at IS NULL "+
+			"AND dispatched_at < ? AND (run_state IS NULL OR run_state = '')",
 		cutoff,
 	)
 	if err != nil {
@@ -833,18 +841,42 @@ func (d *DB) GetUnackedTasks(minAge time.Duration) ([]models.Task, error) {
 	return tasks, rows.Err()
 }
 
-// MarkTaskAckNotified sets the ack_notified_at timestamp.
-func (d *DB) MarkTaskAckNotified(taskID string) error {
+// MarkTaskAckNotified sets the ack_notified_at timestamp — CAS-guarded so the
+// ACK-checker's read-then-act window can't fire a stale notification: the batch
+// GetUnackedTasks reads can be seconds old by the time each task is acted on
+// (a full sweep, one write per task), during which the task could have become a
+// run container (set_run stamped run_state), left 'pending' (claimed), or
+// already been marked by a concurrent tick. The guard re-checks all of that at
+// write time; ok=false means the caller must no-op (skip the notify), not act
+// on the stale read.
+func (d *DB) MarkTaskAckNotified(taskID string) (ok bool, err error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec("UPDATE tasks SET ack_notified_at = ? WHERE id = ?", now, taskID)
-	return err
+	res, err := d.conn.Exec(
+		`UPDATE tasks SET ack_notified_at = ? WHERE id = ? AND status = 'pending'
+		 AND (run_state IS NULL OR run_state = '') AND ack_notified_at IS NULL`,
+		now, taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
-// MarkTaskAckEscalated sets the ack_escalated_at timestamp.
-func (d *DB) MarkTaskAckEscalated(taskID string) error {
+// MarkTaskAckEscalated sets the ack_escalated_at timestamp — same CAS guard as
+// MarkTaskAckNotified, see its doc comment.
+func (d *DB) MarkTaskAckEscalated(taskID string) (ok bool, err error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec("UPDATE tasks SET ack_escalated_at = ? WHERE id = ?", now, taskID)
-	return err
+	res, err := d.conn.Exec(
+		`UPDATE tasks SET ack_escalated_at = ? WHERE id = ? AND status = 'pending'
+		 AND (run_state IS NULL OR run_state = '') AND ack_escalated_at IS NULL`,
+		now, taskID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // GetParentChain walks up the parent_task_id chain (max depth 5).

@@ -183,18 +183,35 @@ func checkUnackedTasks(database *db.DB, registry *SessionRegistry) {
 		age := now.Sub(dispatchedAt)
 
 		if age >= ACKEscalateAge && task.AckEscalatedAt == nil {
-			// Escalate
+			// CAS-guarded mark FIRST: the batch read above can be stale by the time
+			// we get here (a run container claimed run_state, or the task moved off
+			// 'pending', or a concurrent tick already marked it). ok=false means one
+			// of those happened — no-op instead of escalating on data that's no
+			// longer true.
+			ok, err := database.MarkTaskAckEscalated(task.ID)
+			if err != nil {
+				log.Printf("ACK escalate mark error: task %s: %v", task.ID, err)
+				continue
+			}
+			if !ok {
+				continue
+			}
 			registry.Notify(task.Project, task.DispatchedBy, "relay",
 				fmt.Sprintf("ESCALATED: Task '%s' no ACK for %dmin. Consider re-dispatching.", task.Title, int(age.Minutes())),
 				task.ID)
-			_ = database.MarkTaskAckEscalated(task.ID)
 			log.Printf("ACK escalated: task %s (%s) — %dmin", task.ID, task.Title, int(age.Minutes()))
 		} else if age >= ACKNotifyAge && task.AckNotifiedAt == nil {
-			// First notification
+			ok, err := database.MarkTaskAckNotified(task.ID)
+			if err != nil {
+				log.Printf("ACK notify mark error: task %s: %v", task.ID, err)
+				continue
+			}
+			if !ok {
+				continue
+			}
 			registry.Notify(task.Project, task.DispatchedBy, "relay",
 				fmt.Sprintf("Task '%s' no ACK after %dmin. Profile: %s", task.Title, int(age.Minutes()), task.ProfileSlug),
 				task.ID)
-			_ = database.MarkTaskAckNotified(task.ID)
 			log.Printf("ACK notify: task %s (%s) — %dmin", task.ID, task.Title, int(age.Minutes()))
 		}
 	}

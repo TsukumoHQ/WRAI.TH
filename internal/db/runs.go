@@ -16,6 +16,11 @@ const (
 	// container (run_state set). The container groups slices; it is never leased
 	// as work. Its child slices are the claimable units.
 	CodeRunContainer = "RUN_CONTAINER_NOT_CLAIMABLE"
+	// CodeRunStateConflict — SetTaskRun's CAS guard lost: run_state (or the row)
+	// changed between the read and the write. A concurrent set_run won; the
+	// caller must re-fetch (get_run) and retry against the current state rather
+	// than silently overwrite it.
+	CodeRunStateConflict = "RUN_STATE_CONFLICT"
 )
 
 // Run lifecycle states (changeset-per-factory-run S1). The run is the PARENT
@@ -83,12 +88,18 @@ func (d *DB) guardNotRunContainer(taskID, project string) error {
 }
 
 // SetTaskRun stamps the run zone on the PARENT task (changeset-per-factory-run
-// S1). integrationBranch is COALESCE'd (a state-only advance never wipes the
+// S1/S2). integrationBranch is COALESCE'd (a state-only advance never wipes the
 // branch, and vice-versa), mirroring SetTaskPR. runState is transition-enforced
 // against validRunTransitions: the first stamp must open the run, and no edge
 // resurrects a merged run. A same-state stamp is an idempotent no-op. Nil args
-// leave their column untouched. Returns the re-read task, or a typed
-// CodeTaskNotFound / CodeRunStateInvalid error. Single UPDATE on the writer conn.
+// leave their column untouched. The write is CAS-guarded on the run_state this
+// call read (`run_state IS <from>`): two concurrent SetTaskRun calls on the same
+// task both validate against the same snapshot, but only the first UPDATE to
+// land can match that guard — the second sees 0 RowsAffected and is refused with
+// CodeRunStateConflict instead of silently overwriting the winner (S1 shipped
+// this as a COALESCE with no guard; S2 closes the TOCTOU). Returns the re-read
+// task, or a typed CodeTaskNotFound / CodeRunStateInvalid / CodeRunStateConflict
+// error. Single UPDATE on the writer conn.
 func (d *DB) SetTaskRun(taskID, project string, integrationBranch, runState *string) (*models.Task, error) {
 	cur, err := d.GetTask(taskID, project)
 	if err != nil {
@@ -98,11 +109,14 @@ func (d *DB) SetTaskRun(taskID, project string, integrationBranch, runState *str
 		return nil, newTaskError(CodeTaskNotFound, "task not found: %s", taskID)
 	}
 
+	from := ""
+	var fromParam any
+	if cur.RunState != nil {
+		from = *cur.RunState
+		fromParam = from
+	} // else fromParam stays nil -> binds SQL NULL, matching an unset run_state
+
 	if runState != nil {
-		from := ""
-		if cur.RunState != nil {
-			from = *cur.RunState
-		}
 		to := *runState
 		if from != to && !runTransitionAllowed(from, to) {
 			cause := "invalid run_state transition"
@@ -114,14 +128,19 @@ func (d *DB) SetTaskRun(taskID, project string, integrationBranch, runState *str
 		}
 	}
 
-	if _, err := d.conn.Exec(
+	res, err := d.conn.Exec(
 		`UPDATE tasks SET
 			integration_branch = COALESCE(?, integration_branch),
 			run_state = COALESCE(?, run_state)
-		 WHERE id = ? AND project = ?`,
-		integrationBranch, runState, taskID, project,
-	); err != nil {
+		 WHERE id = ? AND project = ? AND run_state IS ?`,
+		integrationBranch, runState, taskID, project, fromParam,
+	)
+	if err != nil {
 		return nil, err
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return nil, newTaskError(CodeRunStateConflict,
+			"run_state changed from %q before this set_run could apply on task %s — re-fetch (get_run) and retry", from, taskID)
 	}
 	return d.GetTask(taskID, project)
 }
