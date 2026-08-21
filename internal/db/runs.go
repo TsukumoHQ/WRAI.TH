@@ -139,8 +139,12 @@ func (d *DB) SetTaskRun(taskID, project string, integrationBranch, runState *str
 		return nil, err
 	}
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		// 0 rows also fires if the row was deleted/archived between the read above
+		// and this UPDATE, not only a run_state change — the guard can't tell which
+		// without another read, and it doesn't need to: either way the caller's
+		// stale view is the problem, and re-fetching is the correct next step.
 		return nil, newTaskError(CodeRunStateConflict,
-			"run_state changed from %q before this set_run could apply on task %s — re-fetch (get_run) and retry", from, taskID)
+			"task %s no longer matches the run_state %q this call read (changed, or the row is gone) — re-fetch (get_run) and retry", taskID, from)
 	}
 	return d.GetTask(taskID, project)
 }

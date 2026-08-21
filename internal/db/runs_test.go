@@ -268,3 +268,71 @@ func TestSetTaskRunCASGuardSerializesConcurrentWriters(t *testing.T) {
 		t.Fatalf("final run_state must be the winner's target, got %v", final.RunState)
 	}
 }
+
+// review-5972890c finding: the two tests above exercise the guard clause as raw
+// SQL, not through SetTaskRun itself — a revert-experiment on the production
+// guard proved both still pass unmodified (720/720 racing calls landed as
+// silent overwrites, zero CodeRunStateConflict). This test closes that gap: it
+// hammers the PUBLIC SetTaskRun with a mix of two valid targets from the same
+// "open" state (half → gating, half → blocked) across several rounds. Real
+// concurrent calls (each doing its own read+write, not a shared snapshot) do
+// overlap often enough at this racer count to hit the guard — a broken/removed
+// guard would show zero conflicts across every round; a working one reliably
+// shows at least one.
+func TestSetTaskRunPublicAPIMixedTargetHammerPinsGuard(t *testing.T) {
+	d := testDB(t)
+	const racersPerRound = 20
+	const rounds = 5
+
+	var totalConflicts, totalWins int
+	for r := 0; r < rounds; r++ {
+		p, _ := d.DispatchTask("proj", "lead", "cto", "run", "", "P1", nil, nil, TypedTicket{}, false)
+		if _, err := d.SetTaskRun(p.ID, "proj", nil, strptr(RunStateOpen)); err != nil {
+			t.Fatalf("round %d open: %v", r, err)
+		}
+
+		var wg sync.WaitGroup
+		results := make(chan error, racersPerRound)
+		start := make(chan struct{})
+		for i := 0; i < racersPerRound; i++ {
+			to := RunStateGating
+			if i%2 == 1 {
+				to = RunStateBlocked
+			}
+			wg.Add(1)
+			go func(to string) {
+				defer wg.Done()
+				<-start
+				_, err := d.SetTaskRun(p.ID, "proj", nil, strptr(to))
+				results <- err
+			}(to)
+		}
+		close(start)
+		wg.Wait()
+		close(results)
+
+		for err := range results {
+			switch {
+			case err == nil:
+				totalWins++
+			case runErrCode(err) == CodeRunStateConflict:
+				totalConflicts++
+			default:
+				t.Fatalf("round %d: unexpected error: %v", r, err)
+			}
+		}
+
+		final, _ := d.GetTask(p.ID, "proj")
+		if final.RunState == nil || (*final.RunState != RunStateGating && *final.RunState != RunStateBlocked) {
+			t.Fatalf("round %d: final run_state must be a racer's target, got %v", r, final.RunState)
+		}
+	}
+
+	if totalWins+totalConflicts != rounds*racersPerRound {
+		t.Fatalf("every racer must resolve to exactly success or CodeRunStateConflict, got wins=%d conflicts=%d of %d", totalWins, totalConflicts, rounds*racersPerRound)
+	}
+	if totalConflicts == 0 {
+		t.Fatal("want at least 1 CodeRunStateConflict across all rounds through the PUBLIC SetTaskRun — got 0, the guard may be broken/missing (this is exactly what an unpinned regression looks like)")
+	}
+	t.Logf("mixed-target hammer: %d wins, %d conflicts across %d rounds x %d racers", totalWins, totalConflicts, rounds, racersPerRound)
+}
