@@ -179,7 +179,7 @@ func isEligibleTool() mcp.Tool {
 func identityCheckTool() mcp.Tool {
 	return mcp.NewTool(
 		"identity_check",
-		mcp.WithDescription("Read-only: is a name wake-resolvable, or a ghost/cwd-collision that drops wakes? Returns {registered, ghost, bound_uniquely, conflicting_agents, reason}."),
+		mcp.WithDescription("Read-only: is a name wake-resolvable, or an unbound ghost that drops wakes? conflicting_agents lists other active agents sharing this cwd — informational (normal for a team sharing a worktree), not a failure. Returns {registered, ghost, bound_uniquely, conflicting_agents, reason}."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Name to check (default caller)")),

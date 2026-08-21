@@ -446,72 +446,55 @@ func (d *DB) AgentNamesByCwd(cwd string) ([]string, error) {
 	return names, rows.Err()
 }
 
-// ClaimCwd binds cwd to this agent as its SOLE holder in the project: it clears
-// the cwd from any OTHER non-deleted same-project agent that currently holds it
-// (last live registrant wins), then sets it on the claimer — all in one writer
-// tx. This keeps the cwd UNAMBIGUOUS for RebindSession; an ambiguous cwd (two
-// same-project names on one worktree, e.g. a 'foo' zombie + its 'foo-2' respawn)
-// is exactly what makes a daemon wake hit "no local agent" and lose the message.
-// Returns the displaced agent names so the caller fails-closed by FLAGGING the
-// collision instead of silently accepting two live bindings on one cwd. Scoped
-// to the project: a cwd deliberately shared across projects (name-based rebind)
-// is left alone.
+// ClaimCwd binds cwd to this agent WITHOUT taking exclusive ownership of it: a
+// team deliberately co-locates 2+ distinct agents on one worktree (teams.json —
+// lead + worker sharing a cwd by design), so cwd is not a 1-agent lock. It just
+// records the caller's own binding (idempotent) and returns the names of any
+// OTHER active same-project agents already on this cwd — purely informational,
+// so the caller can surface it (e.g. to let an operator deactivate_agent a
+// genuine stale predecessor) without ever clearing another agent's binding.
+// Wake/delivery resolves by name (unique per project) and local pane binding
+// (name+tty), never by cwd alone; cwd only feeds the RebindSession fallback
+// used when a caller can't supply a name, and THAT path independently refuses
+// to guess when the cwd is ambiguous — this function never has to enforce
+// uniqueness to keep that guarantee. Scoped to the project: a cwd deliberately
+// shared across projects (name-based rebind) is unaffected either way.
 func (d *DB) ClaimCwd(project, name, cwd string) ([]string, error) {
 	if cwd == "" {
 		return nil, nil
 	}
-	tx, err := d.conn.Begin()
-	if err != nil {
-		return nil, fmt.Errorf("claim cwd begin: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	rows, err := tx.Query(
+	rows, err := d.ro().Query(
 		"SELECT name FROM agents WHERE cwd = ? AND project = ? AND name <> ? AND status != 'deleted'",
 		cwd, project, name,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("claim cwd: find holders: %w", err)
+		return nil, fmt.Errorf("claim cwd: find cohabitants: %w", err)
 	}
-	var displaced []string
+	var cohabitants []string
 	for rows.Next() {
 		var n string
 		if err := rows.Scan(&n); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("claim cwd: scan: %w", err)
 		}
-		displaced = append(displaced, n)
+		cohabitants = append(cohabitants, n)
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("claim cwd: rows: %w", err)
 	}
 
-	if len(displaced) > 0 {
-		// cwd is NOT NULL — clear to empty string (unbound), not NULL. An empty
-		// cwd matches no real worktree, so RebindSession/IdentityCheck treat the
-		// displaced agent as unbound (a ghost) rather than a live cwd holder.
-		if _, err := tx.Exec(
-			"UPDATE agents SET cwd = '' WHERE cwd = ? AND project = ? AND name <> ? AND status != 'deleted'",
-			cwd, project, name,
-		); err != nil {
-			return nil, fmt.Errorf("claim cwd: displace: %w", err)
-		}
-	}
-	if _, err := tx.Exec(
+	if _, err := d.conn.Exec(
 		"UPDATE agents SET cwd = ? WHERE project = ? AND name = ?", cwd, project, name,
 	); err != nil {
 		return nil, fmt.Errorf("claim cwd: bind: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("claim cwd commit: %w", err)
-	}
-	return displaced, nil
+	return cohabitants, nil
 }
 
 // IdentityVerdict is the identity-integrity check result (companion to the T2
 // sender-eligibility verdict): can this name be reliably woken/addressed, or is
-// it a ghost / cwd-collision that will silently drop wakes and messages?
+// it a ghost that will silently drop wakes and messages?
 type IdentityVerdict struct {
 	Name              string   `json:"name"`
 	Registered        bool     `json:"registered"`
@@ -523,10 +506,19 @@ type IdentityVerdict struct {
 }
 
 // IdentityCheck reports whether an agent name is safely resolvable for wakes and
-// delivery (T6 identity fail-closed). Ghost = registered but no cwd bound (or not
-// registered at all) → a daemon wake by pane-name finds "no local agent" and the
-// message is lost. Conflict = more than one active same-project agent shares the
-// cwd → RebindSession refuses the ambiguous key. Read-only.
+// delivery. Ghost = registered but no cwd bound (or not registered at all) → a
+// daemon wake finds "no local agent" and the message is lost.
+//
+// A name is resolvable by itself (unique per project) and by local pane binding
+// (name+tty) regardless of how many other active agents share its cwd — cwd is
+// not an exclusivity lock (teams.json deliberately co-locates 2+ agents on one
+// worktree). So BoundUniquely is true for every registered agent with a non-empty
+// cwd, cohabitants or not. ConflictingAgents stays populated as an informational
+// list — normal for a team layout; only worth investigating if one of those names
+// is actually a stale predecessor of this one (deactivate_agent it explicitly).
+// The one place cwd ambiguity still matters is RebindSession's cwd-only fallback
+// (used when a caller can't supply a name) — that path independently refuses to
+// guess, unaffected by this verdict.
 func (d *DB) IdentityCheck(project, name string) (IdentityVerdict, error) {
 	v := IdentityVerdict{Name: name}
 	if name == "" {
@@ -574,12 +566,12 @@ func (d *DB) IdentityCheck(project, name string) (IdentityVerdict, error) {
 	if err := rows.Err(); err != nil {
 		return v, fmt.Errorf("identity check: rows: %w", err)
 	}
-	if len(v.ConflictingAgents) > 0 {
-		v.Reason = "cwd shared by another active agent — ambiguous binding, wakes may resolve wrong or drop"
-		return v, nil
-	}
 	v.BoundUniquely = true
-	v.Reason = "ok — uniquely bound, wake-resolvable"
+	if len(v.ConflictingAgents) > 0 {
+		v.Reason = fmt.Sprintf("ok — resolvable by name; cwd also held by %v (expected for a team sharing a worktree)", v.ConflictingAgents)
+	} else {
+		v.Reason = "ok — uniquely bound, wake-resolvable"
+	}
 	return v, nil
 }
 

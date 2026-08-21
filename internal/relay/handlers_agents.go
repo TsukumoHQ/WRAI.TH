@@ -130,13 +130,13 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 
 	// Bind the worktree cwd → agent so a SessionStart hook can re-attach a rotated
 	// session_id after /clear (cwd is the stable key; session_id is not). ClaimCwd
-	// makes this agent the SOLE holder of the cwd in the project (displacing a
-	// stale same-cwd sibling, e.g. a zombie predecessor), so the binding stays
-	// unambiguous and wakes resolve — and returns any displaced names so we can
-	// FAIL CLOSED by flagging the collision instead of silently accepting it.
-	var cwdDisplaced []string
+	// records this agent's own binding WITHOUT evicting any other active agent
+	// already on the same cwd — teams deliberately co-locate 2+ agents on one
+	// worktree (teams.json), so cwd is not a 1-agent lock. It returns those other
+	// names, if any, purely as an informational cohabitant list.
+	var cwdCohabitants []string
 	if cwd := strings.TrimSpace(req.GetString("cwd", "")); cwd != "" {
-		cwdDisplaced, _ = h.db.ClaimCwd(project, name, cwd)
+		cwdCohabitants, _ = h.db.ClaimCwd(project, name, cwd)
 	}
 
 	// Use the effective (post-merge) executive flag and profile slug so a respawn that
@@ -180,16 +180,14 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		resp["auto_admin_team"] = *autoAdminTeam
 		resp["hint"] = "You were auto-added to the 'leadership' admin team (broadcast enabled). Use send_message(to='*') to broadcast."
 	}
-	if len(cwdDisplaced) > 0 {
-		// Fail-closed signal: this cwd was also bound to other active agents. We
-		// took sole ownership (so wakes resolve to you), but that is an identity
-		// collision worth surfacing — a stale predecessor left registered, or two
-		// live agents on one worktree. The daemon/operator should deactivate the
-		// zombie (per the niwa-ops rule).
-		resp["identity_conflict"] = true
-		resp["displaced_agents"] = cwdDisplaced
-		resp["identity_message"] = fmt.Sprintf("cwd was also bound to %v — those bindings were cleared so wakes resolve to %q (last live registrant wins). If any of those are live, this is an identity collision: deactivate the stale one.", cwdDisplaced, name)
-		h.events.Emit(MCPEvent{Type: "register", Action: "identity_conflict", Agent: name, Project: project, Label: strings.Join(cwdDisplaced, ",")})
+	if len(cwdCohabitants) > 0 {
+		// Informational only: this cwd is also held by other active agents. Normal
+		// for a team sharing a worktree by design (teams.json) — nothing is cleared
+		// or displaced. Only worth acting on if one of these is actually a stale
+		// predecessor of this same agent, in which case deactivate_agent it.
+		resp["cwd_shared_with"] = cwdCohabitants
+		resp["cwd_shared_message"] = fmt.Sprintf("cwd is also held by %v — expected if you're on a team sharing this worktree. If one of those is a stale predecessor of you, deactivate_agent it.", cwdCohabitants)
+		h.events.Emit(MCPEvent{Type: "register", Action: "cwd_shared", Agent: name, Project: project, Label: strings.Join(cwdCohabitants, ",")})
 	}
 	return h.resultJSONTracked(project, name, "register_agent", resp)
 }
