@@ -17,11 +17,19 @@ endif
 SKILL_DIR  := $(HOME)/.claude/commands
 SKILL_FILE := relay.md
 
-.PHONY: build install uninstall service service-stop skill clean help
+.PHONY: build test vet install uninstall service service-stop skill clean help
 
 ## build: Compile the binary with version info
 build:
 	$(GOFLAGS) go build -tags "fts5" -ldflags="$(LDFLAGS)" -o $(BINARY) .
+
+## test: Run the test suite with the fts5 build tag
+test:
+	$(GOFLAGS) go test -tags "fts5" ./...
+
+## vet: Run go vet with the fts5 build tag
+vet:
+	$(GOFLAGS) go vet -tags "fts5" ./...
 
 ## install: Build, install binary, skill, and service
 install: build skill
