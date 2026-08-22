@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -157,6 +158,58 @@ func (e *TypedTicketError) Error() string {
 		e.Project, strings.Join(e.Missing, ", "))
 }
 
+// titlePlaceholderPattern matches a bare UUID (v1-v5, canonical hyphenated
+// hex) used as a title — the artifact of a UI/scribe falling back to the task
+// ID when nothing human was ever typed (see DEC-trovex-scribe-titles-1: a
+// browser full of unfindable UUID cards).
+var titlePlaceholderPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// placeholderTitles are literal stand-ins that carry no real intent, checked
+// case-insensitively after trimming.
+var placeholderTitles = map[string]bool{
+	"untitled":    true,
+	"todo":        true,
+	"tbd":         true,
+	"n/a":         true,
+	"na":          true,
+	"placeholder": true,
+	"test":        true,
+}
+
+// InvalidTitleReason reports why title would be refused as a dispatch title on
+// an enforced project — empty/whitespace-only, a bare UUID, or a known
+// placeholder string — or "" when the title is fine. The single source of
+// truth for "what makes a title bare", exported so both DispatchTask and
+// dispatchCore's early hoist (internal/relay) use the identical rule.
+func InvalidTitleReason(title string) string {
+	trimmed := strings.TrimSpace(title)
+	if trimmed == "" {
+		return "empty or whitespace-only"
+	}
+	if titlePlaceholderPattern.MatchString(trimmed) {
+		return "a bare UUID, not a human title"
+	}
+	if placeholderTitles[strings.ToLower(trimmed)] {
+		return fmt.Sprintf("the placeholder %q, not a real title", trimmed)
+	}
+	return ""
+}
+
+// InvalidTitleError is returned by DispatchTask when an enforced project
+// receives a dispatch whose title is empty/whitespace or a known placeholder
+// (bare UUID, "untitled", "TBD", ...). Enforced at the same choke as the
+// typed-ticket guard so no dispatch path can bypass it.
+type InvalidTitleError struct {
+	Project string
+	Title   string
+	Reason  string
+}
+
+func (e *InvalidTitleError) Error() string {
+	return fmt.Sprintf("dispatch title rejected for project '%s': %q is %s. Give the task a real, specific human title.",
+		e.Project, e.Title, e.Reason)
+}
+
 // BoardRequiredError is returned by DispatchTask when board_id is omitted on a
 // project with more than one board — an omitted board_id used to silently land
 // the task on the oldest board (creation-order), mis-filing it. An unambiguous
@@ -184,6 +237,12 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 	if d.ProjectRequiresTypedTicket(project) {
 		if missing := ticket.Missing(); len(missing) > 0 {
 			return nil, &TypedTicketError{Project: project, Missing: missing}
+		}
+		// Same choke, extended: reject a placeholder title (empty/whitespace, a
+		// bare UUID, or a known filler string) so no untitled task can produce an
+		// unfindable UUID card downstream (DEC-trovex-scribe-titles-1).
+		if reason := InvalidTitleReason(title); reason != "" {
+			return nil, &InvalidTitleError{Project: project, Title: title, Reason: reason}
 		}
 	}
 

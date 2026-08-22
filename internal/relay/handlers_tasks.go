@@ -145,6 +145,10 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		if errors.As(err, &tte) {
 			return toolResultError(tte.Error()), nil
 		}
+		var ite *db.InvalidTitleError
+		if errors.As(err, &ite) {
+			return validationError(CodeInvalidArgument, ite.Error()), nil
+		}
 		var bre *db.BoardRequiredError
 		if errors.As(err, &bre) {
 			return validationError(CodeInvalidArgument, bre.Error()), nil
@@ -195,6 +199,9 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 	if h.db.ProjectRequiresTypedTicket(project) {
 		if missing := ticket.Missing(); len(missing) > 0 {
 			return nil, nil, &db.TypedTicketError{Project: project, Missing: missing}
+		}
+		if reason := db.InvalidTitleReason(title); reason != "" {
+			return nil, nil, &db.InvalidTitleError{Project: project, Title: title, Reason: reason}
 		}
 	}
 
