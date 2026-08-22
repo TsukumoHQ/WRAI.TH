@@ -1129,6 +1129,11 @@ func migrate(conn *sql.DB) error {
 		_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES ('backfill_task_profile_slug', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'")
 	}
 
+	// One-shot backfill of mis-boarded active tasks onto their product board —
+	// see board_routing.go. Runs once (settings-marker guarded); new dispatches
+	// self-route going forward via DispatchTask.
+	runProductBoardRoutingBackfill(conn)
+
 	return nil
 }
 

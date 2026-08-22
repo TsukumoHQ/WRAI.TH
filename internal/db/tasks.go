@@ -202,7 +202,19 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		case 1:
 			boardID = &boards[0].ID
 		default:
-			return nil, &BoardRequiredError{Project: project, Boards: boards}
+			// Product auto-routing (same mapping as the backfill in
+			// board_routing.go): an ambiguous board set is no longer an
+			// automatic refusal when the profile names a known product board.
+			wantSlug := ProductBoardSlugForProfile(profileSlug)
+			for i := range boards {
+				if boards[i].Slug == wantSlug {
+					boardID = &boards[i].ID
+					break
+				}
+			}
+			if boardID == nil {
+				return nil, &BoardRequiredError{Project: project, Boards: boards}
+			}
 		}
 	}
 
