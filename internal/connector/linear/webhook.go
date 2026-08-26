@@ -309,6 +309,14 @@ func (c *Connector) seedFromIssue(iss gqlIssue) db.LinearMirrorSeed {
 	if a := issueAssignee(iss); a != "" {
 		seed.Assignee = strptr(a)
 	}
+	// Routing lane: the resolved dispatch target (project route → delegate →
+	// assignee) IS the lead this issue routes to, so it becomes the mirror task's
+	// profile_slug — the field GetOldestPendingTaskForProfile pulls a lane's queue
+	// by. Without it every Linear-born task inserted blank and was unroutable.
+	// Only an agent target sets it; a human/empty target leaves profile_slug unset.
+	if target := c.dispatchTarget(iss); isAgent(target) {
+		seed.ProfileSlug = target
+	}
 	if pid := issueProjectID(iss); pid != "" {
 		seed.LinearProjectID = strptr(pid)
 	}
