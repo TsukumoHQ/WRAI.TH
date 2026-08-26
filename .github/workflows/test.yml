@@ -22,7 +22,9 @@ jobs:
       - name: Run tests
         env:
           CGO_ENABLED: "1"
-        run: go test -race -count=1 ./...
+        # -tags fts5 matches the Makefile `test:` target and the build: without it
+        # the FTS5 module is absent and the memories/vault FTS tests fail at runtime.
+        run: go test -tags fts5 -race -count=1 ./...
 
       # Non-blocking: surfaces known vulnerabilities in PRs without freezing the
       # pipeline on stdlib advisories that only a Go toolchain release can fix.

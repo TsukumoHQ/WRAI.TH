@@ -19,8 +19,8 @@ func TestCommsMetricsSnapshot(t *testing.T) {
 	}
 	q, _ := d.InsertMessageWithDeliveries("p", "cto", "b", "question", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
 	// worker: two no-wakes.
-	d.InsertMessageWithDeliveries("p", "worker", "b", "fyi", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
-	d.InsertMessageWithDeliveries("p", "worker", "b", "status", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
+	_, _ = d.InsertMessageWithDeliveries("p", "worker", "b", "fyi", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
+	_, _ = d.InsertMessageWithDeliveries("p", "worker", "b", "status", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
 
 	// Deterministic read receipt on the task: read 30s after send → under-1m bucket.
 	created, _ := time.Parse(memoryTimeFmt, task.CreatedAt)
