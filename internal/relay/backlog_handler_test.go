@@ -30,14 +30,14 @@ func TestBacklogDispatch_SkipsNotifyUntilPromote(t *testing.T) {
 	}
 
 	// Promote → pending; now the worker is notified.
-	h.HandlePromoteTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": taskID}))
+	_, _ = h.HandlePromoteTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": taskID}))
 	if n, _ := h.db.UnreadCountForAgent("p1", "w1"); n != 1 {
 		t.Fatalf("promote must notify the profile, got %d unread", n)
 	}
 
 	// Double-promote (task already pending) must be an idempotent no-op — no second
 	// wake/delivery (review-121f0ff5 finding).
-	h.HandlePromoteTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": taskID}))
+	_, _ = h.HandlePromoteTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": taskID}))
 	if n, _ := h.db.UnreadCountForAgent("p1", "w1"); n != 1 {
 		t.Fatalf("double-promote must not re-notify, got %d unread", n)
 	}

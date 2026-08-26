@@ -705,3 +705,121 @@ func TestReconcileDropoutSync(t *testing.T) {
 		t.Fatalf("dropped-out Done issue: mirror status = %q, want done", task.Status)
 	}
 }
+
+// TestIngestFullyTypedIssueRendersTyped is the positive control for the
+// Linear→task metadata carry (TSU linear-mirror ticket): a FULLY-TYPED issue —
+// real title, a Goal, ≥1 Acceptance Criterion, a DoD, and an agent lead — must
+// mirror as a typed, routable task. Asserting the happy path proves a later
+// "0 untitled / 0 unrouted" result comes from the carry actually working, not
+// from the guard never running against real data.
+func TestIngestFullyTypedIssueRendersTyped(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	now := time.Now().UnixMilli()
+
+	iss := baseIssue()
+	iss["id"] = "issue-typed-1"
+	iss["identifier"] = "SYN-777"
+	iss["number"] = 777
+	iss["title"] = "Carry Linear metadata into the mirror"
+	iss["description"] = "## Goal\nMirror keeps the ticket typed.\n\n" +
+		"## Acceptance Criteria\n- title survives\n- goal survives\n- dod survives\n\n" +
+		"## DoD\nAll three sections round-trip to the task."
+	// assignee "lead" is an agent -> the resolved routing lane.
+	body := issueFixture("create", now, "human-1", iss, nil)
+
+	if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	task, err := database.GetTaskByLinearIssueID(c.project, "issue-typed-1")
+	if err != nil || task == nil {
+		t.Fatalf("mirror row not found: %v", err)
+	}
+
+	// Title = the Linear title — never "Untitled task {id}".
+	if task.Title != "Carry Linear metadata into the mirror" {
+		t.Errorf("title = %q, want the Linear title", task.Title)
+	}
+	if strings.Contains(strings.ToLower(task.Title), "untitled") {
+		t.Errorf("title fell back to a placeholder: %q", task.Title)
+	}
+	// linear_key populated (traceable back to Linear).
+	if task.LinearKey == nil || *task.LinearKey != "SYN-777" {
+		t.Errorf("linear_key = %v, want SYN-777", task.LinearKey)
+	}
+	// Typed: goal + acceptance_criteria + DoD all carried.
+	if task.Goal != "Mirror keeps the ticket typed." {
+		t.Errorf("goal = %q", task.Goal)
+	}
+	for _, want := range []string{"title survives", "goal survives", "dod survives"} {
+		if !strings.Contains(task.AcceptanceCriteria, want) {
+			t.Errorf("acceptance_criteria missing %q: %s", want, task.AcceptanceCriteria)
+		}
+	}
+	if task.AcceptanceCriteria == "[]" || strings.TrimSpace(task.AcceptanceCriteria) == "" {
+		t.Errorf("acceptance_criteria rendered empty: %q", task.AcceptanceCriteria)
+	}
+	if task.Dod != "All three sections round-trip to the task." {
+		t.Errorf("dod = %q", task.Dod)
+	}
+	// Routing lane populated from the resolved lead (assignee "lead").
+	if task.ProfileSlug != "lead" {
+		t.Errorf("profile_slug = %q, want lead (the routing lane)", task.ProfileSlug)
+	}
+}
+
+// TestIngestProfileSlugFromProjectRoute checks the routing lane is taken from
+// the owner-configured project route when present (it wins over the assignee),
+// matching dispatchTarget's precedence.
+func TestIngestProfileSlugFromProjectRoute(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	// Route the issue's Linear project to a specific lead.
+	database.SetSetting("linear_routing", `{"proj-9":"wraith-backend"}`)
+	now := time.Now().UnixMilli()
+
+	iss := baseIssue()
+	iss["id"] = "issue-routed-1"
+	iss["project"] = map[string]any{"id": "proj-9", "name": "wrai.th"}
+	body := issueFixture("create", now, "human-1", iss, nil)
+
+	if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	task, err := database.GetTaskByLinearIssueID(c.project, "issue-routed-1")
+	if err != nil || task == nil {
+		t.Fatalf("mirror row not found: %v", err)
+	}
+	if task.ProfileSlug != "wraith-backend" {
+		t.Errorf("profile_slug = %q, want wraith-backend (project route wins)", task.ProfileSlug)
+	}
+}
+
+// TestUpsertLinearMirrorProfileSlugNonDestructive guards that a content re-sync
+// never blanks a routing lane that a relay reassignment already set: an update
+// carrying an empty ProfileSlug must leave the stored slug intact.
+func TestUpsertLinearMirrorProfileSlugNonDestructive(t *testing.T) {
+	database := newTestDB(t)
+
+	// First sync sets the lane.
+	if _, _, err := database.UpsertLinearMirror(db.LinearMirrorSeed{
+		Project: "default", LinearIssueID: "iss-keep", Title: "T",
+		ProfileSlug: "wraith-backend", Status: "pending",
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	// A later content re-sync with no target must not blank it.
+	if _, _, err := database.UpsertLinearMirror(db.LinearMirrorSeed{
+		Project: "default", LinearIssueID: "iss-keep", Title: "T2",
+		ProfileSlug: "", Status: "in-progress",
+	}); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	task, err := database.GetTaskByLinearIssueID("default", "iss-keep")
+	if err != nil || task == nil {
+		t.Fatalf("row: %v", err)
+	}
+	if task.ProfileSlug != "wraith-backend" {
+		t.Errorf("profile_slug = %q, want it preserved as wraith-backend", task.ProfileSlug)
+	}
+}

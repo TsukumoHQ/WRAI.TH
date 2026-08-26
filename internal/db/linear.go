@@ -21,6 +21,7 @@ type LinearMirrorSeed struct {
 	Project         string
 	LinearIssueID   string // Linear issue UUID — the mirror key
 	LinearKey       *string
+	ProfileSlug     string // routing lane (the resolved lead), from the issue's dispatch target; "" leaves it unset
 	Title           string
 	Description     string
 	Priority        string
@@ -72,6 +73,12 @@ func (d *DB) GetTaskByLinearIssueID(project, linearIssueID string) (*models.Task
 //
 // Source is forced to 'linear'. On first insert a UUID is minted; on update the
 // existing row's id is reused so overlay/temporal state survives.
+//
+// profile_slug (the routing lane) is carried from the seed so a Linear-born task
+// lands in the right lead's queue — it used to insert blank, leaving every mirror
+// unroutable. The UPDATE only overwrites with a non-empty slug, so a later relay
+// reassignment (transitionTask recomputing profile_slug from the new assignee) is
+// never clobbered by a content re-sync.
 func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool, err error) {
 	if s.LinearIssueID == "" {
 		return "", false, fmt.Errorf("upsert linear mirror: empty linear_issue_id")
@@ -108,6 +115,7 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 			   assignee=?, cycle_id=?, cycle_name=?, cycle_start=?, cycle_end=?,
 			   linear_project_id=COALESCE(?, linear_project_id),
 			   parent_task_id=COALESCE(?, parent_task_id),
+			   profile_slug=COALESCE(NULLIF(?, ''), profile_slug),
 			   goal=?, acceptance_criteria=?, dod=?
 			 WHERE id=? AND project=?`,
 			s.Title, s.Description, s.Priority, s.Status,
@@ -115,6 +123,7 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 			s.Assignee, s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd,
 			s.LinearProjectID,
 			s.ParentTaskID,
+			s.ProfileSlug,
 			s.Goal, s.AcceptanceCriteria, s.Dod,
 			existing.ID, s.Project,
 		)
@@ -139,8 +148,8 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 		    source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee,
 		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, last_activity_at, blocked_periods,
 		    goal, acceptance_criteria, dod)
-		 VALUES (?, '', 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
-		id, s.Title, s.Description, s.Priority, s.Status, s.Project, now,
+		 VALUES (?, ?, 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
+		id, s.ProfileSlug, s.Title, s.Description, s.Priority, s.Status, s.Project, now,
 		s.LinearIssueID, s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState, s.Assignee,
 		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd, s.ParentTaskID, s.LinearProjectID, now,
 		s.Goal, s.AcceptanceCriteria, s.Dod,
