@@ -67,6 +67,7 @@ func sendMessageTool() mcp.Tool {
 			mcp.Description("Does the recipient need to act? 'none' routes no-wake (stays in inbox) — for FYIs/receipts/status. 'ask'/'do'/'decide' may wake per priority. Omit to derive from type. A question/blocker is never suppressed by 'none'."),
 			mcp.Enum("ask", "do", "decide", "none"),
 		),
+		mcp.WithString("idempotency_key", mcp.Description("Optional retry key; same key returns the original message, no duplicate.")),
 	)
 }
 

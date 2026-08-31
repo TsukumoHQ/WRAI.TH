@@ -509,6 +509,15 @@ func migrate(conn *sql.DB) error {
 		// reply takes its parent message's trace_id, a task-announcement message
 		// takes its task's. See deriveTraceID (messages.go). NULL = no trace.
 		"trace_id": "TEXT",
+		// --- Idempotency (outbox-replay fix, task ac328091/34037526 part B) — an
+		// OPTIONAL caller-supplied key. A retry of the same logical send (e.g.
+		// after a client-side timeout that actually landed) reuses the same key
+		// and InsertMessageWithDeliveries short-circuits to the ORIGINAL message
+		// instead of creating a new one — no new delivery_id, no fleet-wide
+		// duplicate wake. NULL/empty (the default) = no dedup, unchanged behavior;
+		// legitimate identical-content resends (heartbeats, repeated status) never
+		// pass a key and are completely unaffected.
+		"idempotency_key": "TEXT",
 	})
 
 	ensureColumns(conn, "conversations", map[string]string{
@@ -530,6 +539,9 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_priority ON messages(priority)`)
 	// Drives the retention GC purge of soft-expired messages (PurgeExpiredMessages).
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_expired ON messages(expired_at) WHERE expired_at IS NOT NULL`)
+	// Backs InsertMessageWithDeliveries' dedup lookup — partial index, only the
+	// small minority of messages that actually carry an idempotency_key pay for it.
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_idempotency ON messages(project, from_agent, idempotency_key) WHERE idempotency_key IS NOT NULL AND idempotency_key != ''`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_conversations_project ON conversations(project)`)
 
 	// Remove old global UNIQUE constraint on agents.name (existing DBs only).

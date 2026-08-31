@@ -28,6 +28,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	priority := mapPriority(req.GetString("priority", "P2"))
 	ttlSeconds := req.GetInt("ttl_seconds", 14400)
 	targetProject := NormalizeProject(req.GetString("target_project", ""))
+	idempotencyKey := req.GetString("idempotency_key", "")
 
 	// Comms-discipline action tag (DEC-relay-comms-discipline-1). Optional: ""
 	// lets the DB derive it from (type, reply_to). 'none' routes no-wake.
@@ -161,7 +162,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			}
 		}
 
-		msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired)
+		msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
 		if err != nil {
 			return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 		}
@@ -189,7 +190,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// Resolve fan-out recipients first, then insert message + deliveries atomically
 	// so a message can never be persisted without its deliveries (silent non-delivery).
 	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
-	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired)
+	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 	}

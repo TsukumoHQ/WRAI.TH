@@ -166,7 +166,14 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 // actionRequired is the caller-declared comms-discipline tag (ask|do|decide|
 // none); "" means derive it server-side from (type, reply_to). See
 // deriveActionRequired / DEC-relay-comms-discipline-1.
-func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string, actionRequired string) (*models.Message, error) {
+//
+// idempotencyKey is an optional trailing arg (variadic so all pre-existing
+// call sites are unaffected): when a non-empty key is supplied and a message
+// already exists for (project, from, idempotency_key), that existing message
+// is returned as-is — no new row, no new deliveries — instead of creating a
+// duplicate. Retries without a key (the default) dedup nothing, matching prior
+// behavior; see DEC-general (outbox duplicate-delivery, task ac328091).
+func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string, actionRequired string, idempotencyKey ...string) (*models.Message, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {
 		priority = "P2"
@@ -175,6 +182,11 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	effTag := d.effectiveActionRequired(actionRequired, msgType, replyTo, project)
 	normalizedMetadata := normalize.JSONKeys(metadata)
 	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
+
+	var key string
+	if len(idempotencyKey) > 0 {
+		key = idempotencyKey[0]
+	}
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -200,9 +212,28 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once committed
 
+	if key != "" {
+		var existingID string
+		err := tx.QueryRow(
+			"SELECT id FROM messages WHERE project = ? AND from_agent = ? AND idempotency_key = ?",
+			project, from, key,
+		).Scan(&existingID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, fmt.Errorf("idempotency lookup: %w", err)
+		}
+		if err == nil {
+			_ = tx.Rollback()
+			return d.GetMessage(existingID)
+		}
+	}
+
+	var keyVal interface{}
+	if key != "" {
+		keyVal = key
+	}
 	if _, err := tx.Exec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag, traceID,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag, traceID, keyVal,
 	); err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
