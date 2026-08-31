@@ -44,7 +44,7 @@ func (d *DB) InsertEvent(deliveryID, project, eventType, agent, payloadJSON stri
 	}
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
-	res, err := d.conn.Exec(
+	res, err := d.writerExec(
 		`INSERT OR IGNORE INTO events (id, delivery_id, project, event_type, agent, payload, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		id, deliveryID, project, eventType, agent, payloadJSON, now,
@@ -100,14 +100,14 @@ func (d *DB) UndeliveredEvents(limit int) ([]Event, error) {
 // MarkEventDelivered stamps delivered_at so the sweeper won't reprocess the row.
 func (d *DB) MarkEventDelivered(id string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(`UPDATE events SET delivered_at = ? WHERE id = ?`, now, id)
+	_, err := d.writerExec(`UPDATE events SET delivered_at = ? WHERE id = ?`, now, id)
 	return err
 }
 
 // IncrementEventAttempt bumps the retry counter and records the last error,
 // leaving delivered_at NULL so the sweeper retries the row next tick.
 func (d *DB) IncrementEventAttempt(id, lastErr string) error {
-	_, err := d.conn.Exec(`UPDATE events SET attempts = attempts + 1, last_error = ? WHERE id = ?`, lastErr, id)
+	_, err := d.writerExec(`UPDATE events SET attempts = attempts + 1, last_error = ? WHERE id = ?`, lastErr, id)
 	return err
 }
 
@@ -115,7 +115,7 @@ func (d *DB) IncrementEventAttempt(id, lastErr string) error {
 // sweeper queue) and records why. attempts is bumped for the audit trail.
 func (d *DB) MarkEventDead(id, lastErr string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(`UPDATE events SET delivered_at = ?, attempts = attempts + 1, last_error = ? WHERE id = ?`, now, lastErr, id)
+	_, err := d.writerExec(`UPDATE events SET delivered_at = ?, attempts = attempts + 1, last_error = ? WHERE id = ?`, now, lastErr, id)
 	return err
 }
 
@@ -127,7 +127,7 @@ func (d *DB) DeleteEventByDelivery(project, deliveryID string) {
 	if deliveryID == "" {
 		return
 	}
-	_, _ = d.conn.Exec(`DELETE FROM events WHERE project = ? AND delivery_id = ?`, project, deliveryID)
+	_, _ = d.writerExec(`DELETE FROM events WHERE project = ? AND delivery_id = ?`, project, deliveryID)
 }
 
 // PruneDeliveredEvents caps the replay log: keeps the newest `keep` delivered
@@ -137,7 +137,7 @@ func (d *DB) PruneDeliveredEvents(keep int) {
 	if keep < 1 {
 		keep = 1000
 	}
-	_, _ = d.conn.Exec(
+	_, _ = d.writerExec(
 		`DELETE FROM events WHERE delivered_at IS NOT NULL AND id NOT IN (
 		   SELECT id FROM events WHERE delivered_at IS NOT NULL ORDER BY id DESC LIMIT ?
 		 )`,

@@ -20,7 +20,7 @@ func (d *DB) UpsertSkill(project, name, description, tags string) (*models.Skill
 	err := d.conn.QueryRow(`SELECT id FROM skills WHERE project = ? AND name = ?`, project, name).Scan(&existingID)
 	if err == sql.ErrNoRows {
 		id := uuid.New().String()
-		_, err := d.conn.Exec(`INSERT INTO skills (id, project, name, description, tags, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		_, err := d.writerExec(`INSERT INTO skills (id, project, name, description, tags, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
 			id, project, name, description, tags, now)
 		if err != nil {
 			return nil, fmt.Errorf("insert skill: %w", err)
@@ -31,7 +31,7 @@ func (d *DB) UpsertSkill(project, name, description, tags string) (*models.Skill
 		return nil, fmt.Errorf("check skill: %w", err)
 	}
 
-	_, err = d.conn.Exec(`UPDATE skills SET description=?, tags=? WHERE id=?`, description, tags, existingID)
+	_, err = d.writerExec(`UPDATE skills SET description=?, tags=? WHERE id=?`, description, tags, existingID)
 	if err != nil {
 		return nil, fmt.Errorf("update skill: %w", err)
 	}
@@ -65,8 +65,8 @@ func (d *DB) DeleteSkill(project, name string) error {
 	if err != nil {
 		return err
 	}
-	_, _ = d.conn.Exec("DELETE FROM profile_skills WHERE skill_id = ?", id)
-	_, err = d.conn.Exec("DELETE FROM skills WHERE id = ?", id)
+	_, _ = d.writerExec("DELETE FROM profile_skills WHERE skill_id = ?", id)
+	_, err = d.writerExec("DELETE FROM skills WHERE id = ?", id)
 	return err
 }
 
@@ -75,14 +75,14 @@ func (d *DB) LinkProfileSkill(profileID, skillID, proficiency string) error {
 	if proficiency == "" {
 		proficiency = "capable"
 	}
-	_, err := d.conn.Exec(`INSERT OR REPLACE INTO profile_skills (profile_id, skill_id, proficiency) VALUES (?, ?, ?)`,
+	_, err := d.writerExec(`INSERT OR REPLACE INTO profile_skills (profile_id, skill_id, proficiency) VALUES (?, ?, ?)`,
 		profileID, skillID, proficiency)
 	return err
 }
 
 // UnlinkProfileSkill removes the link between a profile and a skill.
 func (d *DB) UnlinkProfileSkill(profileID, skillID string) error {
-	_, err := d.conn.Exec(`DELETE FROM profile_skills WHERE profile_id = ? AND skill_id = ?`, profileID, skillID)
+	_, err := d.writerExec(`DELETE FROM profile_skills WHERE profile_id = ? AND skill_id = ?`, profileID, skillID)
 	return err
 }
 

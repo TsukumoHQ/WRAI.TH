@@ -44,7 +44,7 @@ func (d *DB) RegisterProfile(project, slug, name, role, skills string) (*models.
 			CreatedAt: now,
 			UpdatedAt: now,
 		}
-		_, err := d.conn.Exec(
+		_, err := d.writerExec(
 			"INSERT INTO profiles (id, slug, name, role, skills, project, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
 			p.ID, p.Slug, p.Name, p.Role, p.Skills, p.Project, p.CreatedAt, p.UpdatedAt,
 		)
@@ -70,7 +70,7 @@ func (d *DB) RegisterProfile(project, slug, name, role, skills string) (*models.
 	}
 	existing.UpdatedAt = now
 
-	_, err = d.conn.Exec(
+	_, err = d.writerExec(
 		"UPDATE profiles SET name = ?, role = ?, skills = ?, updated_at = ? WHERE slug = ? AND project = ?",
 		existing.Name, existing.Role, existing.Skills, now, slug, project,
 	)
@@ -137,7 +137,7 @@ func (d *DB) ListAllProfiles() ([]models.Profile, error) {
 
 // DeleteProfile removes a profile by slug and project.
 func (d *DB) DeleteProfile(project, slug string) error {
-	_, err := d.conn.Exec("DELETE FROM profiles WHERE slug = ? AND project = ?", slug, project)
+	_, err := d.writerExec("DELETE FROM profiles WHERE slug = ? AND project = ?", slug, project)
 	return err
 }
 

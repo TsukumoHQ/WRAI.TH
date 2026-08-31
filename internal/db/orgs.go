@@ -21,7 +21,7 @@ func (d *DB) CreateOrg(name, slug, description string) (*models.Org, error) {
 		CreatedAt:   now,
 	}
 
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT INTO orgs (id, name, slug, description, created_at) VALUES (?, ?, ?, ?, ?)`,
 		org.ID, org.Name, org.Slug, org.Description, org.CreatedAt,
 	)
@@ -83,7 +83,7 @@ func (d *DB) CreateTeam(name, slug, project, description, teamType string, orgID
 		CreatedAt:    now,
 	}
 
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT INTO teams (id, name, slug, org_id, project, description, type, parent_team_id, created_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		team.ID, team.Name, team.Slug, team.OrgID, team.Project,
@@ -177,7 +177,7 @@ func (d *DB) GetTeamByID(teamID string) (*models.Team, error) {
 // (issue #150). Delivered messages themselves are untouched — only the team's
 // inbox references drop. Returns an error if no team with that slug exists.
 func (d *DB) DeleteTeam(project, slug string) error {
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return err
 	}
@@ -212,7 +212,7 @@ func (d *DB) AddTeamMember(teamID, agentName, project, role string) error {
 	if role == "" {
 		role = "member"
 	}
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT OR REPLACE INTO team_members (team_id, agent_name, project, role, joined_at)
 		 VALUES (?, ?, ?, ?, ?)`,
 		teamID, agentName, project, role, now,
@@ -225,7 +225,7 @@ func (d *DB) AddTeamMember(teamID, agentName, project, role string) error {
 
 func (d *DB) RemoveTeamMember(teamID, agentName string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`UPDATE team_members SET left_at = ? WHERE team_id = ? AND agent_name = ? AND left_at IS NULL`,
 		now, teamID, agentName,
 	)
@@ -308,7 +308,7 @@ func (d *DB) GetAgentTeams(project, agentName string) ([]models.Team, error) {
 
 func (d *DB) AddToTeamInbox(teamID, messageID string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT OR IGNORE INTO team_inbox (team_id, message_id, created_at) VALUES (?, ?, ?)`,
 		teamID, messageID, now,
 	)
@@ -348,7 +348,7 @@ func (d *DB) GetTeamInbox(teamID string, limit int) ([]models.Message, error) {
 // --- Notify Channels ---
 
 func (d *DB) AddNotifyChannel(agentName, project, target string) error {
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT OR IGNORE INTO agent_notify_channels (agent_name, project, target) VALUES (?, ?, ?)`,
 		agentName, project, target,
 	)

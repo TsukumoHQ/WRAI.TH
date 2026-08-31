@@ -38,7 +38,7 @@ func (d *DB) CreateNotificationRule(r *models.NotificationRule) (*models.Notific
 	r.CreatedAt = now
 	r.UpdatedAt = now
 
-	_, err := d.conn.Exec(`
+	_, err := d.writerExec(`
 		INSERT INTO notification_rules (id, project, name, enabled, event, match_json, action, target, opts_json, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.Project, r.Name, boolToInt(r.Enabled), r.Event, r.Match, r.Action, r.Target, r.Opts, r.CreatedAt, r.UpdatedAt)
@@ -150,7 +150,7 @@ func (d *DB) PatchNotificationRule(id string, name, event, match, action, target
 	}
 	existing.UpdatedAt = time.Now().UTC().Format(memoryTimeFmt)
 
-	_, err = d.conn.Exec(`
+	_, err = d.writerExec(`
 		UPDATE notification_rules
 		SET name = ?, enabled = ?, event = ?, match_json = ?, action = ?, target = ?, opts_json = ?, updated_at = ?
 		WHERE id = ?`,
@@ -163,7 +163,7 @@ func (d *DB) PatchNotificationRule(id string, name, event, match, action, target
 
 // DeleteNotificationRule removes a rule by ID.
 func (d *DB) DeleteNotificationRule(id string) error {
-	_, err := d.conn.Exec("DELETE FROM notification_rules WHERE id = ?", id)
+	_, err := d.writerExec("DELETE FROM notification_rules WHERE id = ?", id)
 	return err
 }
 
@@ -280,7 +280,7 @@ func (d *DB) LogNotificationDelivery(rec *models.NotificationDelivery) error {
 	if rec.Project == "" {
 		rec.Project = "default"
 	}
-	_, err := d.conn.Exec(`
+	_, err := d.writerExec(`
 		INSERT INTO notification_deliveries (id, project, rule_id, rule_name, event, action, target, outcome, status_code, error, payload, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		rec.ID, rec.Project, rec.RuleID, rec.RuleName, rec.Event, rec.Action, rec.Target, rec.Outcome, rec.StatusCode, rec.Error, rec.Payload, rec.CreatedAt)
@@ -288,7 +288,7 @@ func (d *DB) LogNotificationDelivery(rec *models.NotificationDelivery) error {
 		return fmt.Errorf("log notification delivery: %w", err)
 	}
 	// Prune to cap: keep the newest deliveryLogCap rows.
-	_, _ = d.conn.Exec(`
+	_, _ = d.writerExec(`
 		DELETE FROM notification_deliveries
 		WHERE id NOT IN (
 			SELECT id FROM notification_deliveries ORDER BY created_at DESC LIMIT ?

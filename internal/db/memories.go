@@ -1,7 +1,6 @@
 package db
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -40,13 +39,13 @@ func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confiden
 	// acquires the write lock before the SELECT. Without this, concurrent
 	// writers on the same key can both read the same max version and both
 	// insert as version+1, breaking the supersedes chain.
-	tx, err := d.conn.BeginTx(context.Background(), nil)
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	existing, err := d.findActiveMemoryTx(tx, project, scope, agentName, key)
+	existing, err := d.findActiveMemoryTx(tx.Tx, project, scope, agentName, key)
 	if err != nil {
 		return nil, err
 	}
@@ -461,7 +460,7 @@ func (d *DB) DeleteMemory(project, agentName, key, scope string, reason ...strin
 		return fmt.Errorf("invalid scope: %s", scope)
 	}
 
-	res, err := d.conn.Exec(query, args...)
+	res, err := d.writerExec(query, args...)
 	if err != nil {
 		return fmt.Errorf("delete memory: %w", err)
 	}
@@ -527,7 +526,7 @@ func (d *DB) SetMemoryValidity(project, agentName, key, scope, validFrom, validU
 	}
 
 	q := fmt.Sprintf("UPDATE memories SET %s WHERE %s", strings.Join(set, ", "), where)
-	res, err := d.conn.Exec(q, args...)
+	res, err := d.writerExec(q, args...)
 	if err != nil {
 		return fmt.Errorf("set memory validity: %w", err)
 	}
@@ -628,7 +627,7 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 		}
 	}
 
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -790,7 +789,7 @@ func (d *DB) DeleteMemoryByID(id, archivedBy string, reason ...string) error {
 	if len(reason) > 0 && reason[0] != "" {
 		why = reason[0]
 	}
-	res, err := d.conn.Exec(
+	res, err := d.writerExec(
 		`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE id = ? AND archived_at IS NULL`,
 		now, archivedBy, why, id,
 	)

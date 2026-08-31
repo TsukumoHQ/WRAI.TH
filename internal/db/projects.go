@@ -47,7 +47,7 @@ func randomPlanet() string {
 func (d *DB) EnsureProject(name string) {
 	name = canonicalProject(name)
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, _ = d.conn.Exec(
+	_, _ = d.writerExec(
 		"INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES (?, ?, ?)",
 		name, randomPlanet(), now,
 	)
@@ -70,7 +70,7 @@ func (d *DB) GetProject(name string) (*models.Project, error) {
 // UpdateProjectPlanetType changes a project's planet_type.
 func (d *DB) UpdateProjectPlanetType(name, planetType string) error {
 	name = canonicalProject(name)
-	_, err := d.conn.Exec("UPDATE projects SET planet_type = ? WHERE name = ?", planetType, name)
+	_, err := d.writerExec("UPDATE projects SET planet_type = ? WHERE name = ?", planetType, name)
 	return err
 }
 
@@ -96,7 +96,7 @@ func (d *DB) SetProjectRequiresTypedTicket(name string, required bool) error {
 	if required {
 		v = 1
 	}
-	_, err := d.conn.Exec("UPDATE projects SET require_typed_ticket = ? WHERE name = ?", v, name)
+	_, err := d.writerExec("UPDATE projects SET require_typed_ticket = ? WHERE name = ?", v, name)
 	return err
 }
 
@@ -109,13 +109,13 @@ func (d *DB) GetSetting(key string) string {
 
 // SetSetting upserts a setting.
 func (d *DB) SetSetting(key, value string) {
-	_, _ = d.conn.Exec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?", key, value, value)
+	_, _ = d.writerExec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?", key, value, value)
 }
 
 // DeleteProject removes a project and all its associated data (cascade delete).
 func (d *DB) DeleteProject(name string) error {
 	name = canonicalProject(name)
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return err
 	}

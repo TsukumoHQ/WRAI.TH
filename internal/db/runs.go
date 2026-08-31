@@ -128,7 +128,7 @@ func (d *DB) SetTaskRun(taskID, project string, integrationBranch, runState *str
 		}
 	}
 
-	res, err := d.conn.Exec(
+	res, err := d.writerExec(
 		`UPDATE tasks SET
 			integration_branch = COALESCE(?, integration_branch),
 			run_state = COALESCE(?, run_state)

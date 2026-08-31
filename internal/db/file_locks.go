@@ -24,7 +24,7 @@ func (d *DB) ClaimFiles(project, agentName, filePaths string, ttlSeconds int) (*
 		TTLSeconds: ttlSeconds,
 	}
 
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"INSERT INTO file_locks (id, agent_name, project, file_paths, claimed_at, ttl_seconds) VALUES (?, ?, ?, ?, ?, ?)",
 		lock.ID, lock.AgentName, lock.Project, lock.FilePaths, lock.ClaimedAt, lock.TTLSeconds,
 	)
@@ -37,7 +37,7 @@ func (d *DB) ClaimFiles(project, agentName, filePaths string, ttlSeconds int) (*
 // ReleaseFiles marks active locks for the given agent+paths as released.
 func (d *DB) ReleaseFiles(project, agentName, filePaths string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE file_locks SET released_at = ? WHERE agent_name = ? AND project = ? AND file_paths = ? AND released_at IS NULL",
 		now, agentName, project, filePaths,
 	)
@@ -76,7 +76,7 @@ func (d *DB) ListFileLocks(project string) ([]models.FileLock, error) {
 // ExpireFileLocks marks locks whose TTL has elapsed as released.
 func (d *DB) ExpireFileLocks() (int, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	result, err := d.conn.Exec(
+	result, err := d.writerExec(
 		`UPDATE file_locks SET released_at = ?
 		 WHERE released_at IS NULL
 		   AND datetime(claimed_at, '+' || ttl_seconds || ' seconds') < datetime(?)`,

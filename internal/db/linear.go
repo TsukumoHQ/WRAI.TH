@@ -108,7 +108,7 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 
 	if existing != nil {
 		// Update the Linear zone only — overlay columns are left untouched.
-		_, err = d.conn.Exec(
+		_, err = d.writerExec(
 			`UPDATE tasks SET
 			   title=?, description=?, priority=?, status=?, source='linear',
 			   linear_key=?, external_url=?, points=?, labels=?, linear_state=?,
@@ -136,13 +136,13 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 		// instantly stale. Bump it on any status transition, mirroring the
 		// agent-side reset-on-activity (transitionTask).
 		if existing.Status != s.Status {
-			_, _ = d.conn.Exec("UPDATE tasks SET last_activity_at = ? WHERE id = ?", now, existing.ID)
+			_, _ = d.writerExec("UPDATE tasks SET last_activity_at = ? WHERE id = ?", now, existing.ID)
 		}
 		return existing.ID, false, nil
 	}
 
 	id := uuid.New().String()
-	_, err = d.conn.Exec(
+	_, err = d.writerExec(
 		`INSERT INTO tasks
 		   (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at,
 		    source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee,
@@ -192,7 +192,7 @@ func (d *DB) LinkTaskLinear(taskID, linearIssueID, linearKey string) error {
 	if taskID == "" || linearIssueID == "" {
 		return fmt.Errorf("link task linear: empty id")
 	}
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE tasks SET linear_issue_id = ?, linear_key = COALESCE(NULLIF(?, ''), linear_key) WHERE id = ?",
 		linearIssueID, linearKey, taskID,
 	)
@@ -207,7 +207,7 @@ func (d *DB) LinkTaskLinear(taskID, linearIssueID, linearKey string) error {
 // Done via the GitHub PR-merge auto-close). Idempotent: only stamps if unset.
 func (d *DB) MarkLinearDone(taskID string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`UPDATE tasks SET
 		   done_at = COALESCE(done_at, ?),
 		   completed_at = COALESCE(completed_at, ?)
@@ -261,7 +261,7 @@ func (d *DB) CloseLinearMirror(taskID, status string) error {
 		return fmt.Errorf("close linear mirror: invalid status %q", status)
 	}
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`UPDATE tasks SET
 		   status = ?,
 		   done_at = COALESCE(done_at, ?),
@@ -283,7 +283,7 @@ func (d *DB) CloseLinearMirror(taskID, status string) error {
 // already landed), so a marker-write hiccup never re-drives the whole ingest.
 func (d *DB) SetRefusalNotified(taskID string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`UPDATE tasks SET refusal_notified_at = COALESCE(refusal_notified_at, ?) WHERE id = ?`,
 		now, taskID,
 	)
@@ -296,7 +296,7 @@ func (d *DB) SetRefusalNotified(taskID string) error {
 // ClearRefusalNotified resets the anti-spam marker when a refused issue becomes
 // conforming again, so a LATER re-non-conformity re-notifies exactly once.
 func (d *DB) ClearRefusalNotified(taskID string) error {
-	if _, err := d.conn.Exec(
+	if _, err := d.writerExec(
 		`UPDATE tasks SET refusal_notified_at = NULL WHERE id = ?`, taskID,
 	); err != nil {
 		return fmt.Errorf("clear refusal notified: %w", err)
@@ -311,14 +311,14 @@ const linearSyncLogCap = 500
 // Best-effort: a logging failure never blocks the connector.
 func (d *DB) LogLinearSync(issueID, action, outcome, detail string) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	if _, err := d.conn.Exec(
+	if _, err := d.writerExec(
 		`INSERT INTO linear_sync_log (ts, issue_id, action, outcome, detail) VALUES (?, ?, ?, ?, ?)`,
 		now, issueID, action, outcome, detail,
 	); err != nil {
 		return
 	}
 	// Prune beyond the cap (keep the newest linearSyncLogCap rows).
-	_, _ = d.conn.Exec(
+	_, _ = d.writerExec(
 		`DELETE FROM linear_sync_log WHERE id <= (
 		   SELECT id FROM linear_sync_log ORDER BY id DESC LIMIT 1 OFFSET ?
 		 )`,

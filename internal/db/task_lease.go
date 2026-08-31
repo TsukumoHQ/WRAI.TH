@@ -130,7 +130,7 @@ func (d *DB) ReclaimTask(taskID, newAgent, project string) (*models.Task, error)
 	}
 
 	expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
-	res, err := d.conn.Exec(
+	res, err := d.writerExec(
 		`UPDATE tasks SET status = 'accepted', assigned_to = ?, claimed_by = ?, accepted_at = ?,
 		   claimed_at = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ?
 		 WHERE id = ? AND project = ? AND COALESCE(lease_holder,'') = ? AND status = ?`,
@@ -241,7 +241,7 @@ func (d *DB) SweepExpiredLeases() ([]SweptLease, error) {
 		if d.agentLive(c.project, c.holder) {
 			continue // live holder — the lease is generous on purpose; leave it
 		}
-		res, err := d.conn.Exec(
+		res, err := d.writerExec(
 			`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
 			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?
 			 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,

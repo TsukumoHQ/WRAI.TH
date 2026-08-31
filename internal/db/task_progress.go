@@ -22,7 +22,7 @@ func (d *DB) AddProgressNote(taskID, project, agent, note string) error {
 		return nil
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT INTO task_progress_notes (task_id, project, agent, note, created_at) VALUES (?, ?, ?, ?, ?)`,
 		taskID, project, agent, note, now,
 	)
@@ -30,7 +30,7 @@ func (d *DB) AddProgressNote(taskID, project, agent, note string) error {
 		return fmt.Errorf("add progress note: %w", err)
 	}
 	// A comment / progress note is activity — reset the stale clock.
-	_, _ = d.conn.Exec("UPDATE tasks SET last_activity_at = ? WHERE id = ? AND project = ?", now, taskID, project)
+	_, _ = d.writerExec("UPDATE tasks SET last_activity_at = ? WHERE id = ? AND project = ?", now, taskID, project)
 	return nil
 }
 

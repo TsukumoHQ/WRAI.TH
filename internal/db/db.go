@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"crypto/sha1"
 	"database/sql"
 	"database/sql/driver"
@@ -144,6 +145,58 @@ func (d *DB) ro() *sql.DB {
 	return d.reader
 }
 
+// writerTimeout bounds every writer-pool call (Exec and transactions). The
+// writer pool is a single connection (SetMaxOpenConns(1)) shared by every
+// write in the app; without a bound, a caller waiting to acquire it — or a
+// call that starts running — blocks forever behind whatever else is holding
+// or using it (a long-running op, a leaked tx, pool exhaustion). go-sqlite3
+// honors context cancellation by calling sqlite3_interrupt on the connection,
+// so a timeout here actually aborts the call server-side instead of quietly
+// finishing after the caller has already errored out.
+// var, not const: tests shrink it to exercise the timeout path without a real
+// 15s wait.
+var writerTimeout = 15 * time.Second
+
+// writerExec runs Exec on the writer connection bounded by writerTimeout.
+func (d *DB) writerExec(query string, args ...interface{}) (sql.Result, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
+	defer cancel()
+	return d.conn.ExecContext(ctx, query, args...)
+}
+
+// writerTx wraps *sql.Tx to release the ctx bounding its lifetime as soon as
+// the transaction is finished, instead of leaking it until writerTimeout
+// fires. If the caller never calls Commit/Rollback within writerTimeout, the
+// ctx expires and database/sql rolls the transaction back automatically.
+type writerTx struct {
+	*sql.Tx
+	cancel context.CancelFunc
+}
+
+func (t *writerTx) Commit() error {
+	err := t.Tx.Commit()
+	t.cancel()
+	return err
+}
+
+func (t *writerTx) Rollback() error {
+	err := t.Tx.Rollback()
+	t.cancel()
+	return err
+}
+
+// beginWriterTx starts a transaction on the writer connection bounded by
+// writerTimeout (see writerExec).
+func (d *DB) beginWriterTx() (*writerTx, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
+	tx, err := d.conn.BeginTx(ctx, nil)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	return &writerTx{Tx: tx, cancel: cancel}, nil
+}
+
 // Path returns the database file path.
 func (d *DB) Path() string {
 	return d.path
@@ -179,7 +232,21 @@ func (d *DB) Backup(keep int) (string, error) {
 	}
 	dst := fmt.Sprintf("%s.bak.0", d.path)
 	_ = os.Remove(dst) // VACUUM INTO fails if the target already exists
-	if _, err := d.conn.Exec("VACUUM INTO ?", dst); err != nil {
+
+	// VACUUM INTO runs on a dedicated ad-hoc connection, NOT d.conn (the
+	// single-connection writer pool every app write serializes behind).
+	// VACUUM INTO on a large DB can take minutes; running it on the writer
+	// pool would check that connection out of the pool for the whole copy,
+	// wedging every other write behind Go's database/sql pool wait (which has
+	// no timeout on any call site) — the serve-wedge root cause.
+	backupConn, err := sql.Open("sqlite3", d.path+"?_busy_timeout=10000&mode=ro")
+	if err != nil {
+		return "", fmt.Errorf("open backup connection: %w", err)
+	}
+	defer backupConn.Close()
+	backupConn.SetMaxOpenConns(1)
+
+	if _, err := backupConn.Exec("VACUUM INTO ?", dst); err != nil {
 		return "", fmt.Errorf("vacuum into %s: %w", dst, err)
 	}
 	return dst, nil

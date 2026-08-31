@@ -144,7 +144,7 @@ func (d *DB) RequeueTask(taskID, project, reason string) (*models.Task, error) {
 
 	priorHolder := strVal(task.AssignedTo)
 	oldStatus := task.Status
-	res, err := d.conn.Exec(
+	res, err := d.writerExec(
 		`UPDATE tasks SET status = 'pending', assigned_to = NULL, accepted_at = NULL,
 		   started_at = NULL, in_review_at = NULL, claimed_by = NULL, claimed_at = NULL,
 		   lease_holder = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL,

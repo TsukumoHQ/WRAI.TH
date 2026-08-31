@@ -17,7 +17,7 @@ func (d *DB) CreateDeliveries(messageID, project string, recipients []string) er
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	// One transaction for the whole fan-out: N recipients = 1 write-lock acquire
 	// + 1 fsync instead of N. Matters on the hot send/broadcast path.
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return fmt.Errorf("create deliveries: begin: %w", err)
 	}
@@ -66,7 +66,7 @@ func (d *DB) MarkDeliveriesSurfaced(ids []string) {
 			ph[i] = "?"
 			args = append(args, id)
 		}
-		_, _ = d.conn.Exec(
+		_, _ = d.writerExec(
 			"UPDATE deliveries SET state = 'surfaced', surfaced_at = ? WHERE state = 'queued' AND id IN ("+strings.Join(ph, ",")+")",
 			args...,
 		)
@@ -242,7 +242,7 @@ func (d *DB) FetchInboxDeliveries(project, agentName string, unreadOnly bool, li
 // AcknowledgeDelivery marks a delivery as acknowledged.
 func (d *DB) AcknowledgeDelivery(deliveryID string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE deliveries SET state = 'acknowledged', acknowledged_at = ? WHERE id = ? AND state IN ('queued', 'surfaced')",
 		now, deliveryID,
 	)
@@ -350,7 +350,7 @@ func (d *DB) DeliveryIDsForAgent(project, agent string, messageIDs []string) (ma
 // Used for backward compat with mark_read.
 func (d *DB) AcknowledgeDeliveryByMessage(messageID, agentName, project string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE deliveries SET state = 'acknowledged', acknowledged_at = ? WHERE message_id = ? AND to_agent = ? AND project = ? AND state IN ('queued', 'surfaced')",
 		now, messageID, agentName, project,
 	)
@@ -365,7 +365,7 @@ func (d *DB) AcknowledgeDeliveryByMessage(messageID, agentName, project string) 
 // conversation messages, matching what the message_ids branch already does.
 func (d *DB) AcknowledgeConversationDeliveries(conversationID, agentName, project string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`UPDATE deliveries SET state = 'acknowledged', acknowledged_at = ?
 		 WHERE to_agent = ? AND project = ? AND state IN ('queued', 'surfaced')
 		   AND message_id IN (SELECT id FROM messages WHERE conversation_id = ?)`,
@@ -378,7 +378,7 @@ func (d *DB) AcknowledgeConversationDeliveries(conversationID, agentName, projec
 func (d *DB) ExpireDeliveries() (int, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return 0, fmt.Errorf("expire deliveries begin: %w", err)
 	}
@@ -478,7 +478,7 @@ func (d *DB) PurgeOldDeadletter(shortMaxAge, longMaxAge time.Duration) (int64, e
 
 	var total int64
 	for {
-		res, err := d.conn.Exec(`DELETE FROM deadletter WHERE id IN (`+sel+`)`,
+		res, err := d.writerExec(`DELETE FROM deadletter WHERE id IN (`+sel+`)`,
 			longCutoff, shortCutoff, deadletterPurgeBatch)
 		if err != nil {
 			return total, fmt.Errorf("purge deadletter: %w", err)

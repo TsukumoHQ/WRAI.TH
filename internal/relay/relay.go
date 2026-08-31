@@ -4,6 +4,7 @@ import (
 	"context"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"sync"
@@ -133,11 +134,11 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	}
 }
 
-// ListenAndServe starts a composite HTTP server that serves:
+// buildHandler assembles the composite HTTP handler that serves:
 //   - /mcp     → MCP Streamable HTTP handler
 //   - /api/*   → REST API for the web UI
 //   - /*       → Embedded static files (web UI)
-func (r *Relay) ListenAndServe(addr string) error {
+func (r *Relay) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 
 	// MCP handler
@@ -167,9 +168,25 @@ func (r *Relay) ListenAndServe(addr string) error {
 	}
 	mux.Handle("/", uiHandler)
 
-	handler := r.buildMiddlewareChain(mux)
-	r.httpServer = &http.Server{Addr: addr, Handler: handler}
+	return r.buildMiddlewareChain(mux)
+}
+
+// ListenAndServe binds addr and serves the composite handler. Kept for
+// callers that don't need to bind the listener ahead of heavy init — prefer
+// Serve with a listener opened earlier so the port is reachable before
+// migrations/backups run.
+func (r *Relay) ListenAndServe(addr string) error {
+	r.httpServer = &http.Server{Addr: addr, Handler: r.buildHandler()}
 	return r.httpServer.ListenAndServe()
+}
+
+// Serve runs the composite handler on an already-open listener. Callers bind
+// the listener (net.Listen) as early as possible — before database init and
+// migrations — so the port is reachable and a "listening" log line appears
+// immediately, instead of only after however long that heavy work takes.
+func (r *Relay) Serve(ln net.Listener) error {
+	r.httpServer = &http.Server{Addr: ln.Addr().String(), Handler: r.buildHandler()}
+	return r.httpServer.Serve(ln)
 }
 
 // buildMiddlewareChain wraps the mux with security middleware.

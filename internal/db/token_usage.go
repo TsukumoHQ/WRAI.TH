@@ -43,7 +43,7 @@ func (d *DB) InsertTokenUsageBatch(records []TokenRecord) error {
 		return nil
 	}
 
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func (d *DB) GetTokenUsageByTool(project, agent, since string) ([]TokenUsageSumm
 // PurgeOldTokenUsage removes token usage records older than the given duration.
 func (d *DB) PurgeOldTokenUsage(maxAge time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
-	res, err := d.conn.Exec("DELETE FROM token_usage WHERE created_at < ?", cutoff)
+	res, err := d.writerExec("DELETE FROM token_usage WHERE created_at < ?", cutoff)
 	if err != nil {
 		return 0, err
 	}
@@ -175,7 +175,7 @@ func (d *DB) RollupTokenUsage(retentionDays int) error {
 	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 	boundaryDay := time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
 	since := boundaryDay.AddDate(0, 0, 1).Format(time.RFC3339)
-	_, err := d.conn.Exec(`
+	_, err := d.writerExec(`
 		INSERT INTO token_usage_daily (day, project, agent, model, bytes, tokens, call_count)
 		SELECT strftime('%Y-%m-%d', created_at) AS day, project, agent, COALESCE(model, ''),
 		       SUM(bytes), `+tokenSum+`, COUNT(*)

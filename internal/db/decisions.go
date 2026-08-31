@@ -89,7 +89,7 @@ func (d *DB) RememberDecision(project, agent, area, decision, rationale string, 
 // accepted set). Errors if the key isn't an active decision.
 func (d *DB) archiveDecision(project, key, agent string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	res, err := d.conn.Exec(
+	res, err := d.writerExec(
 		`UPDATE memories SET archived_at=?, archived_by=?, archived_reason='superseded', status='archived' WHERE project=? AND key=? AND layer='decision' AND archived_at IS NULL`,
 		now, "superseded:"+agent, project, key,
 	)

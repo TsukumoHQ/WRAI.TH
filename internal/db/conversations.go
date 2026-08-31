@@ -19,7 +19,7 @@ func (d *DB) CreateConversation(project, title, createdBy string, memberNames []
 		Project:   project,
 	}
 
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -137,7 +137,7 @@ func (d *DB) AddConversationMember(conversationID, agentName string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 
 	// Try to rejoin (clear left_at) or insert new.
-	result, err := d.conn.Exec(
+	result, err := d.writerExec(
 		"UPDATE conversation_members SET left_at = NULL, joined_at = ? WHERE conversation_id = ? AND agent_name = ?",
 		now, conversationID, agentName,
 	)
@@ -149,7 +149,7 @@ func (d *DB) AddConversationMember(conversationID, agentName string) error {
 		return nil
 	}
 
-	_, err = d.conn.Exec(
+	_, err = d.writerExec(
 		"INSERT INTO conversation_members (conversation_id, agent_name, joined_at) VALUES (?, ?, ?)",
 		conversationID, agentName, now,
 	)
@@ -170,7 +170,7 @@ func (d *DB) ConversationExists(conversationID string) (bool, error) {
 
 func (d *DB) LeaveConversation(conversationID, agentName string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE conversation_members SET left_at = ? WHERE conversation_id = ? AND agent_name = ? AND left_at IS NULL",
 		now, conversationID, agentName,
 	)
@@ -179,7 +179,7 @@ func (d *DB) LeaveConversation(conversationID, agentName string) error {
 
 func (d *DB) ArchiveConversation(conversationID string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE conversations SET archived_at = ? WHERE id = ? AND archived_at IS NULL",
 		now, conversationID,
 	)
@@ -188,7 +188,7 @@ func (d *DB) ArchiveConversation(conversationID string) error {
 
 func (d *DB) MarkConversationRead(conversationID, agentName string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT INTO conversation_reads (conversation_id, agent_name, last_read_at)
 		 VALUES (?, ?, ?)
 		 ON CONFLICT (conversation_id, agent_name) DO UPDATE SET last_read_at = ?`,

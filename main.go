@@ -139,6 +139,44 @@ func startServer() {
 		}
 	}
 
+	// Bind loopback-only by default. RELAY_BIND overrides the host (e.g.
+	// "0.0.0.0" to expose on the LAN); PORT overrides the port.
+	host := os.Getenv("RELAY_BIND")
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	port := "8090"
+	if v := os.Getenv("PORT"); v != "" {
+		port = v
+	}
+	addr := net.JoinHostPort(host, port)
+
+	// Refuse to expose a non-loopback bind without authentication — otherwise the
+	// entire API/MCP surface is open to everything on the network.
+	if !isLoopbackHost(host) && cfg.APIKey == "" {
+		slog.Error("refusing to bind without auth: set RELAY_API_KEY to expose on a non-loopback address, or unset RELAY_BIND to bind 127.0.0.1",
+			"addr", addr)
+		os.Exit(1)
+	}
+
+	// Bind the TCP listener and log "listening" BEFORE any DB/migration work.
+	// Database init (below) can block the main thread for minutes on a large
+	// DB (observed: ~9min, 0% CPU, no port bound, no log output) — that used
+	// to look indistinguishable from a hang. Binding first means the port is
+	// reachable and the log line appears immediately regardless of how long
+	// migrations take.
+	ln, lerr := net.Listen("tcp", addr)
+	if lerr != nil {
+		if isAddrInUse(lerr) {
+			slog.Error("cannot bind: address already in use — another agent-relay is still running; stop it first: lsof -ti tcp:<port> | xargs kill -9",
+				"addr", addr, "port", port)
+		} else {
+			slog.Error("cannot bind", "addr", addr, "err", lerr)
+		}
+		os.Exit(1)
+	}
+	log.Printf("listening on %s (UI: http://localhost:%s)", addr, port)
+
 	database, err := db.New()
 	if err != nil {
 		slog.Error("failed to init database", "err", err)
@@ -170,26 +208,6 @@ func startServer() {
 
 	r := relay.New(database, ingester, cfg)
 	r.Version = Version
-
-	// Bind loopback-only by default. RELAY_BIND overrides the host (e.g.
-	// "0.0.0.0" to expose on the LAN); PORT overrides the port.
-	host := os.Getenv("RELAY_BIND")
-	if host == "" {
-		host = "127.0.0.1"
-	}
-	port := "8090"
-	if v := os.Getenv("PORT"); v != "" {
-		port = v
-	}
-	addr := net.JoinHostPort(host, port)
-
-	// Refuse to expose a non-loopback bind without authentication — otherwise the
-	// entire API/MCP surface is open to everything on the network.
-	if !isLoopbackHost(host) && cfg.APIKey == "" {
-		slog.Error("refusing to bind without auth: set RELAY_API_KEY to expose on a non-loopback address, or unset RELAY_BIND to bind 127.0.0.1",
-			"addr", addr)
-		os.Exit(1)
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -249,24 +267,17 @@ func startServer() {
 	log.Printf("  auth: %s | cors: %s | max body: %s | rate limit: %s | identity: enforced (no anonymous/default)",
 		authStatus, corsStatus, bodyStatus, rateLimitStatus)
 
-	// serveErr surfaces a bind/listen failure (e.g. EADDRINUSE when a stale
-	// relay still holds the port after sleep/wake) so we exit non-zero instead
-	// of hanging idle while an old process keeps serving the UI.
+	// serveErr surfaces a serve-time failure so we exit non-zero instead of
+	// hanging idle. The listener (ln) is already bound above, before DB init.
 	serveErr := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s (UI: http://localhost:%s)", addr, port)
-		if err := r.ListenAndServe(addr); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := r.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			serveErr <- err
 		}
 	}()
 
 	select {
 	case err := <-serveErr:
-		if isAddrInUse(err) {
-			slog.Error("cannot bind: address already in use — another agent-relay is still running; stop it first: lsof -ti tcp:<port> | xargs kill -9",
-				"addr", addr, "port", port)
-			os.Exit(1)
-		}
 		slog.Error("server failed", "err", err)
 		os.Exit(1)
 	case <-ctx.Done():

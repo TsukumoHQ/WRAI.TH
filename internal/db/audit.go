@@ -34,7 +34,7 @@ func (d *DB) RecordAudit(e models.AuditEntry) error {
 			e.TraceID = t.String
 		}
 	}
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT INTO audit_log (id, project, actor, action, resource_type, resource_id, summary, details, reason, created_at, trace_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		e.ID, e.Project, e.Actor, e.Action, e.ResourceType, e.ResourceID,
@@ -85,7 +85,7 @@ func (d *DB) ListAudit(project, resourceID string, limit int) ([]models.AuditEnt
 // number of rows deleted.
 func (d *DB) PurgeOldAuditLog(maxAge time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-maxAge).Format(memoryTimeFmt)
-	res, err := d.conn.Exec(`DELETE FROM audit_log WHERE datetime(created_at) < datetime(?)`, cutoff)
+	res, err := d.writerExec(`DELETE FROM audit_log WHERE datetime(created_at) < datetime(?)`, cutoff)
 	if err != nil {
 		return 0, fmt.Errorf("purge audit log: %w", err)
 	}

@@ -15,7 +15,7 @@ func (d *DB) GrantElevation(project, agent, role, grantedBy, reason string, dura
 	id := uuid.New().String()
 	expiresAt := now.Add(duration).Format(memoryTimeFmt)
 
-	_, err := d.conn.Exec(`INSERT INTO elevated_privileges (id, project, agent_name, elevated_role, granted_by, reason, expires_at, created_at)
+	_, err := d.writerExec(`INSERT INTO elevated_privileges (id, project, agent_name, elevated_role, granted_by, reason, expires_at, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, project, agent, role, grantedBy, reason, expiresAt, now.Format(memoryTimeFmt))
 	if err != nil {
@@ -32,7 +32,7 @@ func (d *DB) GrantElevation(project, agent, role, grantedBy, reason string, dura
 // RevokeElevation immediately revokes a privilege escalation.
 func (d *DB) RevokeElevation(id string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(`UPDATE elevated_privileges SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id)
+	_, err := d.writerExec(`UPDATE elevated_privileges SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL`, now, id)
 	return err
 }
 
@@ -81,7 +81,7 @@ func (d *DB) ListActiveElevations(project string) ([]models.Elevation, error) {
 // Returns the number of elevations expired.
 func (d *DB) ExpireElevations() (int64, error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	result, err := d.conn.Exec(`UPDATE elevated_privileges SET revoked_at = ? WHERE revoked_at IS NULL AND expires_at <= ?`, now, now)
+	result, err := d.writerExec(`UPDATE elevated_privileges SET revoked_at = ? WHERE revoked_at IS NULL AND expires_at <= ?`, now, now)
 	if err != nil {
 		return 0, err
 	}

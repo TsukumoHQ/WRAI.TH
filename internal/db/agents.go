@@ -77,7 +77,7 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 	// Ensure the project exists (auto-create with random planet on first use)
 	d.EnsureProject(project)
 
-	a, err := scanAgent(d.conn.QueryRow("SELECT "+agentColumns+" FROM agents WHERE name = ? AND project = ?", name, project))
+	a, err := scanAgent(d.ro().QueryRow("SELECT "+agentColumns+" FROM agents WHERE name = ? AND project = ?", name, project))
 	if err == sql.ErrNoRows {
 		agent := &models.Agent{
 			ID:              uuid.New().String(),
@@ -96,7 +96,7 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 			MaxContextBytes: maxContextBytes,
 			IsService:       isService,
 		}
-		_, err := d.conn.Exec(
+		_, err := d.writerExec(
 			"INSERT INTO agents ("+agentColumns+") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 			agent.ID, agent.Name, agent.Role, agent.Description, agent.RegisteredAt, agent.LastSeen,
 			agent.Project, agent.ReportsTo, agent.ProfileSlug, agent.Status, agent.DeactivatedAt, agent.IsExecutive, agent.SessionID,
@@ -134,7 +134,7 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 		isService = a.IsService
 	}
 
-	_, err = d.conn.Exec(
+	_, err = d.writerExec(
 		"UPDATE agents SET role = ?, description = ?, last_seen = ?, reports_to = ?, profile_slug = ?, is_executive = ?, session_id = ?, interest_tags = ?, max_context_bytes = ?, is_service = ?, status = 'active', deactivated_at = NULL WHERE name = ? AND project = ?",
 		role, description, now, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, isService, name, project,
 	)
@@ -158,7 +158,7 @@ func (d *DB) RegisterAgent(project, name, role, description string, reportsTo, p
 
 func (d *DB) TouchAgent(project, name string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.conn.Exec("UPDATE agents SET last_seen = ? WHERE name = ? AND project = ?", now, name, project)
+	_, err := d.writerExec("UPDATE agents SET last_seen = ? WHERE name = ? AND project = ?", now, name, project)
 	return err
 }
 
@@ -193,7 +193,7 @@ func (d *DB) ListAgents(project string) ([]models.Agent, error) {
 func (d *DB) MarkStaleAgentsInactive(maxAge time.Duration) (int, error) {
 	cutoff := time.Now().UTC().Add(-maxAge).Format(time.RFC3339)
 	now := time.Now().UTC().Format(time.RFC3339)
-	result, err := d.conn.Exec(
+	result, err := d.writerExec(
 		`UPDATE agents SET status = 'inactive', deactivated_at = ?
 		 WHERE last_seen < ? AND status = 'active'
 		   AND NOT EXISTS (
@@ -214,7 +214,7 @@ func (d *DB) MarkStaleAgentsInactive(maxAge time.Duration) (int, error) {
 
 // SleepAgent sets an agent to sleeping status (visible but not working).
 func (d *DB) SleepAgent(project, name string) error {
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE agents SET status = 'sleeping' WHERE name = ? AND project = ? AND status = 'active'",
 		name, project,
 	)
@@ -224,7 +224,7 @@ func (d *DB) SleepAgent(project, name string) error {
 // DeactivateAgent explicitly deactivates an agent.
 func (d *DB) DeactivateAgent(project, name string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE agents SET status = 'inactive', deactivated_at = ? WHERE name = ? AND project = ? AND status IN ('active', 'sleeping')",
 		now, name, project,
 	)
@@ -243,7 +243,7 @@ func (d *DB) DeactivateAgent(project, name string) error {
 // agent's rows only ever happens via the ordered DeleteProject cascade.
 func (d *DB) DeleteAgent(project, name string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE agents SET status = 'deleted', deactivated_at = ? WHERE name = ? AND project = ?",
 		now, name, project,
 	)
@@ -356,7 +356,7 @@ func (d *DB) SetAgentCwd(project, name, cwd string) error {
 	if cwd == "" {
 		return nil
 	}
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"UPDATE agents SET cwd = ? WHERE project = ? AND name = ?",
 		cwd, project, name,
 	)
@@ -417,7 +417,7 @@ func (d *DB) RebindSession(cwd, agentName, sessionID string) (project, name stri
 	case e != nil:
 		return "", "", false, false, fmt.Errorf("rebind session: %w", e)
 	}
-	if _, e := d.conn.Exec(
+	if _, e := d.writerExec(
 		"UPDATE agents SET session_id = ? WHERE project = ? AND name = ?",
 		sessionID, project, name,
 	); e != nil {
@@ -484,7 +484,7 @@ func (d *DB) ClaimCwd(project, name, cwd string) ([]string, error) {
 		return nil, fmt.Errorf("claim cwd: rows: %w", err)
 	}
 
-	if _, err := d.conn.Exec(
+	if _, err := d.writerExec(
 		"UPDATE agents SET cwd = ? WHERE project = ? AND name = ?", cwd, project, name,
 	); err != nil {
 		return nil, fmt.Errorf("claim cwd: bind: %w", err)
@@ -621,7 +621,7 @@ func (d *DB) SetAgentAvatar(project, name, url string) error {
 	if url != "" {
 		v = &url
 	}
-	_, err := d.conn.Exec("UPDATE agents SET avatar_url = ? WHERE project = ? AND name = ?", v, project, name)
+	_, err := d.writerExec("UPDATE agents SET avatar_url = ? WHERE project = ? AND name = ?", v, project, name)
 	return err
 }
 

@@ -25,7 +25,7 @@ func (d *DB) UpsertCustomEvent(project, name, description, metaFields, icon stri
 		metaFields = "[]"
 	}
 
-	_, err := d.conn.Exec(`
+	_, err := d.writerExec(`
 		INSERT INTO custom_events (id, project, name, description, meta_fields, icon, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project, name) DO UPDATE SET
@@ -76,5 +76,5 @@ func (d *DB) ListCustomEvents(project string) ([]CustomEvent, error) {
 
 // DeleteCustomEvent removes a custom event by ID.
 func (d *DB) DeleteCustomEvent(id string) {
-	_, _ = d.conn.Exec("DELETE FROM custom_events WHERE id = ?", id)
+	_, _ = d.writerExec("DELETE FROM custom_events WHERE id = ?", id)
 }

@@ -147,7 +147,7 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 		TraceID:        traceID,
 	}
 
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, actionRequired, traceID,
 	)
@@ -194,7 +194,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 		TraceID:        traceID,
 	}
 
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
@@ -400,7 +400,7 @@ func (d *DB) MarkRead(messageIDs []string, agentName, project string) (int, erro
 	count := 0
 
 	for _, id := range messageIDs {
-		result, err := d.conn.Exec(
+		result, err := d.writerExec(
 			"INSERT OR IGNORE INTO message_reads (message_id, agent_name, project, read_at) VALUES (?, ?, ?, ?)",
 			id, agentName, project, now,
 		)
@@ -508,7 +508,7 @@ func (d *DB) queryMessages(query string, args ...any) ([]models.Message, error) 
 // suspenders, so even a legacy/direct-insert P0 with ttl>0 survives every sweep.
 func (d *DB) ExpireMessages() (int, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	result, err := d.conn.Exec(
+	result, err := d.writerExec(
 		`UPDATE messages SET expired_at = ?
 		 WHERE expired_at IS NULL
 		   AND priority != 'P0'
@@ -533,7 +533,7 @@ func (d *DB) PurgeExpiredMessages(grace time.Duration) (int64, error) {
 	cutoff := time.Now().UTC().Add(-grace).Format("2006-01-02T15:04:05.000000Z")
 	const sel = `SELECT id FROM messages WHERE expired_at IS NOT NULL AND datetime(expired_at) < datetime(?)`
 
-	tx, err := d.conn.Begin()
+	tx, err := d.beginWriterTx()
 	if err != nil {
 		return 0, fmt.Errorf("purge messages begin: %w", err)
 	}

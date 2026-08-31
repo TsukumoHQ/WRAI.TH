@@ -10,7 +10,7 @@ import (
 // SetAgentQuota creates or updates quota limits for an agent.
 func (d *DB) SetAgentQuota(project, agentName string, maxTokens, maxMessages, maxTasks, maxSpawns int64) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.conn.Exec(`INSERT INTO agent_quotas (project, agent_name, max_tokens_per_day, max_messages_per_hour, max_tasks_per_hour, max_spawns_per_hour, created_at, updated_at)
+	_, err := d.writerExec(`INSERT INTO agent_quotas (project, agent_name, max_tokens_per_day, max_messages_per_hour, max_tasks_per_hour, max_spawns_per_hour, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project, agent_name) DO UPDATE SET
 			max_tokens_per_day=excluded.max_tokens_per_day,
@@ -63,7 +63,7 @@ func (d *DB) ListAgentQuotas(project string) ([]models.AgentQuota, error) {
 
 // DeleteQuota removes a quota for an agent.
 func (d *DB) DeleteQuota(project, agentName string) error {
-	_, err := d.conn.Exec("DELETE FROM agent_quotas WHERE project = ? AND agent_name = ?", project, agentName)
+	_, err := d.writerExec("DELETE FROM agent_quotas WHERE project = ? AND agent_name = ?", project, agentName)
 	return err
 }
 

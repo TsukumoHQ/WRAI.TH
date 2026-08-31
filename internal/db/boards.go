@@ -29,7 +29,7 @@ func (d *DB) CreateBoard(project, name, slug, description, createdBy string) (*m
 		CreatedAt:   now,
 	}
 
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`INSERT INTO boards (id, project, name, slug, description, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		b.ID, b.Project, b.Name, b.Slug, b.Description, b.CreatedBy, b.CreatedAt,
 	)
@@ -98,7 +98,7 @@ func (d *DB) GetBoard(project, slug string) (*models.Board, error) {
 func (d *DB) ArchiveBoard(project, boardID string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`UPDATE boards SET archived_at = ? WHERE id = ? AND project = ? AND archived_at IS NULL`,
 		now, boardID, project,
 	)
@@ -107,7 +107,7 @@ func (d *DB) ArchiveBoard(project, boardID string) error {
 	}
 
 	// Also archive all tasks on this board
-	_, err = d.conn.Exec(
+	_, err = d.writerExec(
 		`UPDATE tasks SET archived_at = ? WHERE board_id = ? AND project = ? AND archived_at IS NULL`,
 		now, boardID, project,
 	)
@@ -119,7 +119,7 @@ func (d *DB) ArchiveBoard(project, boardID string) error {
 
 // DeleteBoard hard-deletes a board (only if already archived).
 func (d *DB) DeleteBoard(project, boardID string) error {
-	_, err := d.conn.Exec(
+	_, err := d.writerExec(
 		`DELETE FROM boards WHERE id = ? AND project = ? AND archived_at IS NOT NULL`,
 		boardID, project,
 	)
