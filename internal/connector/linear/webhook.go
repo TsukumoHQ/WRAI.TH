@@ -178,8 +178,8 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 	// refused either (kept symmetric with the poll, which skips non-agent issues
 	// before enforcement). Work already in flight is never retro-refused.
 	if !strings.EqualFold(env.Action, "remove") &&
-		c.db.ProjectRequiresTypedTicket(c.project) && isAgent(c.dispatchTarget(iss)) {
-		existing, err := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
+		c.db.ProjectRequiresTypedTicket(seed.Project) && isAgent(c.dispatchTarget(iss)) {
+		existing, err := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
 		if err != nil {
 			return nil, err
 		}
@@ -228,7 +228,7 @@ func (c *Connector) dispatchEvent(taskID, title, agent string, seed db.LinearMir
 	// already started work (start_task), a different lifecycle moment.
 	return connector.TaskEvent{
 		Type:    "task.dispatched",
-		Project: c.project,
+		Project: seed.Project,
 		Agent:   agent,
 		Payload: map[string]any{
 			"agent":             agent,
@@ -285,7 +285,7 @@ func stateChanged(updatedFrom map[string]json.RawMessage) bool {
 // parent has already been mirrored.
 func (c *Connector) seedFromIssue(iss gqlIssue) db.LinearMirrorSeed {
 	seed := db.LinearMirrorSeed{
-		Project:       c.project,
+		Project:       c.projectFor(iss),
 		LinearIssueID: iss.ID,
 		Title:         iss.Title,
 		Description:   iss.Description,
@@ -333,7 +333,10 @@ func (c *Connector) seedFromIssue(iss gqlIssue) db.LinearMirrorSeed {
 		}
 	}
 	if pid := iss.parentLinearID(); pid != "" {
-		if parent, err := c.db.GetTaskByLinearIssueID(c.project, pid); err == nil && parent != nil {
+		// Parent resolves within the child's own relay project. A sub-issue in a
+		// different Linear project than its parent is not linked (cross-project
+		// parenting is out of scope); same-project parenting is the common case.
+		if parent, err := c.db.GetTaskByLinearIssueID(seed.Project, pid); err == nil && parent != nil {
 			seed.ParentTaskID = strptr(parent.ID)
 		}
 	}
@@ -405,7 +408,21 @@ func issueProjectID(iss gqlIssue) string {
 // linearRouting reads the owner-configured project→agent map (setting
 // "linear_routing", JSON {linearProjectId: agentName}). Empty when unset.
 func (c *Connector) linearRouting() map[string]string {
-	raw := strings.TrimSpace(c.db.GetSetting("linear_routing"))
+	return c.settingMap("linear_routing")
+}
+
+// projectMap reads the owner-configured Linear-project→relay-project map
+// (setting "linear_project_map", JSON {linearProjectId: relayProjectName}).
+// It lets several relay projects share one Linear team: each Linear project
+// routes its issues into its own relay project's mirror. Empty when unset —
+// every issue then falls back to the connector's default project (c.project).
+func (c *Connector) projectMap() map[string]string {
+	return c.settingMap("linear_project_map")
+}
+
+// settingMap decodes a JSON string→string settings value; nil on empty/invalid.
+func (c *Connector) settingMap(key string) map[string]string {
+	raw := strings.TrimSpace(c.db.GetSetting(key))
 	if raw == "" {
 		return nil
 	}
@@ -414,6 +431,37 @@ func (c *Connector) linearRouting() map[string]string {
 		return nil
 	}
 	return m
+}
+
+// projectFor resolves the relay project an issue's mirror lives under. The
+// linear_project_map routes each Linear project to its own relay project;
+// unmapped issues fall back to the connector's default project (c.project).
+// This is the ONE decision that makes the mirror multi-project: every write and
+// lookup for an issue must scope to projectFor(iss), never a hardcoded c.project.
+func (c *Connector) projectFor(iss gqlIssue) string {
+	if pid := issueProjectID(iss); pid != "" {
+		if p := c.projectMap()[pid]; p != "" {
+			return strings.ToLower(strings.TrimSpace(p))
+		}
+	}
+	return c.project
+}
+
+// mirrorProjects returns every relay project this connector's mirror may write
+// to: the default project plus every distinct target in linear_project_map.
+// Used by cross-project sweeps (the dropout-sync) that must cover all lanes, not
+// just the default one. The default is always first and never duplicated.
+func (c *Connector) mirrorProjects() []string {
+	out := []string{c.project}
+	seen := map[string]bool{c.project: true}
+	for _, p := range c.projectMap() {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // dispatchTarget resolves the agent to dispatch an issue to, in priority order:

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"agent-relay/internal/models"
 )
 
 // agentProjectName maps a relay agent/profile to a Linear project NAME (owner's
@@ -84,9 +86,15 @@ func (c *Connector) Backfill(ctx context.Context, dryRun bool, limit int) (Backf
 		}
 	}
 
-	tasks, err := c.db.ListBackfillTasks(c.project)
-	if err != nil {
-		return res, err
+	// Backfill spans every relay project this mirror serves (default + mapped
+	// lanes), so tasks living in a mapped project are linked/created too.
+	var tasks []models.Task
+	for _, proj := range c.mirrorProjects() {
+		pt, err := c.db.ListBackfillTasks(proj)
+		if err != nil {
+			return res, err
+		}
+		tasks = append(tasks, pt...)
 	}
 	res.Eligible = len(tasks)
 

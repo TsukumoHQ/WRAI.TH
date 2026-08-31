@@ -32,8 +32,7 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 	// status is the dedupe — once the row is in-progress, later polls skip it.
 	upserted := 0
 	hasParent := false
-	requireTicket := c.db.ProjectRequiresTypedTicket(c.project) // constant this cycle
-	seen := make(map[string]bool, len(issues))                  // every OPEN issue id this poll saw
+	seen := make(map[string]bool, len(issues)) // every OPEN issue id this poll saw
 	for _, iss := range issues {
 		if iss.ID == "" {
 			continue
@@ -49,8 +48,12 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		if !isAgent(target) {
 			continue
 		}
-		prior, _ := c.db.GetTaskByLinearIssueID(c.project, iss.ID)
+		// Per-issue relay project (multi-project mirror): the seed resolves it via
+		// projectFor, and every lookup/gate below scopes to seed.Project — the poll
+		// heals issues across all mapped relay projects, not just the default one.
 		seed := c.seedFromIssue(iss)
+		prior, _ := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
+		requireTicket := c.db.ProjectRequiresTypedTicket(seed.Project)
 
 		// Typed-ticket enforcement, unified with the webhook path on the refused
 		// mirror row + marker (see handleTypedTicket). A non-conforming issue that
@@ -141,17 +144,22 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 // blip never cancels live work. A genuine reopen re-enters the open set and
 // re-dispatches via the normal path.
 func (c *Connector) syncDroppedMirrors(ctx context.Context, seen map[string]bool) {
-	active, err := c.db.ActiveLinearMirrors(c.project)
-	if err != nil {
-		log.Printf("[linear] reconcile dropout-sync list: %v", err)
-		return
-	}
+	// Sweep every relay project this mirror writes to (default + mapped lanes) —
+	// a dropped issue's mirror may live in any of them. Linear issue ids are
+	// globally unique, so aggregating across projects never collides.
 	taskByIssue := map[string]string{}
 	var missing []string
-	for _, m := range active {
-		if !seen[m.LinearIssueID] {
-			missing = append(missing, m.LinearIssueID)
-			taskByIssue[m.LinearIssueID] = m.TaskID
+	for _, proj := range c.mirrorProjects() {
+		active, err := c.db.ActiveLinearMirrors(proj)
+		if err != nil {
+			log.Printf("[linear] reconcile dropout-sync list (%s): %v", proj, err)
+			continue
+		}
+		for _, m := range active {
+			if !seen[m.LinearIssueID] {
+				missing = append(missing, m.LinearIssueID)
+				taskByIssue[m.LinearIssueID] = m.TaskID
+			}
 		}
 	}
 	if len(missing) == 0 {
