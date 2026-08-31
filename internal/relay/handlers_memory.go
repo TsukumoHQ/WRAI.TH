@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -33,6 +34,18 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 	tags := req.GetStringSlice("tags", nil)
 	tagsJSON := db.TagsToJSON(tags)
 	upsert := req.GetBool("upsert", true)
+	validFrom := req.GetString("valid_from", "")
+	validUntil := req.GetString("valid_until", "")
+
+	// Memory Protocol v2 write-side guard (DEC-governance-memory-protocol-2),
+	// opt-in per project (DEC-governance-enforcement-1) — read before the write
+	// so a violation never lands. Checked on the raw (pre-normalize) tagsJSON,
+	// same as SetMemory would receive it.
+	if h.db.ProjectRequiresMemoryDiscipline(project) {
+		if verr := db.ValidateMemoryWrite(project, key, tagsJSON, layer, validUntil, time.Now().UTC()); verr != nil {
+			return toolResultError(verr.Error()), nil
+		}
+	}
 
 	mem, err := h.db.SetMemory(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert)
 	if err != nil {
@@ -41,8 +54,6 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 
 	// Optional temporal validity window (T5). Stamped after the memory exists so
 	// the caller can set an expiry at write time; past valid_until reads as stale.
-	validFrom := req.GetString("valid_from", "")
-	validUntil := req.GetString("valid_until", "")
 	if validFrom != "" || validUntil != "" {
 		if verr := h.db.SetMemoryValidity(project, agent, key, mem.Scope, validFrom, validUntil); verr != nil {
 			return toolResultError(fmt.Sprintf("failed to set validity window: %v", verr)), nil
@@ -58,6 +69,11 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 
 	result := map[string]any{
 		"memory": mem,
+	}
+	if h.db.ProjectRequiresMemoryDiscipline(project) {
+		if warning := db.MemoryValueWarning(value); warning != "" {
+			result["warning"] = warning
+		}
 	}
 	action := "set"
 	if mem.ConflictWith != nil {
@@ -128,6 +144,12 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 	tags := req.GetStringSlice("tags", nil)
 	supersedes := req.GetString("supersedes", "")
 	dependsOn := req.GetStringSlice("depends_on", nil)
+
+	if h.db.ProjectRequiresMemoryDiscipline(project) {
+		if hint := db.ValidateRememberArea(area); hint != "" {
+			return toolResultError(fmt.Sprintf("memory discipline (project %q): area. %s", project, hint)), nil
+		}
+	}
 
 	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes, dependsOn)
 	if err != nil {

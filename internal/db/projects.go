@@ -100,6 +100,34 @@ func (d *DB) SetProjectRequiresTypedTicket(name string, required bool) error {
 	return err
 }
 
+// ProjectRequiresMemoryDiscipline reports whether `name` enforces Memory
+// Protocol v2's write-side guard (DEC-governance-memory-protocol-2): no
+// checkpoint/resume/dated keys, layer=context requires a bounded valid_until,
+// non-empty tags, and remember() rejects area="general". Default off (same
+// opt-in + debrayable philosophy as typed-ticket, DEC-governance-enforcement-1)
+// — an unknown project or a missing column reads as false. niwa+tsukumo seeded on.
+func (d *DB) ProjectRequiresMemoryDiscipline(name string) bool {
+	name = canonicalProject(name)
+	var v int
+	err := d.ro().QueryRow("SELECT require_memory_discipline FROM projects WHERE name = ?", name).Scan(&v)
+	if err != nil {
+		return false
+	}
+	return v != 0
+}
+
+// SetProjectRequiresMemoryDiscipline flips the per-project enforcement flag.
+// The row must already exist (projects are created on first agent registration).
+func (d *DB) SetProjectRequiresMemoryDiscipline(name string, required bool) error {
+	name = canonicalProject(name)
+	v := 0
+	if required {
+		v = 1
+	}
+	_, err := d.writerExec("UPDATE projects SET require_memory_discipline = ? WHERE name = ?", v, name)
+	return err
+}
+
 // GetSetting returns a setting value by key.
 func (d *DB) GetSetting(key string) string {
 	var val string

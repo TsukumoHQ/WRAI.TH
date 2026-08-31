@@ -945,6 +945,18 @@ func (r *Relay) apiPostMemory(w http.ResponseWriter, req *http.Request) {
 	}
 
 	tagsJSON := db.TagsToJSON(body.Tags)
+
+	// Memory Protocol v2 write-side guard (DEC-governance-memory-protocol-2),
+	// same rule as the MCP set_memory tool. The REST body carries no valid_until
+	// field, so a layer=context write here is rejected on an enforced project
+	// until a caller adds one — consistent with "missing = rejected", not a gap.
+	if r.DB.ProjectRequiresMemoryDiscipline(body.Project) {
+		if verr := db.ValidateMemoryWrite(body.Project, body.Key, tagsJSON, body.Layer, "", time.Now().UTC()); verr != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, verr.Error()), http.StatusBadRequest)
+			return
+		}
+	}
+
 	mem, err := r.DB.SetMemory(body.Project, body.AgentName, body.Key, body.Value, tagsJSON, body.Scope, body.Confidence, body.Layer)
 	if err != nil {
 		http.Error(w, `{"error":"failed to set memory"}`, http.StatusInternalServerError)

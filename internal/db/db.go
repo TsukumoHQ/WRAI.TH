@@ -471,6 +471,24 @@ func migrate(conn *sql.DB) error {
 	// self-dispatch (the 43189533 loophole) is refused for us, not just niwa.
 	seedTypedTicketOn("tsukumo", "forest/1", "seed_tsukumo_typed_ticket")
 
+	// Memory Protocol v2 write-side guard (DEC-governance-memory-protocol-2):
+	// same opt-in + debrayable philosophy and one-shot seed pattern as
+	// require_typed_ticket above — an operator's later opt-out survives restart.
+	ensureColumns(conn, "projects", map[string]string{
+		"require_memory_discipline": "INTEGER NOT NULL DEFAULT 0",
+	})
+	seedMemoryDisciplineOn := func(project, planet, marker string) {
+		_, _ = conn.Exec("INSERT OR IGNORE INTO projects (name, planet_type, created_at) VALUES (?, ?, ?)", project, planet, nowStr)
+		var seeded string
+		_ = conn.QueryRow("SELECT value FROM settings WHERE key = ?", marker).Scan(&seeded)
+		if seeded == "" {
+			_, _ = conn.Exec("UPDATE projects SET require_memory_discipline = 1 WHERE name = ?", project)
+			_, _ = conn.Exec("INSERT INTO settings (key, value) VALUES (?, 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'", marker)
+		}
+	}
+	seedMemoryDisciplineOn("niwa", "forest/1", "seed_niwa_memory_discipline")
+	seedMemoryDisciplineOn("tsukumo", "forest/1", "seed_tsukumo_memory_discipline")
+
 	ensureColumns(conn, "messages", map[string]string{
 		"conversation_id": "TEXT",
 		"project":         "TEXT NOT NULL DEFAULT 'default'",
