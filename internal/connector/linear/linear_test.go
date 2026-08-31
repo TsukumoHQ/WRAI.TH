@@ -823,3 +823,128 @@ func TestUpsertLinearMirrorProfileSlugNonDestructive(t *testing.T) {
 		t.Errorf("profile_slug = %q, want it preserved as wraith-backend", task.ProfileSlug)
 	}
 }
+
+// TestIngestMultiProjectRouting is the core of the multi-project mirror: two
+// relay projects share one Linear team. linear_project_map routes each Linear
+// project's issues into its own relay project's mirror; an unmapped project
+// falls back to the connector's default project. Before this, every mirror row
+// landed under c.project regardless of the Linear project — the other relay
+// project's queue never saw its tasks.
+func TestIngestMultiProjectRouting(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	// Both Linear projects are routed to an agent (scope guard) AND mapped to
+	// their own relay project.
+	database.SetSetting("linear_routing", `{"lp-a":"lead-a","lp-b":"lead-b"}`)
+	database.SetSetting("linear_project_map", `{"lp-a":"relay-a","lp-b":"relay-b"}`)
+	now := time.Now().UnixMilli()
+
+	ingest := func(id, projectID string) {
+		iss := baseIssue()
+		iss["id"] = id
+		iss["project"] = map[string]any{"id": projectID, "name": projectID}
+		body := issueFixture("create", now, "human-1", iss, nil)
+		if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+			t.Fatalf("Ingest %s: %v", id, err)
+		}
+	}
+	ingest("iss-a", "lp-a")
+	ingest("iss-b", "lp-b")
+
+	// iss-a mirrors into relay-a only.
+	if task, _ := database.GetTaskByLinearIssueID("relay-a", "iss-a"); task == nil {
+		t.Error("iss-a not mirrored into relay-a")
+	}
+	if task, _ := database.GetTaskByLinearIssueID("relay-b", "iss-a"); task != nil {
+		t.Error("iss-a leaked into relay-b")
+	}
+	if task, _ := database.GetTaskByLinearIssueID(c.project, "iss-a"); task != nil {
+		t.Error("iss-a leaked into the default project")
+	}
+	// iss-b mirrors into relay-b only.
+	if task, _ := database.GetTaskByLinearIssueID("relay-b", "iss-b"); task == nil {
+		t.Error("iss-b not mirrored into relay-b")
+	}
+}
+
+// TestIngestUnmappedProjectFallsBackToDefault checks an issue whose Linear
+// project has no linear_project_map entry lands in the connector's default
+// project (backward-compatible with the single-project mirror).
+func TestIngestUnmappedProjectFallsBackToDefault(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	database.SetSetting("linear_routing", `{"lp-x":"lead-x"}`)
+	database.SetSetting("linear_project_map", `{"lp-a":"relay-a"}`) // no entry for lp-x
+	now := time.Now().UnixMilli()
+
+	iss := baseIssue()
+	iss["id"] = "iss-x"
+	iss["project"] = map[string]any{"id": "lp-x", "name": "lp-x"}
+	body := issueFixture("create", now, "human-1", iss, nil)
+	if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+	if task, _ := database.GetTaskByLinearIssueID(c.project, "iss-x"); task == nil {
+		t.Errorf("unmapped project issue did not fall back to default project %q", c.project)
+	}
+	if task, _ := database.GetTaskByLinearIssueID("relay-a", "iss-x"); task != nil {
+		t.Error("unmapped issue leaked into a mapped project")
+	}
+}
+
+// TestReconcileMultiProjectDropoutSweep proves the reconcile poll heals AND
+// closes mirrors across every mapped relay project, not just the default one.
+// A mirror living in a mapped project that drops out of the open set (issue
+// moved to Done in Linear) must be closed by the dropout sweep — before the
+// multi-project sweep it was invisible and stayed active forever.
+func TestReconcileMultiProjectDropoutSweep(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	database.SetSetting("linear_routing", `{"lp-a":"lead-a"}`)
+	database.SetSetting("linear_project_map", `{"lp-a":"relay-a"}`)
+
+	open := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readQuery(r)
+		switch {
+		case strings.Contains(query, "TeamOpenIssues"):
+			if open {
+				writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+					{"id":"i-a","identifier":"SYN-9","number":9,"title":"A","priority":2,"url":"u","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"lead-a","displayName":"Lead A"},"project":{"id":"lp-a","name":"relay-a"},"labels":{"nodes":[]}}
+				]}}`)
+			} else {
+				writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}`)
+			}
+		case strings.Contains(query, "IssuesByIDs"):
+			// The dropped issue is now Done in Linear.
+			writeData(w, `{"issues":{"nodes":[{"id":"i-a","state":{"id":"s9","name":"Done","type":"completed"}}]}}`)
+		default:
+			writeData(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	// Poll 1: i-a is open and mirrors into relay-a (the mapped project).
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	task, _ := database.GetTaskByLinearIssueID("relay-a", "i-a")
+	if task == nil {
+		t.Fatal("i-a not mirrored into mapped project relay-a")
+	}
+
+	// Poll 2: i-a dropped out of the open set (moved to Done). The sweep must
+	// find its mirror in relay-a and close it.
+	open = false
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("reconcile 2: %v", err)
+	}
+	closed, _ := database.GetTaskByLinearIssueID("relay-a", "i-a")
+	if closed == nil {
+		t.Fatal("mirror vanished")
+	}
+	if closed.Status != "done" {
+		t.Errorf("mapped-project mirror status = %q, want done (dropout sweep must cover mapped projects)", closed.Status)
+	}
+}

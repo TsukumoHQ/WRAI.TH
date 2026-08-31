@@ -382,6 +382,7 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 			"enabled":        enabled,
 			"team_key":       teamKey,
 			"project":        r.linearProjectName(teamKey, enabled),
+			"projects":       r.linearMirrorProjects(teamKey, enabled),
 			"api_key_masked": masked,
 			"interval":       interval.String(),
 			"source":         source,
@@ -401,6 +402,7 @@ var writableSettings = map[string]bool{
 	setLinearProject:   true,
 	setLinearInterval:  true,
 	setLinearRouting:   true,
+	setLinearProjMap:   true,
 	setFederationPeers: true,
 }
 

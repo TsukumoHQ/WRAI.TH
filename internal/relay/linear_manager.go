@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"log"
 	"strings"
 	"time"
@@ -17,7 +18,8 @@ const (
 	setLinearTeamKey  = "linear_team_key" // e.g. SYN
 	setLinearProject  = "linear_project"  // relay project hosting the mirror (default: lowercased team key)
 	setLinearInterval = "linear_reconcile_interval"
-	setLinearRouting  = "linear_routing" // JSON {linearProjectId: agentName} — project→agent auto-dispatch
+	setLinearRouting  = "linear_routing"     // JSON {linearProjectId: agentName} — project→agent auto-dispatch
+	setLinearProjMap  = "linear_project_map" // JSON {linearProjectId: relayProject} — project→relay-project mirror routing
 )
 
 // effectiveLinearConfig resolves the Linear connector configuration: env wins
@@ -106,4 +108,33 @@ func (r *Relay) linearProjectName(teamKey string, enabled bool) string {
 		p = "default"
 	}
 	return p
+}
+
+// linearMirrorProjects returns every relay project the Linear mirror writes to:
+// the default project plus each distinct target in linear_project_map. The UI
+// uses it to mark ALL mirror lanes read-only (Linear is SSOT), not just the
+// default. Empty when the connector is disabled. Default is first, deduplicated.
+func (r *Relay) linearMirrorProjects(teamKey string, enabled bool) []string {
+	def := r.linearProjectName(teamKey, enabled)
+	if def == "" {
+		return nil
+	}
+	out := []string{def}
+	seen := map[string]bool{def: true}
+	raw := strings.TrimSpace(r.DB.GetSetting(setLinearProjMap))
+	if raw == "" {
+		return out
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return out
+	}
+	for _, p := range m {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" && !seen[p] {
+			seen[p] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }

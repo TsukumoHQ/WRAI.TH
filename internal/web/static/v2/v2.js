@@ -39,7 +39,15 @@ const ctx = {
   get scope() { return current; },
   currentPage: () => current.page,
   projNames: () => projects.map((p) => p.name),
-  isMirror: (p) => !!(settings.linear && settings.linear.project && p === settings.linear.project),
+  isMirror: (p) => {
+    if (!settings.linear) return false;
+    // Multi-project mirror: any relay project the connector writes to is a
+    // read-only SSOT mirror. Prefer the full projects[] set; fall back to the
+    // single default project for older settings payloads.
+    const set = settings.linear.projects;
+    if (Array.isArray(set) && set.length) return set.includes(p);
+    return !!(settings.linear.project && p === settings.linear.project);
+  },
   // Linear team URL (workspace unknown — lands the logged-in user on Linear).
   linearTeamURL: () => 'https://linear.app/',
   onEvent(fn) { eventSubs.add(fn); return () => eventSubs.delete(fn); },
