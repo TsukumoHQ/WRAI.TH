@@ -826,6 +826,29 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_linear_sync_log_ts ON linear_sync_log(id DESC)`)
 
+	// Referential-integrity quarantine (Phase 0, task 536ecc40). A SIDE-TABLE (not
+	// flag columns on tasks/agents) so the taskColumns↔scanTask / agentColumns↔
+	// scanAgent lockstep is never touched and every ref class logs uniformly. It is
+	// pure OBSERVABILITY: a row here records that some referencing row points at an
+	// identity that does not resolve (or resolves to a dead one). NOTHING reads it to
+	// change behavior in Phase 0 — the offending task/agent keeps its real status and
+	// stays claimable/visible exactly as before. resolved_at stamps when a ref later
+	// resolves (audit trail, never a delete). UNIQUE(table_name,row_id,ref_col,class)
+	// makes the scan an idempotent upsert. See internal/db/integrity.go.
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS integrity_quarantine (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		table_name  TEXT NOT NULL,
+		row_id      TEXT NOT NULL,
+		ref_col     TEXT NOT NULL,
+		ref_value   TEXT NOT NULL DEFAULT '',
+		class       TEXT NOT NULL,
+		project     TEXT NOT NULL DEFAULT '',
+		detected_at TEXT NOT NULL,
+		resolved_at TEXT,
+		UNIQUE(table_name, row_id, ref_col, class)
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_integrity_open ON integrity_quarantine(class, resolved_at)`)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,
@@ -1238,6 +1261,17 @@ func migrate(conn *sql.DB) error {
 	// see board_routing.go. Runs once (settings-marker guarded); new dispatches
 	// self-route going forward via DispatchTask.
 	runProductBoardRoutingBackfill(conn)
+
+	// Referential-integrity scan (Phase 0, task 536ecc40): detect + log + quarantine
+	// dangling identity references. Read-mostly (writes only the quarantine
+	// side-table), idempotent, NO behavior change — the offending rows are untouched.
+	// Runs on every boot (fast, bounded) so a fresh upgrade immediately surfaces the
+	// existing orphans/limbo; the periodic sweep (StartCleanup) keeps it current.
+	if counts, err := runReferentialScan(conn); err != nil {
+		log.Printf("integrity: startup referential scan error: %v", err)
+	} else {
+		logReferentialCounts("startup", counts)
+	}
 
 	return nil
 }
