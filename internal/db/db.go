@@ -126,7 +126,16 @@ func New() (*DB, error) {
 	_, _ = reader.Exec("PRAGMA temp_store = MEMORY")
 	_, _ = reader.Exec("PRAGMA cache_size = -20000") // 20MB
 
-	return &DB{conn: writer, reader: reader, path: dbPath}, nil
+	d := &DB{conn: writer, reader: reader, path: dbPath}
+
+	// Referential-integrity reconcile (Phase 1, task 536ecc40). One-shot,
+	// settings-marker guarded, snapshot-backed. Lives here (not migrate()) because
+	// it needs *DB for the pre-mutation Backup()-style snapshot. Non-fatal: a
+	// reconcile hiccup logs and leaves the marker unset (retry next boot) but never
+	// blocks the relay from booting.
+	d.maybeReconcileOrphans()
+
+	return d, nil
 }
 
 func (d *DB) Close() error {
