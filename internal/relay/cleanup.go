@@ -3,6 +3,8 @@ package relay
 import (
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"time"
 
 	"agent-relay/internal/db"
@@ -21,11 +23,16 @@ const (
 	ACKEscalateAge = 45 * time.Minute
 	// BackupInterval is how often a rotated DB snapshot is written.
 	BackupInterval = time.Hour
-	// BackupKeep is how many rotated snapshots to retain. 12 hourly snapshots =
-	// a ~12h recovery window — wide enough that an incident isn't rotated out
-	// before it's noticed (the data-loss restore leaned on a 07:53 snapshot that
-	// was the oldest of only 3, nearly gone). Disk: ~snapshot-size × 12.
-	BackupKeep = 12
+	// DefaultBackupKeep is how many rotated snapshots to retain by default. Each
+	// snapshot is a FULL DB copy, so the disk cost is ~snapshot-size × keep — at
+	// ~635M/snapshot the old keep=12 alone was ~7.6G, a lead cause of synx-prod's
+	// 93% root disk. 3 gives a ~3h recovery window at the hourly cadence; a host
+	// that wants a wider window raises RELAY_BACKUP_KEEP (see resolveBackupKeep).
+	DefaultBackupKeep = 3
+	// ForeignBackupMinAge is how old a one-off (updater/ops) backup must be before
+	// the data-dir GC prunes it — a just-upgraded host keeps its pre-upgrade copy
+	// as a rollback point for this window; the newest one-off is always kept.
+	ForeignBackupMinAge = 24 * time.Hour
 
 	// Retention policy (TSU-127). Soft-expiry (ExpireMessages/ExpireDeliveries)
 	// only HIDES rows from inboxes; these windows govern HARD reclamation so the
@@ -59,13 +66,46 @@ const (
 	TokenUsageRetentionDays = 14
 )
 
+// resolveBackupKeep returns the rotated-snapshot retention count, from
+// RELAY_BACKUP_KEEP when set to a positive integer, else DefaultBackupKeep. A
+// non-positive or unparseable value falls back to the default (never 0, which
+// would leave no recovery point).
+func resolveBackupKeep() int {
+	if v := os.Getenv("RELAY_BACKUP_KEEP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+		log.Printf("RELAY_BACKUP_KEEP=%q invalid; using default %d", v, DefaultBackupKeep)
+	}
+	return DefaultBackupKeep
+}
+
+// pruneStaleBackups runs the data-dir backup GC and logs what it reclaimed.
+// Non-fatal: a prune failure never disrupts the cleanup loop.
+func pruneStaleBackups(database *db.DB, keep int) {
+	removed, err := database.PruneStaleBackups(keep, ForeignBackupMinAge)
+	if err != nil {
+		log.Printf("prune stale backups error: %v", err)
+		return
+	}
+	if len(removed) > 0 {
+		log.Printf("pruned %d stale backup file(s): %v", len(removed), removed)
+	}
+}
+
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
 // It stops when the done channel is closed.
 func StartCleanup(database *db.DB, done <-chan struct{}) {
 	ticker := time.NewTicker(PurgeInterval)
 	lastBackup := time.Now() // first snapshot fires BackupInterval after boot
+	backupKeep := resolveBackupKeep()
 	go func() {
 		defer ticker.Stop()
+		// A healthy boot is the post-upgrade verification the updater lacks: prune
+		// stale backups (superseded snapshots + aged one-off updater backups) once
+		// at startup so a host that just auto-upgraded reclaims disk without manual
+		// cleanup. Never touches the live DB or the newest known-good backup.
+		pruneStaleBackups(database, backupKeep)
 		for {
 			select {
 			case <-done:
@@ -129,7 +169,7 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 				database.Optimize()
 
 				if time.Since(lastBackup) >= BackupInterval {
-					if path, err := database.Backup(BackupKeep); err != nil {
+					if path, err := database.Backup(backupKeep); err != nil {
 						log.Printf("db backup error: %v", err)
 					} else {
 						lastBackup = time.Now()
@@ -142,6 +182,9 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 							log.Printf("db snapshot written + verified: %s (agents=%d messages=%d tasks=%d)",
 								path, counts["agents"], counts["messages"], counts["tasks"])
 						}
+						// Prune after a successful new snapshot so numbered slots
+						// beyond keep and aged one-off backups don't accumulate.
+						pruneStaleBackups(database, backupKeep)
 					}
 				}
 			}
