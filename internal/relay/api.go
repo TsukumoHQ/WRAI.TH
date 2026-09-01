@@ -60,6 +60,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetAgentHealth(w, req)
 	case path == "/agents/stuck" && req.Method == http.MethodGet:
 		r.apiGetStuckAgents(w, req)
+	case path == "/admin/purge-reviewers" && req.Method == http.MethodPost:
+		r.apiPurgeReviewers(w, req)
 	case path == "/conversations/all" && req.Method == http.MethodGet:
 		r.apiGetAllConversations(w)
 	case path == "/conversations" && req.Method == http.MethodGet:
@@ -595,6 +597,28 @@ func (r *Relay) activityByAgent() map[string]ingest.SessionState {
 		}
 	}
 	return m
+}
+
+// apiPurgeReviewers is the server-side one-shot backlog purge for dead ephemeral
+// reviewer agents (review-*) the gate never tears down. It runs IN the relay
+// process (single-writer-safe — never an external raw-SQL write) and defaults to
+// a DRY RUN: it logs the candidate count and mutates nothing unless the caller
+// passes ?dry_run=false. The mutation is a soft-delete (recoverable), skips any
+// reviewer holding a live task, and is idempotent. Gated by the standard /api
+// middleware (RELAY_API_KEY / loopback), like the other admin write routes here.
+func (r *Relay) apiPurgeReviewers(w http.ResponseWriter, req *http.Request) {
+	dryRun := req.URL.Query().Get("dry_run") != "false" // default: dry run (safe)
+	res, err := r.DB.PurgeStaleReviewers(dryRun, 0)
+	if err != nil {
+		http.Error(w, `{"error":"failed to purge reviewers"}`, http.StatusInternalServerError)
+		return
+	}
+	if dryRun {
+		log.Printf("[admin] purge-reviewers DRY RUN: %d stale review-* candidate(s) (pass ?dry_run=false to apply)", len(res.Candidates))
+	} else {
+		log.Printf("[admin] purge-reviewers: soft-deleted %d stale review-* of %d candidate(s)", res.Purged, len(res.Candidates))
+	}
+	writeJSON(w, res)
 }
 
 func (r *Relay) apiGetAllAgents(w http.ResponseWriter) {

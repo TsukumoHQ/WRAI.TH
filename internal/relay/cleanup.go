@@ -33,6 +33,10 @@ const (
 	// the data-dir GC prunes it — a just-upgraded host keeps its pre-upgrade copy
 	// as a rollback point for this window; the newest one-off is always kept.
 	ForeignBackupMinAge = 24 * time.Hour
+	// DefaultReviewerTTL is how long a dead ephemeral reviewer (review-*) may sit
+	// inactive before the standing reaper soft-deletes it. Tunable per host via
+	// RELAY_REVIEWER_TTL_DAYS (see resolveReviewerTTL).
+	DefaultReviewerTTL = 7 * 24 * time.Hour
 
 	// Retention policy (TSU-127). Soft-expiry (ExpireMessages/ExpireDeliveries)
 	// only HIDES rows from inboxes; these windows govern HARD reclamation so the
@@ -80,6 +84,19 @@ func resolveBackupKeep() int {
 	return DefaultBackupKeep
 }
 
+// resolveReviewerTTL returns the standing reviewer-reaper TTL, from
+// RELAY_REVIEWER_TTL_DAYS when set to a positive integer (days), else
+// DefaultReviewerTTL. An invalid or non-positive value falls back to the default.
+func resolveReviewerTTL() time.Duration {
+	if v := os.Getenv("RELAY_REVIEWER_TTL_DAYS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * 24 * time.Hour
+		}
+		log.Printf("RELAY_REVIEWER_TTL_DAYS=%q invalid; using default %s", v, DefaultReviewerTTL)
+	}
+	return DefaultReviewerTTL
+}
+
 // pruneStaleBackups runs the data-dir backup GC and logs what it reclaimed.
 // Non-fatal: a prune failure never disrupts the cleanup loop.
 func pruneStaleBackups(database *db.DB, keep int) {
@@ -99,6 +116,7 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 	ticker := time.NewTicker(PurgeInterval)
 	lastBackup := time.Now() // first snapshot fires BackupInterval after boot
 	backupKeep := resolveBackupKeep()
+	reviewerTTL := resolveReviewerTTL()
 	go func() {
 		defer ticker.Stop()
 		// A healthy boot is the post-upgrade verification the updater lacks: prune
@@ -136,6 +154,15 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 					log.Printf("expire elevations error: %v", err)
 				} else if expired > 0 {
 					log.Printf("expired %d elevation(s)", expired)
+				}
+				// Standing TTL reaper: soft-delete dead ephemeral reviewer agents
+				// (review-*) that the gate never tears down, once inactive past the
+				// TTL, skipping any still holding a live task. Backstop so the roster
+				// backlog never re-accumulates (DEC-niwa-reviewer-lifecycle-1).
+				if res, err := database.PurgeStaleReviewers(false, reviewerTTL); err != nil {
+					log.Printf("reap stale reviewers error: %v", err)
+				} else if res.Purged > 0 {
+					log.Printf("reaped %d stale review-* reviewer(s)", res.Purged)
 				}
 				// Refresh the daily rollup BEFORE pruning raw rows, so shortening the
 				// raw window never drops aggregate history the dashboards still show.
