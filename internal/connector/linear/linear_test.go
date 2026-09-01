@@ -948,3 +948,174 @@ func TestReconcileMultiProjectDropoutSweep(t *testing.T) {
 		t.Errorf("mapped-project mirror status = %q, want done (dropout sweep must cover mapped projects)", closed.Status)
 	}
 }
+
+// TestReconcileFanOutDedupOnRepoll proves the poll path (ReconcileCycle) fans
+// an open issue out to every mapped relay project AND stays idempotent per
+// (linear_issue_id, relay_project) across repeated polls of the same still-open
+// issue — no duplicate task rows, same identity every cycle.
+func TestReconcileFanOutDedupOnRepoll(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	database.SetSetting("linear_routing", `{"lp-fanout":"lead-a"}`)
+	database.SetSetting("linear_project_map", `{"lp-fanout": ["relay-a", "relay-b"]}`)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := readQuery(r)
+		switch {
+		case strings.Contains(query, "TeamOpenIssues"):
+			writeData(w, `{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[
+				{"id":"i-fanout","identifier":"SYN-11","number":11,"title":"Fan out","priority":2,"url":"u","state":{"id":"s1","name":"In Progress","type":"started"},"assignee":{"id":"u1","name":"lead-a","displayName":"Lead A"},"project":{"id":"lp-fanout","name":"lp-fanout"},"labels":{"nodes":[]}}
+			]}}`)
+		default:
+			writeData(w, `{}`)
+		}
+	}))
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("reconcile 1: %v", err)
+	}
+	firstA, _ := database.GetTaskByLinearIssueID("relay-a", "i-fanout")
+	firstB, _ := database.GetTaskByLinearIssueID("relay-b", "i-fanout")
+	if firstA == nil || firstB == nil {
+		t.Fatalf("poll 1 must mirror into both relay-a and relay-b (got a=%v b=%v)", firstA, firstB)
+	}
+	if firstA.LinearSecondary {
+		t.Error("relay-a (index 0) must be the primary mirror")
+	}
+	if !firstB.LinearSecondary {
+		t.Error("relay-b (index 1) must be a secondary mirror")
+	}
+
+	// Poll again: the issue is still open and unchanged — must NOT create a
+	// second row per project.
+	if _, err := c.ReconcileCycle(c.project); err != nil {
+		t.Fatalf("reconcile 2 (repoll): %v", err)
+	}
+	secondA, _ := database.GetTaskByLinearIssueID("relay-a", "i-fanout")
+	secondB, _ := database.GetTaskByLinearIssueID("relay-b", "i-fanout")
+	if secondA == nil || secondA.ID != firstA.ID {
+		t.Errorf("relay-a mirror identity changed on repoll (got %v, want %s)", secondA, firstA.ID)
+	}
+	if secondB == nil || secondB.ID != firstB.ID {
+		t.Errorf("relay-b mirror identity changed on repoll (got %v, want %s)", secondB, firstB.ID)
+	}
+}
+
+// --- linear_project_map fan-out (one Linear project -> N relay projects) ---
+
+// TestParseProjectMapStringAndArray covers ParseProjectMap's back-compat
+// (plain string = one target) and new (array = several targets) value forms,
+// side by side in the same map, plus malformed-entry tolerance.
+func TestParseProjectMapStringAndArray(t *testing.T) {
+	raw := `{
+		"lp-single": "relay-a",
+		"lp-fanout": ["relay-a", "RELAY-B", " relay-c "],
+		"lp-dup":    ["relay-x", "relay-x", ""],
+		"lp-bad":    123,
+		"lp-empty":  []
+	}`
+	m := ParseProjectMap(raw)
+
+	if got := m["lp-single"]; len(got) != 1 || got[0] != "relay-a" {
+		t.Errorf("lp-single = %v, want [relay-a]", got)
+	}
+	if got := m["lp-fanout"]; len(got) != 3 || got[0] != "relay-a" || got[1] != "relay-b" || got[2] != "relay-c" {
+		t.Errorf("lp-fanout = %v, want [relay-a relay-b relay-c] (lowercased+trimmed, order preserved)", got)
+	}
+	if got := m["lp-dup"]; len(got) != 1 || got[0] != "relay-x" {
+		t.Errorf("lp-dup = %v, want [relay-x] (de-duplicated, blank dropped)", got)
+	}
+	if _, ok := m["lp-bad"]; ok {
+		t.Error("lp-bad (non-string/array JSON value) should be dropped, not present")
+	}
+	if _, ok := m["lp-empty"]; ok {
+		t.Error("lp-empty (array with no usable entries) should be dropped, not present")
+	}
+
+	if ParseProjectMap("") != nil {
+		t.Error("empty setting should parse to nil")
+	}
+	if ParseProjectMap("not json") != nil {
+		t.Error("malformed top-level JSON should parse to nil, not error/panic")
+	}
+}
+
+// TestIngestFanOutTwoProjects is the core of the fan-out feature: a single
+// Linear project mapped to an ARRAY mirrors its issue into every listed relay
+// project, index 0 is the primary (write-back-driving) mirror.
+func TestIngestFanOutTwoProjects(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	database.SetSetting("linear_routing", `{"lp-fanout":"lead-a"}`)
+	database.SetSetting("linear_project_map", `{"lp-fanout": ["relay-a", "relay-b"]}`)
+	now := time.Now().UnixMilli()
+
+	iss := baseIssue()
+	iss["id"] = "iss-fanout"
+	iss["project"] = map[string]any{"id": "lp-fanout", "name": "lp-fanout"}
+	body := issueFixture("create", now, "human-1", iss, nil)
+	if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+		t.Fatalf("Ingest: %v", err)
+	}
+
+	taskA, err := database.GetTaskByLinearIssueID("relay-a", "iss-fanout")
+	if err != nil || taskA == nil {
+		t.Fatalf("issue not mirrored into relay-a: %v", err)
+	}
+	taskB, err := database.GetTaskByLinearIssueID("relay-b", "iss-fanout")
+	if err != nil || taskB == nil {
+		t.Fatalf("issue not mirrored into relay-b: %v", err)
+	}
+	if taskA.ID == taskB.ID {
+		t.Error("relay-a and relay-b mirrors must be distinct task rows")
+	}
+	if taskA.LinearSecondary {
+		t.Error("relay-a (index 0 of the fan-out list) must be the PRIMARY mirror (LinearSecondary=false)")
+	}
+	if !taskB.LinearSecondary {
+		t.Error("relay-b (index 1) must be a SECONDARY mirror (LinearSecondary=true) — it must not drive Linear write-back")
+	}
+	// Never leaks into the connector's default project.
+	if leaked, _ := database.GetTaskByLinearIssueID(c.project, "iss-fanout"); leaked != nil {
+		t.Error("fanned-out issue leaked into the connector's default project")
+	}
+}
+
+// TestIngestFanOutDedupOnReplay proves a re-ingest of the same issue (a
+// duplicate webhook delivery, or the reconcile poll re-seeing an already-open
+// issue) never creates a second task row per (linear_issue_id, relay_project)
+// — UpsertLinearMirror's existing per-project lookup is the dedup key, and the
+// fan-out loop must preserve it for every target, not just the first.
+func TestIngestFanOutDedupOnReplay(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	database.SetSetting("linear_routing", `{"lp-fanout":"lead-a"}`)
+	database.SetSetting("linear_project_map", `{"lp-fanout": ["relay-a", "relay-b"]}`)
+	now := time.Now().UnixMilli()
+
+	iss := baseIssue()
+	iss["id"] = "iss-replay"
+	iss["project"] = map[string]any{"id": "lp-fanout", "name": "lp-fanout"}
+	body := issueFixture("create", now, "human-1", iss, nil)
+
+	if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+		t.Fatalf("Ingest 1: %v", err)
+	}
+	firstA, _ := database.GetTaskByLinearIssueID("relay-a", "iss-replay")
+	firstB, _ := database.GetTaskByLinearIssueID("relay-b", "iss-replay")
+
+	// Replay the identical webhook (same content).
+	if _, err := c.Ingest(body, sign(testSecret, body)); err != nil {
+		t.Fatalf("Ingest 2 (replay): %v", err)
+	}
+	secondA, err := database.GetTaskByLinearIssueID("relay-a", "iss-replay")
+	if err != nil || secondA == nil || secondA.ID != firstA.ID {
+		t.Errorf("relay-a mirror row identity changed on replay (got %v, want %s) — dedup broke", secondA, firstA.ID)
+	}
+	secondB, err := database.GetTaskByLinearIssueID("relay-b", "iss-replay")
+	if err != nil || secondB == nil || secondB.ID != firstB.ID {
+		t.Errorf("relay-b mirror row identity changed on replay (got %v, want %s) — dedup broke", secondB, firstB.ID)
+	}
+}

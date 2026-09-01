@@ -69,7 +69,7 @@ var validTransitions = map[string][]string{
 
 const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, description, priority, status, result, blocked_reason, project, dispatched_at, accepted_at, started_at, completed_at, parent_task_id, ack_notified_at, ack_escalated_at, board_id, archived_at, " +
 	"source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee, cycle_id, cycle_name, cycle_start, cycle_end, " +
-	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, last_activity_at, " +
+	"claimed_by, claimed_at, blocked_periods, in_review_at, done_at, linear_project_id, linear_secondary, last_activity_at, " +
 	"git_branch, git_worktree, git_target, " +
 	"pr_url, pr_number, pr_state, pr_repo, " +
 	"integration_branch, run_state, " +
@@ -84,7 +84,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.AckNotifiedAt, &t.AckEscalatedAt, &t.BoardID, &t.ArchivedAt,
 		&t.Source, &t.LinearIssueID, &t.LinearKey, &t.ExternalURL, &t.Points, &t.Labels,
 		&t.LinearState, &t.Assignee, &t.CycleID, &t.CycleName, &t.CycleStart, &t.CycleEnd,
-		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LastActivityAt,
+		&t.ClaimedBy, &t.ClaimedAt, &t.BlockedPeriods, &t.InReviewAt, &t.DoneAt, &t.LinearProjectID, &t.LinearSecondary, &t.LastActivityAt,
 		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
 		&t.PRURL, &t.PRNumber, &t.PRState, &t.PRRepo,
 		&t.IntegrationBranch, &t.RunState,

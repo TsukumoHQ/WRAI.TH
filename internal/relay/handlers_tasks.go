@@ -703,7 +703,10 @@ func (h *Handlers) HandleComment(ctx context.Context, req mcp.CallToolRequest) (
 	}
 
 	conn := h.getConnector()
-	if task.Source == "linear" && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
+	// A secondary fan-out mirror never writes back to Linear (only the primary
+	// mirror does — see db.LinearMirrorSeed.Secondary); its comment falls through
+	// to the local progress-note path below instead of being silently dropped.
+	if task.Source == "linear" && !task.LinearSecondary && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
 		if err := conn.Comment(*task.LinearIssueID, body); err != nil {
 			return toolResultError(fmt.Sprintf("failed to post comment to Linear: %v", err)), nil
 		}

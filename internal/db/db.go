@@ -683,6 +683,14 @@ func migrate(conn *sql.DB) error {
 		"cycle_start":       "TEXT",
 		"cycle_end":         "TEXT",
 		"linear_project_id": "TEXT", // Linear project UUID — drives project→agent routing
+		// linear_secondary marks a fan-out mirror (linear_project_map value is an
+		// array of relay projects) that is NOT the write-back driver: only the
+		// PRIMARY mirror (index 0 of the target list) pushes state/comment changes
+		// back to Linear — see UpsertLinearMirror's Secondary field and the
+		// pushStatusAsync / HandleComment / apiTaskComment gates. DEFAULT 0 so every
+		// existing single-target mirror (and every native task) reads as primary —
+		// back-compat, byte-identical write-back behavior pre-fan-out.
+		"linear_secondary": "INTEGER NOT NULL DEFAULT 0",
 		// priority already exists on the base table.
 
 		// --- Execution overlay (relay-owned, auto-stamped temporal trail) ---

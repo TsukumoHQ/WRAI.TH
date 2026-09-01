@@ -48,66 +48,72 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		if !isAgent(target) {
 			continue
 		}
-		// Per-issue relay project (multi-project mirror): the seed resolves it via
-		// projectFor, and every lookup/gate below scopes to seed.Project — the poll
-		// heals issues across all mapped relay projects, not just the default one.
-		seed := c.seedFromIssue(iss)
-		prior, _ := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
-		requireTicket := c.db.ProjectRequiresTypedTicket(seed.Project)
+		// Per-issue relay project fan-out (multi-project mirror): projectsFor
+		// resolves every target this issue mirrors into (usually one; several on
+		// a linear_project_map array entry), primary = index 0. Every lookup/gate
+		// below scopes to seed.Project — the poll heals issues across all mapped
+		// relay projects, not just the default one.
+		for i, project := range c.projectsFor(iss) {
+			primary := i == 0
+			seed := c.seedFromIssue(iss, project, primary)
+			prior, _ := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
+			requireTicket := c.db.ProjectRequiresTypedTicket(seed.Project)
 
-		// Typed-ticket enforcement, unified with the webhook path on the refused
-		// mirror row + marker (see handleTypedTicket). A non-conforming issue that
-		// reaches the relay only via the poll (its webhook was missed) is refused
-		// here too — the loud comment fires ONCE, deduped by the persistent marker,
-		// so no work dies silently and later cycles stay quiet. On refusal the row
-		// is persisted refused; skip dispatch. A conforming issue falls through to
-		// the normal upsert + dispatch below.
-		if requireTicket {
-			decision, err := c.handleTypedTicket(iss, seed, prior)
+			// Typed-ticket enforcement, unified with the webhook path on the refused
+			// mirror row + marker (see handleTypedTicket). A non-conforming issue that
+			// reaches the relay only via the poll (its webhook was missed) is refused
+			// here too — the loud comment fires ONCE (primary mirror only), deduped by
+			// the persistent marker, so no work dies silently and later cycles stay
+			// quiet. On refusal the row is persisted refused; skip dispatch. A
+			// conforming issue falls through to the normal upsert + dispatch below.
+			if requireTicket {
+				decision, err := c.handleTypedTicket(iss, seed, prior, primary)
+				if err != nil {
+					log.Printf("[linear] reconcile typed-ticket %s (%s): %v", iss.ID, project, err)
+					continue
+				}
+				if decision == refusedHold {
+					continue
+				}
+			}
+
+			taskID, _, err := c.db.UpsertLinearMirror(seed)
 			if err != nil {
-				log.Printf("[linear] reconcile typed-ticket %s: %v", iss.ID, err)
+				log.Printf("[linear] reconcile upsert %s (%s): %v", iss.ID, project, err)
 				continue
 			}
-			if decision == refusedHold {
-				continue
+			upserted++
+			if iss.parentLinearID() != "" && seed.ParentTaskID == nil {
+				hasParent = true
 			}
-		}
-
-		taskID, _, err := c.db.UpsertLinearMirror(seed)
-		if err != nil {
-			log.Printf("[linear] reconcile upsert %s: %v", iss.ID, err)
-			continue
-		}
-		upserted++
-		if iss.parentLinearID() != "" && seed.ParentTaskID == nil {
-			hasParent = true
-		}
-		// Done echo parity with the webhook path.
-		if iss.State != nil && iss.State.Type == "completed" {
-			_ = c.db.MarkLinearDone(taskID)
-		}
-		// Dispatch on a genuine transition into a working "started" state (the
-		// agent target is already confirmed by the scope gate above; first sight
-		// in-progress counts: boot-time pickup).
-		//
-		// NEVER re-dispatch a mirror that's already in-progress (avoid a double
-		// claim+start) OR already TERMINAL (done/cancelled). The latter is the
-		// phantom-stale resurrection: an agent completes the relay task, but the
-		// Linear issue lags in a started state (its PR wasn't auto-closed), so
-		// every reconcile poll would otherwise re-fire claim+start on work that's
-		// done. The webhook path is safe (it gates on a real state change); the
-		// poll has no such signal, so it must not resurrect a terminal task. A
-		// genuine reopen arrives via the webhook with an actual state transition.
-		// Typed-ticket gate: the poll must not auto-dispatch a non-conforming
-		// issue on a project that requires typed tickets. It still mirrors
-		// (visible on the board), just never launches an agent on work with no
-		// goal/AC/DoD. The loud refusal comment is the webhook's job (the poll
-		// would re-comment every cycle); here we stay silent and simply hold.
-		if c.onEvent != nil &&
-			iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
-			(prior == nil || !isTerminalOrActive(prior.Status)) &&
-			(!requireTicket || len(parseTicket(iss.Description).missing) == 0) {
-			c.onEvent(c.dispatchEvent(taskID, iss.Title, target, seed))
+			// Done echo parity with the webhook path.
+			if iss.State != nil && iss.State.Type == "completed" {
+				_ = c.db.MarkLinearDone(taskID)
+			}
+			// Dispatch on a genuine transition into a working "started" state (the
+			// agent target is already confirmed by the scope gate above; first sight
+			// in-progress counts: boot-time pickup). Fires per mirror project — each
+			// target needs its own registered agent to see/claim its own copy.
+			//
+			// NEVER re-dispatch a mirror that's already in-progress (avoid a double
+			// claim+start) OR already TERMINAL (done/cancelled). The latter is the
+			// phantom-stale resurrection: an agent completes the relay task, but the
+			// Linear issue lags in a started state (its PR wasn't auto-closed), so
+			// every reconcile poll would otherwise re-fire claim+start on work that's
+			// done. The webhook path is safe (it gates on a real state change); the
+			// poll has no such signal, so it must not resurrect a terminal task. A
+			// genuine reopen arrives via the webhook with an actual state transition.
+			// Typed-ticket gate: the poll must not auto-dispatch a non-conforming
+			// issue on a project that requires typed tickets. It still mirrors
+			// (visible on the board), just never launches an agent on work with no
+			// goal/AC/DoD. The loud refusal comment is the webhook's job (the poll
+			// would re-comment every cycle); here we stay silent and simply hold.
+			if c.onEvent != nil &&
+				iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
+				(prior == nil || !isTerminalOrActive(prior.Status)) &&
+				(!requireTicket || len(parseTicket(iss.Description).missing) == 0) {
+				c.onEvent(c.dispatchEvent(taskID, iss.Title, target, seed))
+			}
 		}
 	}
 
@@ -117,11 +123,13 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 			if iss.ID == "" || iss.parentLinearID() == "" {
 				continue
 			}
-			seed := c.seedFromIssue(iss)
-			if seed.ParentTaskID == nil {
-				continue
+			for i, project := range c.projectsFor(iss) {
+				seed := c.seedFromIssue(iss, project, i == 0)
+				if seed.ParentTaskID == nil {
+					continue
+				}
+				_, _, _ = c.db.UpsertLinearMirror(seed)
 			}
-			_, _, _ = c.db.UpsertLinearMirror(seed)
 		}
 	}
 

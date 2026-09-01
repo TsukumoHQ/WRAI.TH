@@ -41,13 +41,20 @@ const (
 //     is cleared so a later regression re-notifies once; the caller's upsert then
 //     flips the row out of "refused" and it dispatches on its next started state.
 //   - non-conforming, refusable row (first sight / already-refused / still-pending
-//     unstarted): upserts/keeps a REFUSED row and posts the loud comment EXACTLY
-//     once (marker-deduped across the webhook and every poll cycle); refusedHold.
+//     unstarted): upserts/keeps a REFUSED row; the primary mirror ALSO posts the
+//     loud comment EXACTLY once (marker-deduped across the webhook and every poll
+//     cycle) — refusedHold either way.
 //   - non-conforming, in-flight/terminal row (accepted/in-progress/in-review/
 //     blocked/done/cancelled): proceedNormal WITHOUT refusing — work already in
 //     flight is never retro-refused (the reconcile dispatch-gate still blocks any
 //     re-dispatch of a non-conforming issue).
-func (c *Connector) handleTypedTicket(iss gqlIssue, seed db.LinearMirrorSeed, existing *models.Task) (refusalDecision, error) {
+//
+// primary gates the Linear-facing side effect only (the loud comment + its
+// anti-spam marker): a fanned-out issue shares ONE Linear issue across several
+// mirror rows, so only the primary (index 0 of projectsFor) may post to it — a
+// secondary mirror still gets its own refused, non-dispatching row (silently),
+// matching the primary-mirror-only write-back rule used for status pushes.
+func (c *Connector) handleTypedTicket(iss gqlIssue, seed db.LinearMirrorSeed, existing *models.Task, primary bool) (refusalDecision, error) {
 	missing := parseTicket(iss.Description).missing
 
 	// Conforming — nothing to refuse. Clear a stale marker so a future regression
@@ -77,6 +84,12 @@ func (c *Connector) handleTypedTicket(iss gqlIssue, seed db.LinearMirrorSeed, ex
 	taskID, _, err := c.db.UpsertLinearMirror(seed)
 	if err != nil {
 		return refusedHold, fmt.Errorf("upsert refused mirror: %w", err)
+	}
+
+	// Only the primary mirror ever touches Linear — a secondary fan-out mirror
+	// stops here with its own refused row persisted, no comment.
+	if !primary {
+		return refusedHold, nil
 	}
 
 	// Comment exactly once: only when the marker is unset (first refusal, or a
