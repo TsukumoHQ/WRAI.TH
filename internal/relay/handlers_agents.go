@@ -346,6 +346,7 @@ func (h *Handlers) HandleDeactivateAgent(ctx context.Context, req mcp.CallToolRe
 		return toolResultError(fmt.Sprintf("failed to deactivate agent: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "register", Action: "deactivate", Agent: name, Project: project})
+	h.cascadeDeactivatedAgent(project, name)
 
 	return h.resultJSONTracked(project, name, "deactivate_agent", map[string]any{
 		"deactivated": true,
@@ -363,11 +364,42 @@ func (h *Handlers) HandleDeleteAgent(ctx context.Context, req mcp.CallToolReques
 	if err := h.db.DeleteAgent(project, name); err != nil {
 		return toolResultError(fmt.Sprintf("failed to delete agent: %v", err)), nil
 	}
+	h.cascadeDeactivatedAgent(project, name)
 
 	return h.resultJSONTracked(project, name, "delete_agent", map[string]any{
 		"deleted": true,
 		"agent":   name,
 	})
+}
+
+// cascadeDeactivatedAgent runs the referential-integrity soft-cascade (Phase 2,
+// task 536ecc40) after an agent is deactivated or deleted: it frees the leased
+// tasks the dead agent still held (-> pending) and nudges the profile so a live
+// agent re-claims, marks its non-leased assignments limbo, and soft-closes its
+// memberships. Best-effort + non-fatal — a cascade failure never fails the
+// deactivate/delete (the periodic lease + integrity sweeps are the backstop).
+func (h *Handlers) cascadeDeactivatedAgent(project, name string) {
+	res, err := h.db.CascadeAgentDeactivation(project, name)
+	if err != nil {
+		log.Printf("integrity cascade (%s/%s): %v", project, name, err)
+		return
+	}
+	for _, s := range res.Released {
+		// Mirror the expired-lease sweep: announce the recovery and nudge a live
+		// agent of the profile to pick up the now-pending task.
+		h.events.Emit(MCPEvent{
+			Type: "task", Action: "lease_reclaimed", Agent: "relay-cascade",
+			Project: s.Project, Target: s.Profile, Label: s.Title, Priority: s.Priority,
+		})
+		if h.registry != nil && s.Profile != "" {
+			h.registry.NotifyProfile(s.Project, s.Profile, "relay-cascade",
+				"Task requeued (holder "+s.From+" deactivated): "+s.Title, s.TaskID)
+		}
+	}
+	if len(res.Released) > 0 || res.MarkedLimbo > 0 || res.LeftTeams > 0 || res.LeftConvos > 0 {
+		log.Printf("integrity cascade (%s/%s): released=%d marked_limbo=%d left_teams=%d left_convos=%d",
+			project, name, len(res.Released), res.MarkedLimbo, res.LeftTeams, res.LeftConvos)
+	}
 }
 
 func (h *Handlers) HandleSleepAgent(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

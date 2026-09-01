@@ -1550,6 +1550,14 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 		task.LeaseTransfer = transfer
 		d.auditLeaseTransfer(project, taskID, agent, transfer)
 	}
+	// On-write soft-mark (Phase 2 §7.1, ruling Q3): if the new assignee does not
+	// resolve to a live agent, record a quarantine marker so the misroute is
+	// visible immediately rather than only at the next periodic scan. NEVER
+	// reject — the reassignment still stands (a boot-race target may register
+	// moments later, at which point the next scan stamps the marker resolved).
+	if !d.refResolvesToLiveAgent(project, agent) {
+		_ = d.MarkQuarantine("tasks", taskID, "assigned_to", agent, "orphan_assignee", project)
+	}
 	return task, nil
 }
 
