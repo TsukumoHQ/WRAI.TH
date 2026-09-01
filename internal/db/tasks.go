@@ -1452,33 +1452,87 @@ func (d *DB) ListBoardTasks(project, cycleID string, limit int) ([]models.Task, 
 	return d.queryTasks(query, args...)
 }
 
-// ResolveTaskID resolves a short task ID prefix to a full UUID.
-// Returns the full ID if exactly one match is found, or the original if it's already a full UUID.
-func (d *DB) ResolveTaskID(prefix, project string) (string, error) {
-	// If it looks like a full UUID (36 chars), skip prefix search
-	if len(prefix) >= 36 {
-		return prefix, nil
+// ResolveTaskID resolves a task reference to its full UUID id. It tries, in
+// order: a full-UUID exact match, a short UUID-prefix match, and — only when
+// those miss — a Linear-key fallback (linear_key like SYN-3296, or a
+// linear_issue_id). The relay is in Linear mode dual-keyed (id UUID + linear_key),
+// so get_task on a Linear key must resolve the real row; without the fallback it
+// returned nothing and the gate/scribe emitted "untyped record" banners
+// (DEC-niwa-gate-linear-resolution, ~300 on synergix-prod). Read-only,
+// project-scoped, single indexed query per step.
+func (d *DB) ResolveTaskID(ref, project string) (string, error) {
+	// Fast path: a full task UUID (36 chars). Verify it is a real task id and
+	// return it as-is — the common get_task path, one indexed PK lookup, no
+	// behavior change for a genuine UUID. Only on a MISS fall through to the
+	// Linear fallback (a linear_issue_id is itself a 36-char UUID, so it lands
+	// here rather than in the prefix path below).
+	if len(ref) >= 36 {
+		var id string
+		err := d.ro().QueryRow("SELECT id FROM tasks WHERE id = ? AND project = ?", ref, project).Scan(&id)
+		if err == nil {
+			return id, nil
+		}
+		if err != sql.ErrNoRows {
+			return "", err
+		}
+	} else {
+		// UUID-prefix fast path (unchanged): resolve a short id prefix.
+		var ids []string
+		rows, err := d.ro().Query("SELECT id FROM tasks WHERE id LIKE ? AND project = ?", ref+"%", project)
+		if err != nil {
+			return "", err
+		}
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return "", err
+			}
+			ids = append(ids, id)
+		}
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		if len(ids) == 1 {
+			return ids[0], nil
+		}
+		if len(ids) > 1 {
+			return "", fmt.Errorf("ambiguous task ID prefix %q (%d matches)", ref, len(ids))
+		}
+		// 0 matches → fall through to the Linear-key fallback.
 	}
-	var ids []string
-	rows, err := d.ro().Query("SELECT id FROM tasks WHERE id LIKE ? AND project = ?", prefix+"%", project)
+
+	if id, err := d.resolveLinearTaskID(ref, project); err != nil {
+		return "", err
+	} else if id != "" {
+		return id, nil
+	}
+	return ref, nil // unresolved — let downstream report "not found"
+}
+
+// resolveLinearTaskID resolves a Linear key (e.g. SYN-3296) or a linear_issue_id
+// to the task's id within a project. Read-only + project-scoped (never
+// cross-project). Deterministic on the rare multi-match: the oldest-dispatched
+// row wins, tie-broken by id, so the same input always resolves to the same task.
+// Returns "" when nothing matches.
+func (d *DB) resolveLinearTaskID(key, project string) (string, error) {
+	if key == "" {
+		return "", nil
+	}
+	var id string
+	err := d.ro().QueryRow(
+		`SELECT id FROM tasks
+		 WHERE (linear_key = ? OR linear_issue_id = ?) AND project = ?
+		 ORDER BY dispatched_at ASC, id ASC LIMIT 1`,
+		key, key, project,
+	).Scan(&id)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return "", err
-		}
-		ids = append(ids, id)
-	}
-	if len(ids) == 0 {
-		return prefix, nil // let downstream report "not found"
-	}
-	if len(ids) > 1 {
-		return "", fmt.Errorf("ambiguous task ID prefix %q (%d matches)", prefix, len(ids))
-	}
-	return ids[0], nil
+	return id, nil
 }
 
 func normalizePtr(s *string) *string {

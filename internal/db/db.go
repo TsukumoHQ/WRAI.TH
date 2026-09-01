@@ -782,6 +782,9 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_board ON tasks(board_id)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_linear_issue ON tasks(linear_issue_id)`)
+	// Index the Linear-key resolution fallback (ResolveTaskID) so a get_task on a
+	// SYN-xxxx key is a single indexed lookup, not a table scan.
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_linear_key ON tasks(linear_key)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_cycle ON tasks(cycle_id)`)
 	// R2 relay-perf: index the two periodic sweeper queries that were full-table
 	// SCANs (EQP-confirmed). Partial index for ListStrandedPRTasks — scoped to the
