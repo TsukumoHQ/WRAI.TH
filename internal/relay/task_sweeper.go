@@ -39,6 +39,7 @@ func (r *Relay) StartTaskMaintenanceSweeper(done <-chan struct{}) {
 			case <-ticker.C:
 				r.sweepStrandedPRTasks()
 				r.sweepExpiredLeases()
+				r.sweepReferentialIntegrity()
 			}
 		}
 	}()
@@ -88,6 +89,29 @@ func (r *Relay) sweepStrandedPRTasks() {
 	}
 	if converged > 0 {
 		log.Printf("pr-reconcile sweep: converged %d stranded PR task(s)", converged)
+	}
+}
+
+// sweepReferentialIntegrity (Phase 0/2 GC) re-runs the referential scan so
+// orphans that appeared during uptime — most importantly a task whose assignee
+// was deactivated since the last sweep — are re-detected and quarantined, and
+// refs that healed (the missing agent registered) are stamped resolved. This is
+// the PERIODIC re-scan deferred from Phase 0; it rides this existing 2-minute
+// ticker rather than adding a goroutine or a heavier hot-path write. Detection
+// only — it changes no task/agent behavior. Idempotent, so a clean sweep is a
+// cheap near-no-op.
+func (r *Relay) sweepReferentialIntegrity() {
+	counts, err := r.DB.RunReferentialScan()
+	if err != nil {
+		log.Printf("integrity sweep: %v", err)
+		return
+	}
+	total := 0
+	for _, n := range counts {
+		total += n
+	}
+	if total > 0 {
+		log.Printf("integrity sweep: %d open quarantine row(s) across %d class(es)", total, len(counts))
 	}
 }
 

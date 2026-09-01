@@ -288,14 +288,62 @@ func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 	return counts, nil
 }
 
-// NOTE (Phase 0 scope): the scan runs only at startup, inside migrate(), which
-// executes on the single writer connection BEFORE the relay serves — so it never
-// contends with live writes. A PERIODIC re-scan (to surface orphans created
-// during a long uptime without a reboot) is deliberately deferred to Phase 2,
-// where it is paired with the reconcile/GC that acts on the markers and can be
-// tuned to run off the writer hot path (design §7.3). Adding it to the 5-minute
-// StartCleanup loop now would put a heavy multi-full-scan writer transaction on a
-// hot path for markers nothing yet consumes.
+// RunReferentialScan runs the referential scan on the writer connection and
+// returns the per-class open-orphan counts. Phase 2 wires it onto the existing
+// 2-minute task-maintenance sweeper (the periodic GC deferred from Phase 0), so
+// orphans created during a long uptime — e.g. a task whose assignee is
+// deactivated between reboots — surface without a restart. It is idempotent, so a
+// clean sweep is a cheap near-no-op.
+func (d *DB) RunReferentialScan() (map[string]int, error) {
+	return runReferentialScan(d.conn)
+}
+
+// MarkQuarantine upserts ONE referential-integrity quarantine row (the same
+// side-table the scan writes). Phase 2 uses it for on-write soft-marking (a ref
+// chokepoint that stores a value which does not resolve) and for the
+// soft-cascade (a deactivated agent's still-assigned tasks). It never rejects,
+// never deletes, never changes the referenced row's behavior — it only records
+// the dangling ref so it is visible immediately instead of only at the next
+// scan. Idempotent via the UNIQUE(table_name,row_id,ref_col,class) key; a row
+// already present (open) is left as-is (first-seen detected_at preserved).
+func (d *DB) MarkQuarantine(table, rowID, refCol, refValue, class, project string) error {
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	_, err := d.writerExec(
+		`INSERT OR IGNORE INTO integrity_quarantine
+		   (table_name, row_id, ref_col, ref_value, class, project, detected_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		table, rowID, refCol, refValue, class, project, now,
+	)
+	if err != nil {
+		return fmt.Errorf("mark quarantine %s/%s: %w", class, rowID, err)
+	}
+	return nil
+}
+
+// refResolvesToLiveAgent reports whether name is a valid principal for a
+// *_by/assignee reference in project: a sentinel ({linear,cron,user}) or an
+// agent row that exists and is not soft-deleted. Used by the on-write soft-mark
+// and the soft-cascade to decide whether a ref dangles. Blank/'*'/team: targets
+// are the caller's responsibility to pre-filter — this is the agent-name check.
+func (d *DB) refResolvesToLiveAgent(project, name string) bool {
+	if name == "" {
+		return true // nothing to validate
+	}
+	if integritySentinels[strings.ToLower(strings.TrimSpace(name))] {
+		return true
+	}
+	var n int
+	// A tombstoned ('deleted') row does not count as resolving — the ref is
+	// effectively dangling. 'inactive'/'sleeping' DO resolve (the agent exists and
+	// can come back); the limbo class, not the orphan class, covers dead assignees.
+	if err := d.ro().QueryRow(
+		`SELECT COUNT(*) FROM agents WHERE project = ? AND LOWER(name) = LOWER(?) AND status != 'deleted'`,
+		project, name,
+	).Scan(&n); err != nil {
+		return true // on a lookup error, do NOT mark (fail open — never over-flag)
+	}
+	return n > 0
+}
 
 // logReferentialCounts emits a single deterministic summary line for a scan pass.
 // Silent when nothing is open (no noise on a clean DB). Keys are sorted so the
