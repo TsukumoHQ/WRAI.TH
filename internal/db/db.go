@@ -243,7 +243,7 @@ func (d *DB) Backup(keep int) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open backup connection: %w", err)
 	}
-	defer backupConn.Close()
+	defer func() { _ = backupConn.Close() }()
 	backupConn.SetMaxOpenConns(1)
 
 	if _, err := backupConn.Exec("VACUUM INTO ?", dst); err != nil {

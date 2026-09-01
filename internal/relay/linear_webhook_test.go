@@ -31,9 +31,17 @@ func (f *fakeTaskConn) Active() bool                         { return true }
 // a SECONDARY mirror task (linear_project_map routed its issue to several
 // relay projects; this row isn't the primary) must never push a Linear state
 // change — only the primary mirror does (single-write-back-per-issue, AC5).
+//
+// pushStatusAsync fires PushStatus from a goroutine, so the call count must be
+// observed through a channel (synchronized by Go's memory model), never a bare
+// shared counter — a plain `pushed++`/read pair here is a real data race under
+// `go test -race` even though it "worked" unraced locally.
 func TestPushStatusAsyncSkipsSecondaryMirror(t *testing.T) {
-	pushed := 0
-	fake := &fakeTaskConn{onPushStatus: func(string, string, string) error { pushed++; return nil }}
+	calls := make(chan struct{}, 2)
+	fake := &fakeTaskConn{onPushStatus: func(string, string, string) error {
+		calls <- struct{}{}
+		return nil
+	}}
 
 	issueID := "iss-x"
 	secondary := &models.Task{Source: "linear", LinearIssueID: &issueID, LinearSecondary: true}
@@ -42,13 +50,15 @@ func TestPushStatusAsyncSkipsSecondaryMirror(t *testing.T) {
 	pushStatusAsync(fake, secondary, "in-review", nil)
 	pushStatusAsync(fake, primary, "in-review", nil)
 
-	// pushStatusAsync fires the push in a goroutine; give it a beat to land.
-	deadline := time.Now().Add(time.Second)
-	for pushed == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	select {
+	case <-calls:
+	case <-time.After(time.Second):
+		t.Fatal("PushStatus never called — the primary mirror must push")
 	}
-	if pushed != 1 {
-		t.Errorf("PushStatus called %d times, want exactly 1 (secondary mirror must be skipped, primary must fire)", pushed)
+	select {
+	case <-calls:
+		t.Fatal("PushStatus called a second time — the secondary mirror must be skipped")
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
@@ -56,8 +66,11 @@ func TestPushStatusAsyncSkipsSecondaryMirror(t *testing.T) {
 // Secondary gate never touches a native task or a Linear task with no issue id
 // — pre-existing no-op paths must stay byte-identical.
 func TestPushStatusAsyncNativeAndNoLinearIDUnaffected(t *testing.T) {
-	pushed := 0
-	fake := &fakeTaskConn{onPushStatus: func(string, string, string) error { pushed++; return nil }}
+	calls := make(chan struct{}, 2)
+	fake := &fakeTaskConn{onPushStatus: func(string, string, string) error {
+		calls <- struct{}{}
+		return nil
+	}}
 
 	native := &models.Task{Source: "native"}
 	pushStatusAsync(fake, native, "in-review", nil)
@@ -65,8 +78,9 @@ func TestPushStatusAsyncNativeAndNoLinearIDUnaffected(t *testing.T) {
 	linearNoID := &models.Task{Source: "linear"}
 	pushStatusAsync(fake, linearNoID, "in-review", nil)
 
-	time.Sleep(20 * time.Millisecond)
-	if pushed != 0 {
-		t.Errorf("PushStatus called %d times, want 0 for native/no-issue-id tasks", pushed)
+	select {
+	case <-calls:
+		t.Fatal("PushStatus called for a native/no-issue-id task, want no-op")
+	case <-time.After(50 * time.Millisecond):
 	}
 }
