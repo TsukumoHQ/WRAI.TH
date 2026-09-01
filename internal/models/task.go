@@ -38,6 +38,11 @@ type Task struct {
 	// LinearProjectID drives project→agent routing for Linear-sourced tasks
 	// (e.g. resolving a stale task's assignee from the linear_routing map).
 	LinearProjectID *string `json:"linear_project_id,omitempty"`
+	// LinearSecondary is true only for a fan-out mirror that is NOT the Linear
+	// write-back driver (linear_project_map routed this issue to several relay
+	// projects; this row isn't the primary one). false for every native task and
+	// every non-fanned-out Linear mirror — the write-back call sites gate on it.
+	LinearSecondary bool `json:"linear_secondary,omitempty"`
 
 	// --- Execution overlay (relay-owned, auto-stamped temporal trail) ---
 	ClaimedBy      *string `json:"claimed_by,omitempty"`

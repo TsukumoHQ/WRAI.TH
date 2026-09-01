@@ -1,7 +1,6 @@
 package relay
 
 import (
-	"encoding/json"
 	"log"
 	"strings"
 	"time"
@@ -111,9 +110,11 @@ func (r *Relay) linearProjectName(teamKey string, enabled bool) string {
 }
 
 // linearMirrorProjects returns every relay project the Linear mirror writes to:
-// the default project plus each distinct target in linear_project_map. The UI
-// uses it to mark ALL mirror lanes read-only (Linear is SSOT), not just the
-// default. Empty when the connector is disabled. Default is first, deduplicated.
+// the default project plus each distinct target in linear_project_map (a
+// mapped value may be a single relay project or a fan-out array — see
+// linearconn.ParseProjectMap). The UI uses it to mark ALL mirror lanes
+// read-only (Linear is SSOT), not just the default. Empty when the connector
+// is disabled. Default is first, deduplicated.
 func (r *Relay) linearMirrorProjects(teamKey string, enabled bool) []string {
 	def := r.linearProjectName(teamKey, enabled)
 	if def == "" {
@@ -121,19 +122,12 @@ func (r *Relay) linearMirrorProjects(teamKey string, enabled bool) []string {
 	}
 	out := []string{def}
 	seen := map[string]bool{def: true}
-	raw := strings.TrimSpace(r.DB.GetSetting(setLinearProjMap))
-	if raw == "" {
-		return out
-	}
-	var m map[string]string
-	if err := json.Unmarshal([]byte(raw), &m); err != nil {
-		return out
-	}
-	for _, p := range m {
-		p = strings.ToLower(strings.TrimSpace(p))
-		if p != "" && !seen[p] {
-			seen[p] = true
-			out = append(out, p)
+	for _, targets := range linearconn.ParseProjectMap(r.DB.GetSetting(setLinearProjMap)) {
+		for _, p := range targets {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
 		}
 	}
 	return out

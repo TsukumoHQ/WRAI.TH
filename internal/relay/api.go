@@ -1723,7 +1723,10 @@ func (r *Relay) apiTaskComment(w http.ResponseWriter, req *http.Request, path st
 		return
 	}
 	conn := r.TaskConn()
-	if task.Source == "linear" && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
+	// A secondary fan-out mirror never writes back to Linear (only the primary
+	// mirror does — see db.LinearMirrorSeed.Secondary); its comment falls through
+	// to the local-note path below instead of being silently dropped.
+	if task.Source == "linear" && !task.LinearSecondary && conn.Active() && task.LinearIssueID != nil && *task.LinearIssueID != "" {
 		if err := conn.Comment(*task.LinearIssueID, body.Body); err != nil {
 			apiError(w, http.StatusBadGateway, "failed to post comment to Linear", err)
 			return

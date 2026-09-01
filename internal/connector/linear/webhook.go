@@ -163,52 +163,65 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 		return nil, fmt.Errorf("webhook issue missing id")
 	}
 
-	seed := c.seedFromIssue(iss)
-	if strings.EqualFold(env.Action, "remove") {
-		// Issue deleted/archived in Linear — mark the mirror cancelled, keep history.
-		seed.Status = "cancelled"
-	}
-
-	// Typed-ticket enforcement (V-lifecycle), unified with the reconcile poll on
-	// a single refused mirror row + refusal_notified_at marker (see
-	// handleTypedTicket). A non-conforming issue on a typed-ticket project is
-	// refused with a loud comment back on the issue (never a silent relay log, or
-	// the executive thinks it dispatched and the work dies in the void). A "remove"
-	// is never refused; a non-agent issue was never dispatchable so it is not
-	// refused either (kept symmetric with the poll, which skips non-agent issues
-	// before enforcement). Work already in flight is never retro-refused.
-	if !strings.EqualFold(env.Action, "remove") &&
-		c.db.ProjectRequiresTypedTicket(seed.Project) && isAgent(c.dispatchTarget(iss)) {
-		existing, err := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
-		if err != nil {
-			return nil, err
-		}
-		decision, err := c.handleTypedTicket(iss, seed, existing)
-		if err != nil {
-			return nil, err
-		}
-		if decision == refusedHold {
-			return nil, nil
-		}
-	}
-
-	taskID, _, err := c.db.UpsertLinearMirror(seed)
-	if err != nil {
-		return nil, err
-	}
-
-	// Done echo (the one inbound exception that touches the overlay): when the
-	// issue lands in a completed-type state, stamp done_at/completed_at.
-	if iss.State != nil && iss.State.Type == "completed" {
-		_ = c.db.MarkLinearDone(taskID)
-	}
-
-	// Dispatch emit (FR-3): a → In Progress (started) transition with an agent
-	// assignee fires exactly one task.in_progress. Dedupe on updatedFrom: only
-	// emit when the state actually changed in this update.
+	// Fan-out: mirror the issue into every relay project linear_project_map
+	// routes it to (usually one; several when the setting maps this Linear
+	// project to an array). Each target gets its own seed/upsert/dispatch;
+	// only the primary (index 0) may drive Linear write-back — see
+	// seedFromIssue's primary/Secondary threading and handleTypedTicket below.
 	var events []connector.TaskEvent
-	if c.shouldDispatch(env, iss) {
-		events = append(events, c.dispatchEvent(taskID, iss.Title, c.dispatchTarget(iss), seed))
+	for i, project := range c.projectsFor(iss) {
+		primary := i == 0
+		seed := c.seedFromIssue(iss, project, primary)
+		if strings.EqualFold(env.Action, "remove") {
+			// Issue deleted/archived in Linear — mark the mirror cancelled, keep history.
+			seed.Status = "cancelled"
+		}
+
+		// Typed-ticket enforcement (V-lifecycle), unified with the reconcile poll on
+		// a single refused mirror row + refusal_notified_at marker (see
+		// handleTypedTicket). A non-conforming issue on a typed-ticket project is
+		// refused with a loud comment back on the issue (never a silent relay log, or
+		// the executive thinks it dispatched and the work dies in the void). A "remove"
+		// is never refused; a non-agent issue was never dispatchable so it is not
+		// refused either (kept symmetric with the poll, which skips non-agent issues
+		// before enforcement). Work already in flight is never retro-refused. Only the
+		// primary mirror ever posts the loud refusal comment (handleTypedTicket's
+		// primary param) — a secondary mirror still gets a refused, non-dispatching
+		// row, silently.
+		if !strings.EqualFold(env.Action, "remove") &&
+			c.db.ProjectRequiresTypedTicket(seed.Project) && isAgent(c.dispatchTarget(iss)) {
+			existing, err := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
+			if err != nil {
+				return nil, err
+			}
+			decision, err := c.handleTypedTicket(iss, seed, existing, primary)
+			if err != nil {
+				return nil, err
+			}
+			if decision == refusedHold {
+				continue
+			}
+		}
+
+		taskID, _, err := c.db.UpsertLinearMirror(seed)
+		if err != nil {
+			return nil, err
+		}
+
+		// Done echo (the one inbound exception that touches the overlay): when the
+		// issue lands in a completed-type state, stamp done_at/completed_at.
+		if iss.State != nil && iss.State.Type == "completed" {
+			_ = c.db.MarkLinearDone(taskID)
+		}
+
+		// Dispatch emit (FR-3): a → In Progress (started) transition with an agent
+		// assignee fires exactly one task.in_progress PER mirror project — each
+		// target project needs its own registered agent to see/claim its own copy
+		// of the task. Dedupe on updatedFrom: only emit when the state actually
+		// changed in this update.
+		if c.shouldDispatch(env, iss) {
+			events = append(events, c.dispatchEvent(taskID, iss.Title, c.dispatchTarget(iss), seed))
+		}
 	}
 	return events, nil
 }
@@ -280,12 +293,17 @@ func stateChanged(updatedFrom map[string]json.RawMessage) bool {
 	return false
 }
 
-// seedFromIssue maps a Linear issue (webhook or GraphQL) to a mirror seed. It
-// resolves the parent's relay task id by the parent's Linear issue id when the
-// parent has already been mirrored.
-func (c *Connector) seedFromIssue(iss gqlIssue) db.LinearMirrorSeed {
+// seedFromIssue maps a Linear issue (webhook or GraphQL) to a mirror seed for
+// ONE target relay project (a caller fanning an issue out to several projects
+// calls this once per target — see projectsFor). primary marks whether project
+// is index 0 of the fan-out list — the one mirror allowed to drive Linear
+// write-back (db.LinearMirrorSeed.Secondary = !primary). It resolves the
+// parent's relay task id by the parent's Linear issue id when the parent has
+// already been mirrored into this same project.
+func (c *Connector) seedFromIssue(iss gqlIssue, project string, primary bool) db.LinearMirrorSeed {
 	seed := db.LinearMirrorSeed{
-		Project:       c.projectFor(iss),
+		Project:       project,
+		Secondary:     !primary,
 		LinearIssueID: iss.ID,
 		Title:         iss.Title,
 		Description:   iss.Description,
@@ -411,13 +429,65 @@ func (c *Connector) linearRouting() map[string]string {
 	return c.settingMap("linear_routing")
 }
 
-// projectMap reads the owner-configured Linear-project→relay-project map
-// (setting "linear_project_map", JSON {linearProjectId: relayProjectName}).
-// It lets several relay projects share one Linear team: each Linear project
-// routes its issues into its own relay project's mirror. Empty when unset —
-// every issue then falls back to the connector's default project (c.project).
-func (c *Connector) projectMap() map[string]string {
-	return c.settingMap("linear_project_map")
+// ParseProjectMap decodes the linear_project_map setting value into
+// {linearProjectId: []relayProject}. Each entry's value may be a plain JSON
+// string (one target — the original single-project form, kept byte-identical)
+// or a JSON array of strings (fan-out: the issue mirrors into every listed
+// relay project, index 0 is the PRIMARY mirror — the only one that drives
+// Linear write-back, see db.LinearMirrorSeed.Secondary). Malformed top-level
+// JSON, an unparseable entry, or an entry that normalizes to nothing are all
+// dropped rather than erroring — callers treat "no entry" as "falls back to
+// the default project", never a fatal config error. Entries are lowercased,
+// trimmed, and de-duplicated within themselves.
+func ParseProjectMap(raw string) map[string][]string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil
+	}
+	out := make(map[string][]string, len(m))
+	for pid, rawVal := range m {
+		var list []string
+		trimmed := trimSpace(rawVal)
+		if len(trimmed) > 0 && trimmed[0] == '[' {
+			if err := json.Unmarshal(rawVal, &list); err != nil {
+				continue
+			}
+		} else {
+			var s string
+			if err := json.Unmarshal(rawVal, &s); err != nil {
+				continue
+			}
+			list = []string{s}
+		}
+		seen := make(map[string]bool, len(list))
+		norm := make([]string, 0, len(list))
+		for _, p := range list {
+			p = strings.ToLower(strings.TrimSpace(p))
+			if p != "" && !seen[p] {
+				seen[p] = true
+				norm = append(norm, p)
+			}
+		}
+		if len(norm) > 0 {
+			out[pid] = norm
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// projectTargets reads the owner-configured Linear-project→relay-project(s)
+// map (setting "linear_project_map"). It lets several relay projects share one
+// Linear team, and — since ParseProjectMap accepts an array value — lets ONE
+// Linear project fan out into SEVERAL relay projects at once. Empty when unset.
+func (c *Connector) projectTargets() map[string][]string {
+	return ParseProjectMap(c.db.GetSetting("linear_project_map"))
 }
 
 // settingMap decodes a JSON string→string settings value; nil on empty/invalid.
@@ -433,32 +503,37 @@ func (c *Connector) settingMap(key string) map[string]string {
 	return m
 }
 
-// projectFor resolves the relay project an issue's mirror lives under. The
-// linear_project_map routes each Linear project to its own relay project;
-// unmapped issues fall back to the connector's default project (c.project).
-// This is the ONE decision that makes the mirror multi-project: every write and
-// lookup for an issue must scope to projectFor(iss), never a hardcoded c.project.
-func (c *Connector) projectFor(iss gqlIssue) string {
+// projectsFor resolves every relay project an issue's mirror fans out to: the
+// linear_project_map entry for the issue's Linear project (a plain string is
+// one target, an array is several), or [c.project] when unmapped — the
+// original single-project fallback, unchanged. Index 0 is always the PRIMARY
+// mirror. This is the ONE decision that makes the mirror multi-project: every
+// write/lookup for an issue must scope to one of projectsFor(iss)'s entries,
+// never a hardcoded c.project.
+func (c *Connector) projectsFor(iss gqlIssue) []string {
 	if pid := issueProjectID(iss); pid != "" {
-		if p := c.projectMap()[pid]; p != "" {
-			return strings.ToLower(strings.TrimSpace(p))
+		if targets := c.projectTargets()[pid]; len(targets) > 0 {
+			return targets
 		}
 	}
-	return c.project
+	return []string{c.project}
 }
 
 // mirrorProjects returns every relay project this connector's mirror may write
-// to: the default project plus every distinct target in linear_project_map.
-// Used by cross-project sweeps (the dropout-sync) that must cover all lanes, not
-// just the default one. The default is always first and never duplicated.
+// to: the default project plus every distinct target in linear_project_map
+// (flattened across every mapped Linear project's target list, single-string or
+// array). Used by cross-project sweeps (the dropout-sync, backfill) that must
+// cover all lanes, not just the default one. The default is always first and
+// never duplicated.
 func (c *Connector) mirrorProjects() []string {
 	out := []string{c.project}
 	seen := map[string]bool{c.project: true}
-	for _, p := range c.projectMap() {
-		p = strings.ToLower(strings.TrimSpace(p))
-		if p != "" && !seen[p] {
-			seen[p] = true
-			out = append(out, p)
+	for _, targets := range c.projectTargets() {
+		for _, p := range targets {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
 		}
 	}
 	return out

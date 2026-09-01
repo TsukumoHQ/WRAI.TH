@@ -82,15 +82,20 @@ func (r *Relay) apiLinearWebhook(w http.ResponseWriter, req *http.Request) {
 
 // pushStatusAsync mirrors a relay status change to the Linear issue (move state +
 // optional comment), after the local transition has already succeeded. No-op in
-// native mode or for tasks without a Linear issue id. Best-effort: a failed push
-// never affects the local transition (Linear reconcile is the backstop). The
-// comment is posted only when a note is supplied, so routine claim/start moves
-// stay quiet in Linear.
+// native mode, for tasks without a Linear issue id, or for a SECONDARY fan-out
+// mirror (linear_project_map routed this issue to several relay projects; only
+// the primary mirror drives write-back — see db.LinearMirrorSeed.Secondary).
+// Best-effort: a failed push never affects the local transition (Linear
+// reconcile is the backstop). The comment is posted only when a note is
+// supplied, so routine claim/start moves stay quiet in Linear.
 func pushStatusAsync(conn connector.TaskConnector, task *models.Task, status string, note *string) {
 	if conn == nil || !conn.Active() || task == nil {
 		return
 	}
 	if task.Source != "linear" || task.LinearIssueID == nil || *task.LinearIssueID == "" {
+		return
+	}
+	if task.LinearSecondary {
 		return
 	}
 	issueID := *task.LinearIssueID

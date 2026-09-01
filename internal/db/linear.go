@@ -38,6 +38,15 @@ type LinearMirrorSeed struct {
 	CycleEnd        *string
 	ParentTaskID    *string // relay task id of the parent issue's mirror row
 
+	// Secondary marks this seed as a NON-primary fan-out mirror (linear_project_map
+	// routed the issue to several relay projects; this one isn't index 0 of the
+	// list). false (the zero value) means primary — every existing single-target
+	// caller leaves this unset and keeps driving Linear write-back exactly as
+	// before. Only the primary mirror's task row pushes state/comment changes
+	// back to Linear (see internal/relay pushStatusAsync / HandleComment /
+	// apiTaskComment, gated on !task.LinearSecondary).
+	Secondary bool
+
 	// Typed ticket (V-lifecycle) parsed from the issue description, so a
 	// Linear-born task carries the same goal/acceptance/dod a relay dispatch
 	// does and the review gate can verdict it per requirement.
@@ -114,6 +123,7 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 			   linear_key=?, external_url=?, points=?, labels=?, linear_state=?,
 			   assignee=?, cycle_id=?, cycle_name=?, cycle_start=?, cycle_end=?,
 			   linear_project_id=COALESCE(?, linear_project_id),
+			   linear_secondary=?,
 			   parent_task_id=COALESCE(?, parent_task_id),
 			   profile_slug=COALESCE(NULLIF(?, ''), profile_slug),
 			   goal=?, acceptance_criteria=?, dod=?
@@ -122,6 +132,7 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 			s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState,
 			s.Assignee, s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd,
 			s.LinearProjectID,
+			s.Secondary,
 			s.ParentTaskID,
 			s.ProfileSlug,
 			s.Goal, s.AcceptanceCriteria, s.Dod,
@@ -146,12 +157,12 @@ func (d *DB) UpsertLinearMirror(s LinearMirrorSeed) (taskID string, created bool
 		`INSERT INTO tasks
 		   (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at,
 		    source, linear_issue_id, linear_key, external_url, points, labels, linear_state, assignee,
-		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, last_activity_at, blocked_periods,
+		    cycle_id, cycle_name, cycle_start, cycle_end, parent_task_id, linear_project_id, linear_secondary, last_activity_at, blocked_periods,
 		    goal, acceptance_criteria, dod)
-		 VALUES (?, ?, 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
+		 VALUES (?, ?, 'linear', ?, ?, ?, ?, ?, ?, 'linear', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, ?)`,
 		id, s.ProfileSlug, s.Title, s.Description, s.Priority, s.Status, s.Project, now,
 		s.LinearIssueID, s.LinearKey, s.ExternalURL, s.Points, s.Labels, s.LinearState, s.Assignee,
-		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd, s.ParentTaskID, s.LinearProjectID, now,
+		s.CycleID, s.CycleName, s.CycleStart, s.CycleEnd, s.ParentTaskID, s.LinearProjectID, s.Secondary, now,
 		s.Goal, s.AcceptanceCriteria, s.Dod,
 	)
 	if err != nil {
