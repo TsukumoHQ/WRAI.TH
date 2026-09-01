@@ -146,6 +146,174 @@ func TestLegacyTokenUsageBackfill(t *testing.T) {
 	}
 }
 
+// tokenUsageSchema is the coordination/analytics token_usage DDL, used by tests
+// to pre-seed a raw file before migrate runs.
+const tokenUsageSchema = `CREATE TABLE token_usage (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	project TEXT NOT NULL DEFAULT 'default',
+	agent TEXT NOT NULL DEFAULT '',
+	tool TEXT NOT NULL DEFAULT '',
+	bytes INTEGER NOT NULL DEFAULT 0,
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+	model TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL
+)`
+
+// seedTokenUsage inserts a token_usage row with an explicit id into an already-open
+// sqlite connection (used to hand-build legacy coordination + partial analytics DBs).
+func seedTokenUsage(t *testing.T, conn *sql.DB, id int, agent, createdAt string) {
+	t.Helper()
+	if _, err := conn.Exec(
+		`INSERT INTO token_usage (id, project, agent, tool, bytes, created_at) VALUES (?, 'p', ?, 't', 400, ?)`,
+		id, agent, createdAt,
+	); err != nil {
+		t.Fatalf("seed token_usage id=%d: %v", id, err)
+	}
+}
+
+// TestBackfillIdempotentPartialMigration reproduces the synx-prod crash-loop: a
+// legacy token_usage table still sits in the coordination DB while the analytics
+// DB already holds SOME of the same ids (a migration that copied rows then crashed
+// before the DROP). The old plain INSERT re-copied those ids and aborted init on
+// `UNIQUE constraint failed: token_usage.id`, crash-looping the relay. Init must
+// now boot clean, migrate the remaining rows, lose nothing, and be idempotent
+// across repeated opens.
+func TestBackfillIdempotentPartialMigration(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relay.db")
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Legacy coordination DB: token_usage with ids 1,2,3 still present.
+	seed, err := sql.Open("sqlite3", path+"?_foreign_keys=ON")
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := seed.Exec(tokenUsageSchema); err != nil {
+		t.Fatalf("seed coord schema: %v", err)
+	}
+	for i := 1; i <= 3; i++ {
+		seedTokenUsage(t, seed, i, "a", now)
+	}
+	_ = seed.Close()
+
+	// Partially-migrated analytics DB: ids 1,2 ALREADY copied (identical content),
+	// as a crashed prior migration would have left it.
+	apath := analyticsDBPath(path)
+	aseed, err := sql.Open("sqlite3", apath+"?_foreign_keys=ON")
+	if err != nil {
+		t.Fatalf("open analytics seed: %v", err)
+	}
+	if _, err := aseed.Exec(tokenUsageSchema); err != nil {
+		t.Fatalf("seed analytics schema: %v", err)
+	}
+	for i := 1; i <= 2; i++ {
+		seedTokenUsage(t, aseed, i, "a", now)
+	}
+	_ = aseed.Close()
+
+	// First open: must NOT crash on the duplicate ids; must migrate id 3 and drop.
+	d, err := NewTestDB(path)
+	if err != nil {
+		t.Fatalf("first open must not crash-loop on duplicate ids: %v", err)
+	}
+	rows, err := d.GetTokenUsageByProject(time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("read after backfill: %v", err)
+	}
+	if len(rows) != 1 || rows[0].CallCount != 3 {
+		t.Fatalf("no data loss expected: want 3 rows, got %+v", rows)
+	}
+	if tableExistsIn(t, path, "token_usage") {
+		t.Errorf("legacy token_usage should be dropped once all rows are in analytics")
+	}
+	_ = d.Close()
+
+	// Second open (init runs again): idempotent — clean boot, still exactly 3 rows.
+	d2, err := NewTestDB(path)
+	if err != nil {
+		t.Fatalf("second open must be idempotent, got: %v", err)
+	}
+	defer func() { _ = d2.Close() }()
+	rows2, err := d2.GetTokenUsageByProject(time.Now().UTC().Add(-time.Hour).Format(time.RFC3339))
+	if err != nil {
+		t.Fatalf("read after second open: %v", err)
+	}
+	if len(rows2) != 1 || rows2[0].CallCount != 3 {
+		t.Fatalf("idempotent re-open changed the data: got %+v", rows2)
+	}
+}
+
+// TestBackfillKeepsLegacyOnIdConflict asserts that when analytics already holds a
+// DIFFERENT row under an id that also exists in the legacy table (id-space overlap
+// with content mismatch), init still boots clean AND never drops the legacy table —
+// so the legacy row is preserved, not silently clobbered. Zero data loss.
+func TestBackfillKeepsLegacyOnIdConflict(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "relay.db")
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Legacy coordination DB: id 1 = agent "legacy", id 2 = agent "legacy".
+	seed, err := sql.Open("sqlite3", path+"?_foreign_keys=ON")
+	if err != nil {
+		t.Fatalf("open seed: %v", err)
+	}
+	if _, err := seed.Exec(tokenUsageSchema); err != nil {
+		t.Fatalf("seed coord schema: %v", err)
+	}
+	seedTokenUsage(t, seed, 1, "legacy", now)
+	seedTokenUsage(t, seed, 2, "legacy", now)
+	_ = seed.Close()
+
+	// Analytics DB already holds id 1 with DIFFERENT content (a live-written row).
+	apath := analyticsDBPath(path)
+	aseed, err := sql.Open("sqlite3", apath+"?_foreign_keys=ON")
+	if err != nil {
+		t.Fatalf("open analytics seed: %v", err)
+	}
+	if _, err := aseed.Exec(tokenUsageSchema); err != nil {
+		t.Fatalf("seed analytics schema: %v", err)
+	}
+	seedTokenUsage(t, aseed, 1, "live", now)
+	_ = aseed.Close()
+
+	d, err := NewTestDB(path)
+	if err != nil {
+		t.Fatalf("open must not crash on id conflict: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	// Legacy table must be KEPT (its id-1 row conflicts and must not be lost).
+	if !tableExistsIn(t, path, "token_usage") {
+		t.Errorf("legacy table must be kept when an id conflicts with different analytics content")
+	}
+	// The legacy row is intact in the coordination DB.
+	var legacyAgent string
+	if err := d.conn.QueryRow(`SELECT agent FROM main.token_usage WHERE id=1`).Scan(&legacyAgent); err != nil {
+		t.Fatalf("legacy id=1 lost: %v", err)
+	}
+	if legacyAgent != "legacy" {
+		t.Errorf("legacy id=1 clobbered: got agent %q", legacyAgent)
+	}
+	// Analytics keeps its own id-1 row and gained the non-conflicting id-2 row.
+	var liveAgent string
+	if err := d.conn.QueryRow(`SELECT agent FROM analytics.token_usage WHERE id=1`).Scan(&liveAgent); err != nil {
+		t.Fatalf("analytics id=1 lost: %v", err)
+	}
+	if liveAgent != "live" {
+		t.Errorf("analytics id=1 overwritten: got agent %q", liveAgent)
+	}
+	var id2 int
+	if err := d.conn.QueryRow(`SELECT COUNT(*) FROM analytics.token_usage WHERE id=2`).Scan(&id2); err != nil {
+		t.Fatalf("query analytics id=2: %v", err)
+	}
+	if id2 != 1 {
+		t.Errorf("non-conflicting id=2 should have migrated to analytics, got count %d", id2)
+	}
+}
+
 // TestTokenUsageDailyRollup asserts the rollup aggregates raw rows and survives a
 // raw purge, so shortened retention keeps aggregate history.
 // rollupDayCount returns how many token_usage_daily rows exist for a UTC day.

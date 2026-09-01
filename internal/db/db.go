@@ -1374,6 +1374,19 @@ func migrateTokenUsageToAnalytics(conn *sql.DB) error {
 	// One-time backfill: if the legacy table still sits in the coordination DB,
 	// move its rows into analytics, drop it, and reclaim the pages. sqlite_master
 	// (unqualified) is the main DB's; after the drop this branch is a no-op.
+	//
+	// Idempotent + partial-retry safe: this is NOT one atomic step — the copy,
+	// the DROP, and the VACUUM run as separate statements (VACUUM cannot run in a
+	// transaction), so a crash between the copy and the drop leaves the legacy
+	// table in place and analytics already holding some/all of its ids. On the
+	// next boot a plain INSERT would then re-copy those ids and hit the analytics
+	// PK: `UNIQUE constraint failed: token_usage.id`. That surfaced as a fatal
+	// migration error, aborting init and crash-looping the relay on upgrade
+	// (synx-prod prod, 2026-09-01, ~34 restarts, recovered only by a data-losing
+	// DB reset). The backfill must therefore NEVER abort init: INSERT OR IGNORE
+	// makes the copy conflict-tolerant, the drop is gated on every legacy id
+	// already being present in analytics (so a genuinely id-conflicting legacy
+	// row is kept, not lost), and any error here degrades to a logged skip.
 	var legacy int
 	_ = conn.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='token_usage'`).Scan(&legacy)
 	if legacy > 0 {
@@ -1386,18 +1399,45 @@ func migrateTokenUsageToAnalytics(conn *sql.DB) error {
 			"cache_creation_tokens": "INTEGER NOT NULL DEFAULT 0",
 			"model":                 "TEXT NOT NULL DEFAULT ''",
 		})
-		if _, err := conn.Exec(`INSERT INTO analytics.token_usage
+		// OR IGNORE: skip any id already migrated (partial prior run or duplicate),
+		// so the copy can never violate the analytics PK and never aborts init.
+		if _, err := conn.Exec(`INSERT OR IGNORE INTO analytics.token_usage
 			(id, project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model, created_at)
 			SELECT id, project, agent, tool, bytes, input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model, created_at
 			FROM main.token_usage`); err != nil {
-			return fmt.Errorf("backfill token_usage into analytics: %w", err)
+			log.Printf("[db] token_usage backfill copy skipped (non-fatal): %v", err)
+			return nil
+		}
+		// Only drop the legacy table once EVERY legacy row is present in analytics
+		// with IDENTICAL content. Matching on id alone is not enough: if OR IGNORE
+		// skipped a legacy id because analytics already holds a DIFFERENT row under
+		// that id (e.g. a legacy DB restored over a live-grown analytics), dropping
+		// would lose the legacy row. Full-column match guarantees zero data loss —
+		// otherwise keep the legacy table, log, and let a later boot reconcile.
+		var unmigrated int
+		_ = conn.QueryRow(`SELECT COUNT(*) FROM main.token_usage m
+			WHERE NOT EXISTS (
+				SELECT 1 FROM analytics.token_usage a
+				WHERE a.id = m.id
+					AND a.project = m.project AND a.agent = m.agent AND a.tool = m.tool
+					AND a.bytes = m.bytes AND a.input_tokens = m.input_tokens
+					AND a.output_tokens = m.output_tokens
+					AND a.cache_read_tokens = m.cache_read_tokens
+					AND a.cache_creation_tokens = m.cache_creation_tokens
+					AND a.model = m.model AND a.created_at = m.created_at
+			)`).Scan(&unmigrated)
+		if unmigrated > 0 {
+			log.Printf("[db] token_usage backfill: %d legacy row(s) conflict with existing analytics ids; keeping legacy table (non-fatal, retry next boot)", unmigrated)
+			return nil
 		}
 		if _, err := conn.Exec(`DROP TABLE main.token_usage`); err != nil {
-			return fmt.Errorf("drop legacy token_usage: %w", err)
+			log.Printf("[db] token_usage backfill: drop legacy table skipped (non-fatal): %v", err)
+			return nil
 		}
 		// Reclaim the freed pages so the coordination DB actually shrinks (402->~85MB).
 		if _, err := conn.Exec(`VACUUM main`); err != nil {
-			return fmt.Errorf("vacuum coordination DB after token_usage move: %w", err)
+			log.Printf("[db] token_usage backfill: vacuum skipped (non-fatal): %v", err)
+			return nil
 		}
 		log.Printf("[db] moved token_usage to analytics DB and reclaimed the coordination DB")
 	}
