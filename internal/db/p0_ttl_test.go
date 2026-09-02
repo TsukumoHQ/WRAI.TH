@@ -46,7 +46,7 @@ func TestNormalizeTTLPolicy(t *testing.T) {
 // survives an expiry sweep, and stays surfaced in the inbox.
 func TestP0InsertedTTLForcedNeverExpires(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "urgent", "c", "{}", "P0", 3600, nil, nil, []string{"bot-a"}, "")
+	m, _, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "urgent", "c", "{}", "P0", 3600, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestP0InsertedTTLForcedNeverExpires(t *testing.T) {
 // even after its TTL window has elapsed.
 func TestLegacyP0WithTTLStillNeverExpires(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "urgent", "c", "{}", "P0", 0, nil, nil, []string{"bot-a"}, "")
+	m, _, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "urgent", "c", "{}", "P0", 0, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestLegacyP0WithTTLStillNeverExpires(t *testing.T) {
 // accidentally keep everything alive.
 func TestNonP0StillExpires(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "stale", "c", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "")
+	m, _, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "stale", "c", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}

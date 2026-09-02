@@ -8,7 +8,7 @@ func TestMarkDeliveriesSurfaced_Batch(t *testing.T) {
 	d := testDB(t)
 	var ids []string
 	for i := 0; i < 5; i++ {
-		if _, err := d.InsertMessageWithDeliveries("p", "cto", "b", "notification", "s", "c", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
+		if _, _, err := d.InsertMessageWithDeliveries("p", "cto", "b", "notification", "s", "c", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
 			t.Fatalf("insert: %v", err)
 		}
 	}

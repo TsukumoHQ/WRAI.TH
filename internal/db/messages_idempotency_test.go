@@ -11,13 +11,19 @@ import "testing"
 func TestInsertMessageWithDeliveries_SameIdempotencyKeyReturnsSameMessage(t *testing.T) {
 	d := testDB(t)
 
-	m1, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a", "bot-b"}, "", "retry-key-1")
+	m1, dedup1, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a", "bot-b"}, "", "retry-key-1")
 	if err != nil {
 		t.Fatalf("first insert: %v", err)
 	}
-	m2, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a", "bot-b"}, "", "retry-key-1")
+	if dedup1 {
+		t.Fatalf("first insert must not report a dedup hit")
+	}
+	m2, dedup2, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a", "bot-b"}, "", "retry-key-1")
 	if err != nil {
 		t.Fatalf("second insert (retry): %v", err)
+	}
+	if !dedup2 {
+		t.Fatalf("retry with matching idempotency_key must report a dedup hit")
 	}
 	if m1.ID != m2.ID {
 		t.Fatalf("expected same message ID on retry, got %s then %s", m1.ID, m2.ID)
@@ -43,11 +49,11 @@ func TestInsertMessageWithDeliveries_SameIdempotencyKeyReturnsSameMessage(t *tes
 func TestInsertMessageWithDeliveries_DifferentOrNoKeyCreatesNewMessage(t *testing.T) {
 	d := testDB(t)
 
-	m1, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "", "key-a")
+	m1, _, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "", "key-a")
 	if err != nil {
 		t.Fatalf("insert with key-a: %v", err)
 	}
-	m2, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "", "key-b")
+	m2, _, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "", "key-b")
 	if err != nil {
 		t.Fatalf("insert with key-b: %v", err)
 	}
@@ -55,11 +61,11 @@ func TestInsertMessageWithDeliveries_DifferentOrNoKeyCreatesNewMessage(t *testin
 		t.Fatalf("different idempotency keys must not collide, got same ID %s", m1.ID)
 	}
 
-	m3, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "")
+	m3, _, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("insert with no key: %v", err)
 	}
-	m4, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "")
+	m4, _, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "body", "{}", "P2", 0, nil, nil, []string{"bot-a"}, "")
 	if err != nil {
 		t.Fatalf("second insert with no key: %v", err)
 	}

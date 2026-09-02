@@ -1,6 +1,12 @@
 package relay
 
-import "testing"
+import (
+	"bytes"
+	"log"
+	"os"
+	"strings"
+	"testing"
+)
 
 // Task ac328091: send_message accepts an optional idempotency_key. Two calls
 // with the same key return the same message id and do not duplicate the
@@ -65,5 +71,41 @@ func TestSendMessage_NoOrDifferentIdempotencyKeyCreatesNewMessage(t *testing.T) 
 	id2 := parseJSON(t, res2)["id"].(string)
 	if id1 == id2 {
 		t.Fatalf("identical-content resends without a key must never dedup, got same id %s", id1)
+	}
+}
+
+// Task cee47c61: a retried send that hits the idempotency dedup path must not
+// push a second live wake (registry.Notify) — only the first, genuinely new
+// send should. SessionRegistry.Notify has no return value or counter to
+// assert on directly, but a session bound to the recipient makes it attempt
+// (and fail, since no real MCP client is attached) mcpSrv.SendNotificationTo-
+// SpecificClient, which is logged. Capturing that log line is a real signal
+// that Notify's send loop executed for that recipient — not a proxy — for
+// exactly the send under test.
+func TestSendMessage_DedupHitSuppressesNotify(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b"}))
+	h.registry.Register("p1", "bot-b", "fake-session")
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	_, _ = h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "retry me",
+		"idempotency_key": "dedup-notify-1",
+	}))
+	if !strings.Contains(buf.String(), "notify bot-b") {
+		t.Fatalf("expected a Notify attempt on the first (non-dedup) send, got log: %q", buf.String())
+	}
+
+	buf.Reset()
+	_, _ = h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "retry me",
+		"idempotency_key": "dedup-notify-1",
+	}))
+	if strings.Contains(buf.String(), "notify bot-b") {
+		t.Fatalf("dedup-hit retry must not push a second Notify, got log: %q", buf.String())
 	}
 }

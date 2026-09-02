@@ -19,7 +19,7 @@ func TestBackupRestoreDrill(t *testing.T) {
 		}
 	}
 	for i := 0; i < 5; i++ {
-		if _, err := d.InsertMessageWithDeliveries("default", "a0", "a1", "notification", "s", "m", "{}", "P2", 3600, nil, nil, []string{"a1"}, ""); err != nil {
+		if _, _, err := d.InsertMessageWithDeliveries("default", "a0", "a1", "notification", "s", "m", "{}", "P2", 3600, nil, nil, []string{"a1"}, ""); err != nil {
 			t.Fatalf("insert msg %d: %v", i, err)
 		}
 	}

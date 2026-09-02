@@ -173,7 +173,13 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 // is returned as-is — no new row, no new deliveries — instead of creating a
 // duplicate. Retries without a key (the default) dedup nothing, matching prior
 // behavior; see DEC-general (outbox duplicate-delivery, task ac328091).
-func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string, actionRequired string, idempotencyKey ...string) (*models.Message, error) {
+//
+// The second return value is dedupHit: true when the idempotency key matched
+// an existing message (no new row/delivery was written). Callers that fan out
+// a live wake push (SSE Notify/NotifyBroadcast) after the insert MUST check it
+// and skip the push on a dedup hit — the recipient already saw this message,
+// so re-pushing is a duplicate wake, not a duplicate delivery (task cee47c61).
+func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string, actionRequired string, idempotencyKey ...string) (*models.Message, bool, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {
 		priority = "P2"
@@ -208,7 +214,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 
 	tx, err := d.beginWriterTx()
 	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
+		return nil, false, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once committed
 
@@ -219,11 +225,12 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 			project, from, key,
 		).Scan(&existingID)
 		if err != nil && err != sql.ErrNoRows {
-			return nil, fmt.Errorf("idempotency lookup: %w", err)
+			return nil, false, fmt.Errorf("idempotency lookup: %w", err)
 		}
 		if err == nil {
 			_ = tx.Rollback()
-			return d.GetMessage(existingID)
+			existing, err := d.GetMessage(existingID)
+			return existing, true, err
 		}
 	}
 
@@ -235,7 +242,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag, traceID, keyVal,
 	); err != nil {
-		return nil, fmt.Errorf("insert message: %w", err)
+		return nil, false, fmt.Errorf("insert message: %w", err)
 	}
 
 	for i, agent := range recipients {
@@ -243,14 +250,14 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 			"INSERT INTO deliveries (id, message_id, to_agent, state, sequence_number, created_at, project) VALUES (?, ?, ?, 'queued', ?, ?, ?)",
 			uuid.New().String(), msg.ID, agent, i, now, project,
 		); err != nil {
-			return nil, fmt.Errorf("create delivery for %s: %w", agent, err)
+			return nil, false, fmt.Errorf("create delivery for %s: %w", agent, err)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit message+deliveries: %w", err)
+		return nil, false, fmt.Errorf("commit message+deliveries: %w", err)
 	}
-	return msg, nil
+	return msg, false, nil
 }
 
 // InboxFilter holds optional filtering parameters for get_inbox.

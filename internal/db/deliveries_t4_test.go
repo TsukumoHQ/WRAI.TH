@@ -6,7 +6,7 @@ import "testing"
 // timestamps are queryable by message_id and by recipient agent.
 func TestDeliveryStatusQueryable(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "c", "{}", "P1", 0, nil, nil, []string{"bot-a", "bot-b"}, "")
+	m, _, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "s", "c", "{}", "P1", 0, nil, nil, []string{"bot-a", "bot-b"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
@@ -61,13 +61,13 @@ func TestDeliveryStatusQueryable(t *testing.T) {
 // OTHER project (current project excluded), bodies never included.
 func TestCrossProjectUnreadRollup(t *testing.T) {
 	d := testDB(t)
-	if _, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "s", "c", "{}", "P2", 0, nil, nil, []string{"bot-a"}, ""); err != nil {
+	if _, _, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "s", "c", "{}", "P2", 0, nil, nil, []string{"bot-a"}, ""); err != nil {
 		t.Fatalf("p1 msg: %v", err)
 	}
-	if _, err := d.InsertMessageWithDeliveries("p2", "s", "bot-a", "notification", "s", "c", "{}", "P0", 0, nil, nil, []string{"bot-a"}, ""); err != nil {
+	if _, _, err := d.InsertMessageWithDeliveries("p2", "s", "bot-a", "notification", "s", "c", "{}", "P0", 0, nil, nil, []string{"bot-a"}, ""); err != nil {
 		t.Fatalf("p2 p0: %v", err)
 	}
-	if _, err := d.InsertMessageWithDeliveries("p2", "s", "bot-a", "notification", "s", "c", "{}", "P2", 0, nil, nil, []string{"bot-a"}, ""); err != nil {
+	if _, _, err := d.InsertMessageWithDeliveries("p2", "s", "bot-a", "notification", "s", "c", "{}", "P2", 0, nil, nil, []string{"bot-a"}, ""); err != nil {
 		t.Fatalf("p2 p2: %v", err)
 	}
 
@@ -92,7 +92,7 @@ func TestCrossProjectUnreadRollup(t *testing.T) {
 // / get_message / get_team_inbox attach an ack-able delivery_id.
 func TestDeliveryIDsForAgent(t *testing.T) {
 	d := testDB(t)
-	m, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "s", "c", "{}", "P2", 0, nil, nil, []string{"bot-a", "bot-b"}, "")
+	m, _, err := d.InsertMessageWithDeliveries("p1", "s", "bot-a", "notification", "s", "c", "{}", "P2", 0, nil, nil, []string{"bot-a", "bot-b"}, "")
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}

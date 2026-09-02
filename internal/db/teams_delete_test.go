@@ -55,7 +55,7 @@ func TestUnreadCountForAgent(t *testing.T) {
 		t.Fatalf("empty inbox: got %d, err %v", n, err)
 	}
 
-	if _, err := d.InsertMessageWithDeliveries("proj", "alice", "bob", "note", "hi", "body", "", "normal", 0, nil, nil, []string{"bob"}, ""); err != nil {
+	if _, _, err := d.InsertMessageWithDeliveries("proj", "alice", "bob", "note", "hi", "body", "", "normal", 0, nil, nil, []string{"bob"}, ""); err != nil {
 		t.Fatalf("insert msg: %v", err)
 	}
 	// Count must not mutate delivery state, so a second call is still 1.

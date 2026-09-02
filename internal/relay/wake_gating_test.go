@@ -60,3 +60,39 @@ func waitForMessageEvent(t *testing.T, sub chan MCPEvent) MCPEvent {
 		}
 	}
 }
+
+// Task cee47c61 round 2: the "message" MCPEvent is this same wake channel —
+// agentd gates on it straight off the SSE envelope (no message_id to dedup
+// on), so a dedup-hit retry must not emit a second one either, on top of the
+// registry.Notify suppression.
+func TestSendMessage_DedupHitSuppressesMessageEvent(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-a", "role": "dev"}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "bot-b", "role": "dev"}))
+
+	if _, err := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "retry me",
+		"idempotency_key": "dedup-event-1",
+	})); err != nil {
+		t.Fatalf("first send: %v", err)
+	}
+
+	sub := h.events.Subscribe()
+	defer h.events.Unsubscribe(sub)
+
+	if _, err := h.HandleSendMessage(ctx, call(map[string]any{
+		"project": "p1", "as": "bot-a", "to": "bot-b", "content": "retry me",
+		"idempotency_key": "dedup-event-1",
+	})); err != nil {
+		t.Fatalf("dedup-hit retry: %v", err)
+	}
+
+	select {
+	case e := <-sub:
+		if e.Type == "message" {
+			t.Fatalf("dedup-hit retry must not emit a second Type:\"message\" event, got %+v", e)
+		}
+	case <-time.After(300 * time.Millisecond):
+		// no message event — correct.
+	}
+}

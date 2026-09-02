@@ -16,7 +16,7 @@ func TestUnreadCountExcludesSurfaced(t *testing.T) {
 	if _, _, err := d.RegisterAgent("p", "bob", "dev", "", nil, nil, false, nil, "[]", 0, RegisterOptions{}); err != nil {
 		t.Fatalf("register: %v", err)
 	}
-	if _, err := d.InsertMessageWithDeliveries("p", "alice", "bob", "note", "hi", "body", "", "P2", 0, nil, nil, []string{"bob"}, ""); err != nil {
+	if _, _, err := d.InsertMessageWithDeliveries("p", "alice", "bob", "note", "hi", "body", "", "P2", 0, nil, nil, []string{"bob"}, ""); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 
@@ -53,7 +53,7 @@ func TestAcknowledgeConversationDeliveries(t *testing.T) {
 		t.Fatalf("register: %v", err)
 	}
 	cid := "conv-1"
-	if _, err := d.InsertMessageWithDeliveries("p", "alice", "", "note", "s", "c", "", "P2", 0, nil, &cid, []string{"bob"}, ""); err != nil {
+	if _, _, err := d.InsertMessageWithDeliveries("p", "alice", "", "note", "s", "c", "", "P2", 0, nil, &cid, []string{"bob"}, ""); err != nil {
 		t.Fatalf("insert: %v", err)
 	}
 	if n, _ := d.UnreadCountForAgent("p", "bob"); n != 1 {

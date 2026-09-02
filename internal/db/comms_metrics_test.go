@@ -13,14 +13,14 @@ func TestCommsMetricsSnapshot(t *testing.T) {
 	d := testDB(t)
 
 	// cto: a wake (task/do), a no-wake (notification/none), a wake (question/ask).
-	task, _ := d.InsertMessageWithDeliveries("p", "cto", "b", "task", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
-	if _, err := d.InsertMessageWithDeliveries("p", "cto", "b", "notification", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
+	task, _, _ := d.InsertMessageWithDeliveries("p", "cto", "b", "task", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
+	if _, _, err := d.InsertMessageWithDeliveries("p", "cto", "b", "notification", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
 		t.Fatalf("notif: %v", err)
 	}
-	q, _ := d.InsertMessageWithDeliveries("p", "cto", "b", "question", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
+	q, _, _ := d.InsertMessageWithDeliveries("p", "cto", "b", "question", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
 	// worker: two no-wakes.
-	_, _ = d.InsertMessageWithDeliveries("p", "worker", "b", "fyi", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
-	_, _ = d.InsertMessageWithDeliveries("p", "worker", "b", "status", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
+	_, _, _ = d.InsertMessageWithDeliveries("p", "worker", "b", "fyi", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
+	_, _, _ = d.InsertMessageWithDeliveries("p", "worker", "b", "status", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, "")
 
 	// Deterministic read receipt on the task: read 30s after send → under-1m bucket.
 	created, _ := time.Parse(memoryTimeFmt, task.CreatedAt)
@@ -79,7 +79,7 @@ func TestCommsMetricsSnapshot(t *testing.T) {
 func TestCommsMetricsMsgLength(t *testing.T) {
 	d := testDB(t)
 	for _, n := range []int{10, 20, 30, 40, 100} {
-		if _, err := d.InsertMessageWithDeliveries("lp", "cto", "b", "notification", "s",
+		if _, _, err := d.InsertMessageWithDeliveries("lp", "cto", "b", "notification", "s",
 			strings.Repeat("a", n), "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
 			t.Fatalf("insert len %d: %v", n, err)
 		}

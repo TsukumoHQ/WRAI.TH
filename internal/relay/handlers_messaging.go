@@ -162,15 +162,21 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			}
 		}
 
-		msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
+		msg, dedupHit, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
 		if err != nil {
 			return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 		}
 
-		// Best-effort bookkeeping + notifications after the durable write.
+		// Best-effort bookkeeping + notifications after the durable write. On a
+		// dedup hit no new message/delivery rows were written, so a wake push
+		// here would be a duplicate wake for something the recipient already
+		// saw (task cee47c61); AddToTeamInbox is idempotent (INSERT OR IGNORE)
+		// so it stays unconditional.
 		_ = h.db.AddToTeamInbox(team.ID, msg.ID)
-		for _, member := range recipients {
-			h.registry.Notify(project, member, from, subject, msg.ID)
+		if !dedupHit {
+			for _, member := range recipients {
+				h.registry.Notify(project, member, from, subject, msg.ID)
+			}
 		}
 
 		return h.resultJSONTracked(project, from, "send_message", msg)
@@ -190,32 +196,44 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// Resolve fan-out recipients first, then insert message + deliveries atomically
 	// so a message can never be persisted without its deliveries (silent non-delivery).
 	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
-	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
+	msg, dedupHit, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
 	}
 
-	// Push notification
-	if conversationID != nil {
-		h.notifyConversation(project, *conversationID, from, subject, msg.ID)
-	} else if to == "*" {
-		h.registry.NotifyBroadcast(project, from, subject, msg.ID)
-	} else {
-		h.registry.Notify(project, to, from, subject, msg.ID)
+	// Push notification. Skipped on a dedup hit — no new message/delivery rows
+	// were written, so pushing here would be a second wake for a send the
+	// recipient already saw (task cee47c61).
+	if !dedupHit {
+		if conversationID != nil {
+			h.notifyConversation(project, *conversationID, from, subject, msg.ID)
+		} else if to == "*" {
+			h.registry.NotifyBroadcast(project, from, subject, msg.ID)
+		} else {
+			h.registry.Notify(project, to, from, subject, msg.ID)
+		}
 	}
 
 	// Emit visual event for activity feed / SSE subscribers. Action distinguishes
-	// broadcast / team / conversation / direct so the UI can render icons.
-	action := "send"
-	switch {
-	case to == "*":
-		action = "broadcast"
-	case strings.HasPrefix(to, "team:"):
-		action = "team"
-	case conversationID != nil:
-		action = "conversation"
+	// broadcast / team / conversation / direct so the UI can render icons. This
+	// "message" MCPEvent is also the wake daemon's SSE envelope (agentd sse.rs
+	// gates on Type/Priority/MsgType straight off it, no inbox fetch — see
+	// wake_gating_test.go) and it carries no message_id for agentd to dedup on,
+	// so it must be skipped on a dedup hit too, same as the push notifications
+	// above — otherwise a retried send still wakes the recipient a second time
+	// via this channel even with Notify suppressed (task cee47c61).
+	if !dedupHit {
+		action := "send"
+		switch {
+		case to == "*":
+			action = "broadcast"
+		case strings.HasPrefix(to, "team:"):
+			action = "team"
+		case conversationID != nil:
+			action = "conversation"
+		}
+		h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: subject, Priority: priority, MsgType: msgType})
 	}
-	h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: subject, Priority: priority, MsgType: msgType})
 
 	return h.resultJSONTracked(project, from, "send_message", msg)
 }
@@ -305,7 +323,7 @@ func (h *Handlers) HandleSendStatus(ctx context.Context, req mcp.CallToolRequest
 	// guard-first predicate). Recipients resolved first so the message is never
 	// persisted without its deliveries.
 	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
-	msg, err := h.db.InsertMessageWithDeliveries(project, from, to, "status", "status", content, metadata, priority, ttlSeconds, nil, conversationID, recipients, "none")
+	msg, _, err := h.db.InsertMessageWithDeliveries(project, from, to, "status", "status", content, metadata, priority, ttlSeconds, nil, conversationID, recipients, "none")
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send status: %v", err)), nil
 	}

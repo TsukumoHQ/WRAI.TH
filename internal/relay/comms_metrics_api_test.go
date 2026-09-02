@@ -9,10 +9,10 @@ import (
 func TestApiGetCommsMetrics(t *testing.T) {
 	r := testRelay(t)
 	// A wake (task) and a no-wake (notification) in project p.
-	if _, err := r.DB.InsertMessageWithDeliveries("p", "cto", "b", "task", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
+	if _, _, err := r.DB.InsertMessageWithDeliveries("p", "cto", "b", "task", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
 		t.Fatalf("task: %v", err)
 	}
-	if _, err := r.DB.InsertMessageWithDeliveries("p", "cto", "b", "notification", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
+	if _, _, err := r.DB.InsertMessageWithDeliveries("p", "cto", "b", "notification", "s", "x", "{}", "P2", 3600, nil, nil, []string{"b"}, ""); err != nil {
 		t.Fatalf("notif: %v", err)
 	}
 

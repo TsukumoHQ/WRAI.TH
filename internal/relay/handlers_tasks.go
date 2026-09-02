@@ -269,7 +269,7 @@ func (h *Handlers) announceClaimable(project, dispatchedBy, profile, title, desc
 		if description != "" && len(description) <= 200 {
 			content += "\n\n" + description
 		}
-		_, _ = h.db.InsertMessageWithDeliveries(project, dispatchedBy, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, task.ID), "P2", 14400, nil, nil, []string{a.Name}, "")
+		_, _, _ = h.db.InsertMessageWithDeliveries(project, dispatchedBy, a.Name, "task", subject, content, fmt.Sprintf(`{"task_id":"%s"}`, task.ID), "P2", 14400, nil, nil, []string{a.Name}, "")
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: dispatchedBy, Project: project, Target: profile, Label: title})
 	emitTaskEvent(h.events, "task.dispatched", "dispatch", project, task)

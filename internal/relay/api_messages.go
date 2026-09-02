@@ -197,7 +197,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 				recipients = append(recipients, m)
 			}
 		}
-		msg, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
+		msg, _, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
 		if err != nil {
 			http.Error(w, `{"error":"failed to send"}`, http.StatusInternalServerError)
 			return
@@ -213,7 +213,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 
 	// Direct or broadcast.
 	recipients, _ := r.DB.ResolveRecipients(project, to, from, nil)
-	msg, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
+	msg, _, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
 	if err != nil {
 		http.Error(w, `{"error":"failed to send"}`, http.StatusInternalServerError)
 		return

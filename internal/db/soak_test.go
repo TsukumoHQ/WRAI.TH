@@ -69,7 +69,7 @@ func TestSoakConcurrentAgents(t *testing.T) {
 			me := names[idx]
 			for j := 0; j < iters; j++ {
 				to := names[(idx+1+j)%agents] // deterministic rotating recipient
-				if _, err := d.InsertMessageWithDeliveries("default", me, to, "notification", "soak", "m", "{}", "P2", 3600, nil, nil, []string{to}, ""); err != nil {
+				if _, _, err := d.InsertMessageWithDeliveries("default", me, to, "notification", "soak", "m", "{}", "P2", 3600, nil, nil, []string{to}, ""); err != nil {
 					errs.Add(1)
 					continue
 				}
@@ -142,7 +142,7 @@ func BenchmarkInsertMessageWithDeliveries(b *testing.B) {
 	_, _, _ = d.RegisterAgent("default", "to", "b", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := d.InsertMessageWithDeliveries("default", "from", "to", "notification", "s", "m", "{}", "P2", 3600, nil, nil, []string{"to"}, ""); err != nil {
+		if _, _, err := d.InsertMessageWithDeliveries("default", "from", "to", "notification", "s", "m", "{}", "P2", 3600, nil, nil, []string{"to"}, ""); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -154,7 +154,7 @@ func BenchmarkGetInbox(b *testing.B) {
 	_, _, _ = d.RegisterAgent("default", "from", "b", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	_, _, _ = d.RegisterAgent("default", "to", "b", "", nil, nil, false, nil, "[]", 0, RegisterOptions{})
 	for i := 0; i < 100; i++ {
-		_, _ = d.InsertMessageWithDeliveries("default", "from", "to", "notification", "s", "m", "{}", "P2", 3600, nil, nil, []string{"to"}, "")
+		_, _, _ = d.InsertMessageWithDeliveries("default", "from", "to", "notification", "s", "m", "{}", "P2", 3600, nil, nil, []string{"to"}, "")
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
