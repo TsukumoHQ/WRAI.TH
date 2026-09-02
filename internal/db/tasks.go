@@ -73,7 +73,7 @@ const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, descri
 	"git_branch, git_worktree, git_target, " +
 	"pr_url, pr_number, pr_state, pr_repo, " +
 	"integration_branch, run_state, " +
-	"goal, acceptance_criteria, dod, refusal_notified_at, " +
+	"goal, acceptance_criteria, dod, verify_cmd, refusal_notified_at, " +
 	"lease_holder, lease_expires_at, lease_heartbeat_at"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
@@ -88,7 +88,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.GitBranch, &t.GitWorktree, &t.GitTarget,
 		&t.PRURL, &t.PRNumber, &t.PRState, &t.PRRepo,
 		&t.IntegrationBranch, &t.RunState,
-		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.RefusalNotifiedAt,
+		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.VerifyCmd, &t.RefusalNotifiedAt,
 		&t.LeaseHolder, &t.LeaseExpiresAt, &t.LeaseHeartbeatAt)
 	return t, err
 }
@@ -103,6 +103,13 @@ type TypedTicket struct {
 	Goal               string // one-line intent
 	AcceptanceCriteria string // json array of testable items ("" normalised to "[]")
 	Dod                string // definition of done
+
+	// VerifyCmd is OPTIONAL and rides along with the ticket for convenience
+	// (same dispatch-time plumbing) but is deliberately NOT part of the typed-
+	// ticket contract Missing() enforces — its absence must never produce a
+	// TypedTicketError, on any project, enforced or not (task 6c1c5167 follow-up,
+	// DEC-niwa-goal-validate-1). nil = no command recorded.
+	VerifyCmd *string
 }
 
 // hasAcceptanceItems reports whether raw is a JSON array carrying ≥1 non-blank
@@ -331,15 +338,16 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		Goal:               ticket.Goal,
 		AcceptanceCriteria: acceptanceCriteria,
 		Dod:                ticket.Dod,
+		VerifyCmd:          ticket.VerifyCmd,
 		TraceID:            &tid,
 	}
 
 	_, err := d.writerExec(
-		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, trace_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?)`,
+		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
 		task.Priority, task.Status, task.Project, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
-		task.Goal, task.AcceptanceCriteria, task.Dod, tid,
+		task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, tid,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dispatch task: %w", err)
@@ -1118,15 +1126,16 @@ func (d *DB) ListAllTasks(limit int) ([]models.Task, error) {
 
 // UpdateTaskFields patches the free-form task fields (title/description/
 // priority/board) plus, when the caller passes them, the typed-ticket contract
-// (goal/acceptance_criteria/dod). Contract fields are audited: a re-scope
-// appends an old→new snapshot to the durable audit_log (RecordAudit) so the
-// pre-rescope contract stays consultable (GET /api/audit?resource=<task_id>)
-// instead of being silently overwritten. actor is the audit "who" — callers
-// that never touch the contract fields (e.g. move_task) may pass "" since no
-// audit entry is written when goal/acceptanceCriteria/dod are all nil.
+// (goal/acceptance_criteria/dod) and its optional sibling verify_cmd. Contract
+// fields are audited: a re-scope appends an old→new snapshot to the durable
+// audit_log (RecordAudit) so the pre-rescope contract stays consultable
+// (GET /api/audit?resource=<task_id>) instead of being silently overwritten.
+// actor is the audit "who" — callers that never touch the contract fields
+// (e.g. move_task) may pass "" since no audit entry is written when
+// goal/acceptanceCriteria/dod/verifyCmd are all nil.
 // PERMISSION (who may re-scope the contract) is the caller's job — enforced in
 // the handler, not here, so this stays a pure data + audit write.
-func (d *DB) UpdateTaskFields(taskID, project, actor string, title, description, priority, boardID, goal, acceptanceCriteria, dod *string) (*models.Task, error) {
+func (d *DB) UpdateTaskFields(taskID, project, actor string, title, description, priority, boardID, goal, acceptanceCriteria, dod, verifyCmd *string) (*models.Task, error) {
 	task, err := d.GetTask(taskID, project)
 	if err != nil {
 		return nil, err
@@ -1148,8 +1157,8 @@ func (d *DB) UpdateTaskFields(taskID, project, actor string, title, description,
 		task.BoardID = boardID
 	}
 
-	contractChanged := goal != nil || acceptanceCriteria != nil || dod != nil
-	oldGoal, oldAC, oldDod := task.Goal, task.AcceptanceCriteria, task.Dod
+	contractChanged := goal != nil || acceptanceCriteria != nil || dod != nil || verifyCmd != nil
+	oldGoal, oldAC, oldDod, oldVerifyCmd := task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd
 	if goal != nil {
 		task.Goal = *goal
 	}
@@ -1159,10 +1168,13 @@ func (d *DB) UpdateTaskFields(taskID, project, actor string, title, description,
 	if dod != nil {
 		task.Dod = *dod
 	}
+	if verifyCmd != nil {
+		task.VerifyCmd = verifyCmd
+	}
 
 	_, err = d.writerExec(
-		"UPDATE tasks SET title = ?, description = ?, priority = ?, board_id = ?, goal = ?, acceptance_criteria = ?, dod = ? WHERE id = ? AND project = ?",
-		task.Title, task.Description, task.Priority, task.BoardID, task.Goal, task.AcceptanceCriteria, task.Dod, taskID, project,
+		"UPDATE tasks SET title = ?, description = ?, priority = ?, board_id = ?, goal = ?, acceptance_criteria = ?, dod = ?, verify_cmd = ? WHERE id = ? AND project = ?",
+		task.Title, task.Description, task.Priority, task.BoardID, task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, taskID, project,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("update task: %w", err)
@@ -1170,8 +1182,8 @@ func (d *DB) UpdateTaskFields(taskID, project, actor string, title, description,
 
 	if contractChanged {
 		details, _ := json.Marshal(map[string]any{
-			"old": map[string]string{"goal": oldGoal, "acceptance_criteria": oldAC, "dod": oldDod},
-			"new": map[string]string{"goal": task.Goal, "acceptance_criteria": task.AcceptanceCriteria, "dod": task.Dod},
+			"old": map[string]any{"goal": oldGoal, "acceptance_criteria": oldAC, "dod": oldDod, "verify_cmd": oldVerifyCmd},
+			"new": map[string]any{"goal": task.Goal, "acceptance_criteria": task.AcceptanceCriteria, "dod": task.Dod, "verify_cmd": task.VerifyCmd},
 		})
 		_ = d.RecordAudit(models.AuditEntry{
 			Project:      project,

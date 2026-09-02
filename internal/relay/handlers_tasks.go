@@ -123,6 +123,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		Goal:               req.GetString("goal", ""),
 		AcceptanceCriteria: req.GetString("acceptance_criteria", ""),
 		Dod:                req.GetString("dod", ""),
+		VerifyCmd:          optionalString(req.GetString("verify_cmd", "")),
 	}
 
 	// Resolve a truncated board_id UUID prefix, or a board slug, to the full UUID
@@ -887,14 +888,18 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	goal := optionalString(req.GetString("goal", ""))
 	acceptanceCriteria := optionalString(req.GetString("acceptance_criteria", ""))
 	dod := optionalString(req.GetString("dod", ""))
+	verifyCmd := optionalString(req.GetString("verify_cmd", ""))
 
 	// The typed-ticket contract (goal/acceptance_criteria/dod) is the review
 	// gate's bar for this task. Re-scoping it is a DISPATCHER decision — the
 	// assignee doing the work never rewrites their own contract — and every
 	// re-scope must land in the audit trail (UpdateTaskFields records it), never
 	// silently overwrite it. This used to silently DROP these three fields
-	// (neither parsed nor written); refuse explicitly instead.
-	if goal != nil || acceptanceCriteria != nil || dod != nil {
+	// (neither parsed nor written); refuse explicitly instead. verify_cmd rides
+	// the same gate — it is the same dispatcher-owned contract surface (task
+	// 6c1c5167 follow-up, DEC-niwa-goal-validate-1) even though its absence is
+	// never enforced.
+	if goal != nil || acceptanceCriteria != nil || dod != nil || verifyCmd != nil {
 		existing, gErr := h.db.GetTask(taskID, project)
 		if gErr != nil {
 			return toolResultError(fmt.Sprintf("failed to update task: %v", gErr)), nil
@@ -904,7 +909,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		}
 		if agent != existing.DispatchedBy {
 			return permissionError(CodeForbidden, fmt.Sprintf(
-				"goal/acceptance_criteria/dod can only be updated by this task's dispatcher (%s), not the assignee (%s) — re-dispatch instead of re-scoping your own contract",
+				"goal/acceptance_criteria/dod/verify_cmd can only be updated by this task's dispatcher (%s), not the assignee (%s) — re-dispatch instead of re-scoping your own contract",
 				existing.DispatchedBy, agent)), nil
 		}
 		if acceptanceCriteria != nil {
@@ -915,7 +920,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	task, err := h.db.UpdateTaskFields(taskID, project, agent, title, description, priority, boardID, goal, acceptanceCriteria, dod)
+	task, err := h.db.UpdateTaskFields(taskID, project, agent, title, description, priority, boardID, goal, acceptanceCriteria, dod, verifyCmd)
 	if err != nil {
 		return taskOpError(err, "failed to update task: %v", err), nil
 	}
@@ -979,7 +984,7 @@ func (h *Handlers) HandleMoveTask(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
-	task, err := h.db.UpdateTaskFields(taskID, project, agent, nil, nil, nil, boardID, nil, nil, nil)
+	task, err := h.db.UpdateTaskFields(taskID, project, agent, nil, nil, nil, boardID, nil, nil, nil, nil)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to move task: %v", err)), nil
 	}
@@ -1058,6 +1063,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		Goal               string   `json:"goal"`
 		AcceptanceCriteria []string `json:"acceptance_criteria"`
 		Dod                string   `json:"dod"`
+		VerifyCmd          *string  `json:"verify_cmd"`
 	}
 	if err := json.Unmarshal([]byte(tasksJSON), &items); err != nil {
 		return toolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
@@ -1088,7 +1094,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		if priority == "" {
 			priority = "P2"
 		}
-		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod}
+		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod, VerifyCmd: item.VerifyCmd}
 		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, false, nil)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", item.Title, err))

@@ -461,6 +461,7 @@ func dispatchTaskTool() mcp.Tool {
 		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required where typed tickets are enforced (e.g. niwa); optional elsewhere.")),
 		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array of testable items, e.g. '[\"builds green\"]'. Review gate verdicts per item. Required where enforced.")),
 		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done. Required where enforced.")),
+		mcp.WithString("verify_cmd", mcp.Description("Optional: a command the niwa gate reviewer runs to validate this ticket. Never required, even where typed tickets are enforced.")),
 		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog' (groomed; promote_task lifts it to pending). Default false.")),
 		mcp.WithString("trace_id", mcp.Description("32-hex correlation id; auto-minted if omitted.")),
 	)
@@ -671,7 +672,7 @@ func batchDispatchTasksTool() mcp.Tool {
 		mcp.WithDescription("Dispatch multiple tasks at once. On projects that enforce typed tickets (e.g. niwa) each item must carry goal + acceptance_criteria + dod; an item missing any is skipped and reported in errors while the rest dispatch."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\",\"goal\":\"...\",\"acceptance_criteria\":[\"item1\",\"item2\"],\"dod\":\"...\"}]. profile and title always required; goal/acceptance_criteria/dod required only where typed tickets are enforced (acceptance_criteria is a real JSON array here, not a string)."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\",\"goal\":\"...\",\"acceptance_criteria\":[\"item1\",\"item2\"],\"dod\":\"...\",\"verify_cmd\":\"...\"}]. profile and title always required; goal/acceptance_criteria/dod required only where typed tickets are enforced (acceptance_criteria is a real JSON array here, not a string); verify_cmd is always optional."), mcp.Required()),
 	)
 }
 
@@ -731,7 +732,7 @@ func deleteBoardTool() mcp.Tool {
 func updateTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"update_task",
-		mcp.WithDescription("Update task fields without changing status. progress_note appends a timestamped update. goal/acceptance_criteria/dod: dispatcher-only, audited"),
+		mcp.WithDescription("Update task fields without changing status. progress_note appends a timestamped update. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited"),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -743,6 +744,7 @@ func updateTaskTool() mcp.Tool {
 		mcp.WithString("goal", mcp.Description("Intent")),
 		mcp.WithString("acceptance_criteria", mcp.Description("JSON array")),
 		mcp.WithString("dod", mcp.Description("Done bar")),
+		mcp.WithString("verify_cmd", mcp.Description("Optional gate-reviewer validate command")),
 	)
 }
 

@@ -302,6 +302,12 @@ type TaskSummary struct {
 	DispatchedAt  string  `json:"dispatched_at,omitempty"`
 	DescPreview   string  `json:"desc_preview,omitempty"`
 	DescTruncated bool    `json:"desc_truncated,omitempty"`
+	// VerifyCmd is the OPTIONAL niwa gate-reviewer validate command (task
+	// 6c1c5167 follow-up, DEC-niwa-goal-validate-1) — carried into
+	// session_context previews so a reviewer sees it without a separate
+	// get_task round-trip. Never required, unlike the always-truncated
+	// description above.
+	VerifyCmd *string `json:"verify_cmd,omitempty"`
 }
 
 // priorityRank returns the integer rank used for stable priority ordering.
@@ -332,6 +338,7 @@ func summarizeTask(t models.Task) TaskSummary {
 		DispatchedBy: t.DispatchedBy,
 		BoardID:      t.BoardID,
 		DispatchedAt: t.DispatchedAt,
+		VerifyCmd:    t.VerifyCmd,
 	}
 	if t.Description != "" {
 		s.DescPreview, s.DescTruncated = truncatePreview(t.Description, taskDescPreview)
@@ -348,6 +355,9 @@ func taskSummaryBytes(s TaskSummary) int {
 	}
 	if s.BoardID != nil {
 		n += len(*s.BoardID)
+	}
+	if s.VerifyCmd != nil {
+		n += len(*s.VerifyCmd)
 	}
 	// JSON structural overhead (quotes, commas, field names)
 	n += 160

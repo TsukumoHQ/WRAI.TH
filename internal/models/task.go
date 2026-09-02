@@ -118,6 +118,15 @@ type Task struct {
 	AcceptanceCriteria string `json:"acceptance_criteria"` // json array of testable items
 	Dod                string `json:"dod"`                 // definition of done
 
+	// VerifyCmd is the OPTIONAL sibling of Goal/AcceptanceCriteria/Dod (task
+	// 6c1c5167 follow-up, DEC-niwa-goal-validate-1): a daemon-run command the
+	// niwa gate reviewer validates against before folding its verdict. Nullable
+	// and NEVER enforced — a project with require_typed_ticket set still never
+	// refuses a dispatch for a missing verify_cmd. The relay stores + serves it
+	// opaquely (no relay-side validation of the command string); agentd owns
+	// shape-validation and execution.
+	VerifyCmd *string `json:"verify_cmd,omitempty"`
+
 	// RefusalNotifiedAt is the anti-spam marker for a Linear issue refused for
 	// missing its typed ticket: a REFUSED mirror row (Status "refused") carries
 	// it, stamped when the one loud comment was posted so no path re-comments.

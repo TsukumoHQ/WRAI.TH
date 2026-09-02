@@ -763,6 +763,16 @@ func migrate(conn *sql.DB) error {
 		"acceptance_criteria": "TEXT NOT NULL DEFAULT '[]'", // json array of testable items
 		"dod":                 "TEXT NOT NULL DEFAULT ''",
 
+		// verify_cmd is the OPTIONAL sibling of goal/acceptance_criteria/dod (task
+		// 6c1c5167's follow-up, DEC-niwa-goal-validate-1): a daemon-run command the
+		// niwa gate reviewer validates the ticket against. Nullable (not NOT NULL
+		// DEFAULT '') — absence is a real, common, unenforced state, unlike the
+		// other three which the enforced-project path can require. Deliberately
+		// excluded from TypedTicket.Missing() (db/tasks.go): its absence must never
+		// trigger a TypedTicketError, even on a project with require_typed_ticket.
+		// The relay stores + serves it opaquely; agentd validates the command shape.
+		"verify_cmd": "TEXT",
+
 		// --- Linear refusal marker (V-lifecycle) — anti-spam for the loud
 		// non-conforming refusal. A Linear issue missing its typed ticket mirrors
 		// as a REFUSED row (status 'refused', never dispatched); this stamps when

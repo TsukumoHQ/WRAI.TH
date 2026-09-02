@@ -1827,7 +1827,7 @@ func (r *Relay) apiUpdateTask(w http.ResponseWriter, req *http.Request, path str
 		body.Project = "default"
 	}
 
-	task, err := r.DB.UpdateTaskFields(taskID, body.Project, "web", body.Title, body.Description, body.Priority, body.BoardID, nil, nil, nil)
+	task, err := r.DB.UpdateTaskFields(taskID, body.Project, "web", body.Title, body.Description, body.Priority, body.BoardID, nil, nil, nil, nil)
 	if err != nil {
 		apiError(w, http.StatusBadRequest, "failed to update task", err)
 		return
