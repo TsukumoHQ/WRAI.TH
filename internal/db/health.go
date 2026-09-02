@@ -9,7 +9,9 @@ const (
 )
 
 // AgentHealth is a per-agent liveness + activity snapshot derived from last_seen
-// crossed with recent token spend — the data behind the board's health badge.
+// crossed with recent token spend — the data behind the board's health badge,
+// and (via GetAgentHealthOne) the niwa ledger seam's liveness-reconciliation
+// read (task 6c1c5167, contract with niwa-cto).
 type AgentHealth struct {
 	Agent        string `json:"agent"`
 	Status       string `json:"status"` // working | idle | dead
@@ -17,6 +19,13 @@ type AgentHealth struct {
 	IdleSeconds  int64  `json:"idle_seconds"`
 	TokensRecent int64  `json:"tokens_recent"` // last healthRecentWindow
 	Tokens24h    int64  `json:"tokens_24h"`
+	// AsOf is the server clock (RFC3339) at the moment this snapshot was
+	// computed — the consumer's own clock never enters IdleSeconds/Status, so a
+	// caller with a skewed clock can still trust the relay's math by comparing
+	// against AsOf instead of its own "now". Deliberately no confidence/staleness
+	// field alongside it: a read failure/timeout is the caller's own signal to
+	// treat liveness as Unknown, not something the relay encodes in-band.
+	AsOf string `json:"as_of"`
 }
 
 // classifyHealth derives the badge from idle time × recent spend:
@@ -57,6 +66,7 @@ func (d *DB) GetAgentHealth(project string) ([]AgentHealth, error) {
 		return nil, err
 	}
 	now := time.Now().UTC()
+	asOf := now.Format(time.RFC3339)
 	recentSince := now.Add(-healthRecentWindow).Format(memoryTimeFmt)
 	daySince := now.Add(-24 * time.Hour).Format(memoryTimeFmt)
 
@@ -70,6 +80,7 @@ func (d *DB) GetAgentHealth(project string) ([]AgentHealth, error) {
 			LastSeen:     a.LastSeen,
 			TokensRecent: recent[a.Name],
 			Tokens24h:    day[a.Name],
+			AsOf:         asOf,
 		}
 		idle := time.Duration(0)
 		if t, ok := parseAgentTime(a.LastSeen); ok {
@@ -85,6 +96,46 @@ func (d *DB) GetAgentHealth(project string) ([]AgentHealth, error) {
 		out = append(out, h)
 	}
 	return out, nil
+}
+
+// GetAgentHealthOne is the single-agent form of GetAgentHealth: the ledger
+// seam's per-agent liveness read (task 6c1c5167, contract with niwa-cto)
+// polls with no cache, one agent per reconcile check, so it must not pay for
+// a whole-project ListAgents + aggregate token scan the way the board's bulk
+// view does. Returns (nil, nil) if the agent doesn't exist in the project —
+// same not-found shape as GetAgent, so the caller can 404 rather than treat a
+// typo'd name as "dead".
+func (d *DB) GetAgentHealthOne(project, agent string) (*AgentHealth, error) {
+	a, err := d.GetAgent(project, agent)
+	if err != nil {
+		return nil, err
+	}
+	if a == nil {
+		return nil, nil
+	}
+	now := time.Now().UTC()
+	recentSince := now.Add(-healthRecentWindow).Format(memoryTimeFmt)
+	daySince := now.Add(-24 * time.Hour).Format(memoryTimeFmt)
+
+	h := AgentHealth{
+		Agent:        a.Name,
+		LastSeen:     a.LastSeen,
+		TokensRecent: d.tokensForAgentSince(project, a.Name, recentSince),
+		Tokens24h:    d.tokensForAgentSince(project, a.Name, daySince),
+		AsOf:         now.Format(time.RFC3339),
+	}
+	idle := time.Duration(0)
+	if t, ok := parseAgentTime(a.LastSeen); ok {
+		idle = now.Sub(t)
+		if idle < 0 {
+			idle = 0
+		}
+	} else {
+		idle = healthDeadAfter + time.Minute
+	}
+	h.IdleSeconds = int64(idle.Seconds())
+	h.Status = classifyHealth(idle, h.TokensRecent)
+	return &h, nil
 }
 
 // tokensByAgentSince sums each agent's tokens since a time (real counts when
@@ -106,4 +157,15 @@ func (d *DB) tokensByAgentSince(project, since string) map[string]int64 {
 		res[agent] = toks
 	}
 	return res
+}
+
+// tokensForAgentSince is tokensByAgentSince scoped to one agent — the cheap
+// single-row query GetAgentHealthOne uses instead of a project-wide GROUP BY.
+func (d *DB) tokensForAgentSince(project, agent, since string) int64 {
+	var toks int64
+	_ = d.ro().QueryRow(
+		`SELECT COALESCE(`+tokenSum+`, 0) FROM token_usage WHERE project = ? AND agent = ? AND created_at >= ?`,
+		project, agent, since,
+	).Scan(&toks)
+	return toks
 }

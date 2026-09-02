@@ -63,4 +63,57 @@ func TestGetAgentHealth_Integration(t *testing.T) {
 	if w.TokensRecent != 1500 {
 		t.Fatalf("tokens_recent = %d, want 1500", w.TokensRecent)
 	}
+	if _, err := time.Parse(time.RFC3339, w.AsOf); err != nil {
+		t.Fatalf("as_of = %q not RFC3339: %v", w.AsOf, err)
+	}
+}
+
+// TestGetAgentHealthOne: task 6c1c5167 (niwa ledger-seam liveness read).
+// Matches GetAgentHealth's per-agent shape but is the single-agent lookup the
+// seam polls with no cache; nil,nil for an agent that doesn't exist in the
+// project (never confused with a "dead" agent that does exist).
+func TestGetAgentHealthOne(t *testing.T) {
+	d := testDB(t)
+	const project = "p1"
+
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	if _, err := d.conn.Exec(
+		`INSERT INTO agents (id, name, role, registered_at, last_seen, project, status) VALUES (?, ?, 'eng', ?, ?, ?, 'active')`,
+		"agent-worker-1", "worker", now, now, project,
+	); err != nil {
+		t.Fatalf("insert agent: %v", err)
+	}
+	if err := d.InsertTokenUsageBatch([]TokenRecord{
+		{Project: project, Agent: "worker", Input: 1000, Output: 500, CreatedAt: now},
+	}); err != nil {
+		t.Fatalf("tokens: %v", err)
+	}
+
+	h, err := d.GetAgentHealthOne(project, "worker")
+	if err != nil {
+		t.Fatalf("health: %v", err)
+	}
+	if h == nil {
+		t.Fatal("expected a health snapshot for worker, got nil")
+	}
+	if h.Status != "working" {
+		t.Fatalf("status = %q, want working", h.Status)
+	}
+	if h.TokensRecent != 1500 {
+		t.Fatalf("tokens_recent = %d, want 1500", h.TokensRecent)
+	}
+	if h.LastSeen != now {
+		t.Fatalf("last_seen = %q, want %q", h.LastSeen, now)
+	}
+	if _, err := time.Parse(time.RFC3339, h.AsOf); err != nil {
+		t.Fatalf("as_of = %q not RFC3339: %v", h.AsOf, err)
+	}
+
+	missing, err := d.GetAgentHealthOne(project, "nobody")
+	if err != nil {
+		t.Fatalf("health for missing agent: %v", err)
+	}
+	if missing != nil {
+		t.Fatalf("expected nil for a nonexistent agent, got %+v", missing)
+	}
 }

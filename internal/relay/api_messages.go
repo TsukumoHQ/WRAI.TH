@@ -56,11 +56,31 @@ func (r *Relay) apiSetQuota(w http.ResponseWriter, req *http.Request) {
 }
 
 // apiGetAgentHealth returns the per-agent health snapshot (TSU-53 slice-B).
-// Path: GET /api/agents/health
+// Path: GET /api/agents/health?project=&agent=
+//
+// With ?agent=<name>, returns the single AgentHealth object for that agent
+// (404 if it doesn't exist in the project) instead of the whole-project
+// array — the niwa ledger seam's per-agent liveness read (task 6c1c5167,
+// contract with niwa-cto) polls one agent per reconcile check with no cache,
+// so it must not pay for a full project scan every time. Omitting ?agent=
+// keeps today's whole-project behavior unchanged (board health view, sweeps).
 func (r *Relay) apiGetAgentHealth(w http.ResponseWriter, req *http.Request) {
 	project := req.URL.Query().Get("project")
 	if project == "" {
 		project = "default"
+	}
+	if agent := req.URL.Query().Get("agent"); agent != "" {
+		h, err := r.DB.GetAgentHealthOne(project, agent)
+		if err != nil {
+			http.Error(w, `{"error":"failed to get agent health"}`, http.StatusInternalServerError)
+			return
+		}
+		if h == nil {
+			apiError(w, http.StatusNotFound, "agent not found", nil)
+			return
+		}
+		writeJSON(w, h)
+		return
 	}
 	data, err := r.DB.GetAgentHealth(project)
 	if err != nil {
