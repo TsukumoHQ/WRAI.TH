@@ -368,25 +368,30 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 	// Insert the message in the DESTINATION project scope — this is what makes
 	// it visible in the recipient's get_inbox(project=dstProject) without any
 	// special routing in the read path.
-	msg, _, err := h.db.InsertMessageWithDeliveries(dstProject, from, to, msgType, subject, content, string(metaBytes), priority, ttlSeconds, replyTo, nil, []string{to}, "")
+	msg, dedupHit, err := h.db.InsertMessageWithDeliveries(dstProject, from, to, msgType, subject, content, string(metaBytes), priority, ttlSeconds, replyTo, nil, []string{to}, "")
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send cross-project message: %v", err)), nil
 	}
 
-	// Push notification if the target has an open session
-	h.registry.Notify(dstProject, to, from, subject, msg.ID)
+	// No idempotency_key on this path today, so dedupHit is always false;
+	// gated anyway so a future retry-key addition can't silently double-wake
+	// (forward-footgun flagged by review-cee47c61).
+	if !dedupHit {
+		// Push notification if the target has an open session
+		h.registry.Notify(dstProject, to, from, subject, msg.ID)
 
-	// Visible event — scoped to SENDER project so the sender sees it in their
-	// activity feed; target's inbox naturally surfaces the message.
-	h.events.Emit(MCPEvent{
-		Type:    "message",
-		Action:  "cross_project",
-		Agent:   from,
-		Project: srcProject,
-		Target:  fmt.Sprintf("%s@%s", to, dstProject),
-		Label:   subject,
-		MsgType: msgType,
-	})
+		// Visible event — scoped to SENDER project so the sender sees it in their
+		// activity feed; target's inbox naturally surfaces the message.
+		h.events.Emit(MCPEvent{
+			Type:    "message",
+			Action:  "cross_project",
+			Agent:   from,
+			Project: srcProject,
+			Target:  fmt.Sprintf("%s@%s", to, dstProject),
+			Label:   subject,
+			MsgType: msgType,
+		})
+	}
 
 	return h.resultJSONTracked(srcProject, from, "send_message", msg)
 }

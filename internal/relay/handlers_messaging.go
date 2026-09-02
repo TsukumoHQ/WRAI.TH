@@ -323,26 +323,33 @@ func (h *Handlers) HandleSendStatus(ctx context.Context, req mcp.CallToolRequest
 	// guard-first predicate). Recipients resolved first so the message is never
 	// persisted without its deliveries.
 	recipients, _ := h.db.ResolveRecipients(project, to, from, conversationID)
-	msg, _, err := h.db.InsertMessageWithDeliveries(project, from, to, "status", "status", content, metadata, priority, ttlSeconds, nil, conversationID, recipients, "none")
+	msg, dedupHit, err := h.db.InsertMessageWithDeliveries(project, from, to, "status", "status", content, metadata, priority, ttlSeconds, nil, conversationID, recipients, "none")
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send status: %v", err)), nil
 	}
 
-	if conversationID != nil {
-		h.notifyConversation(project, *conversationID, from, "status", msg.ID)
-	} else if to == "*" {
-		h.registry.NotifyBroadcast(project, from, "status", msg.ID)
-	} else {
-		h.registry.Notify(project, to, from, "status", msg.ID)
-	}
+	// No idempotency_key on send_status today, so dedupHit is always false;
+	// gated anyway so a future retry-key addition can't silently double-wake
+	// (forward-footgun flagged by review-cee47c61). Status is already
+	// action_required 'none' (never wakes a busy agent), but the push itself
+	// must still not duplicate on a hypothetical dedup hit.
+	if !dedupHit {
+		if conversationID != nil {
+			h.notifyConversation(project, *conversationID, from, "status", msg.ID)
+		} else if to == "*" {
+			h.registry.NotifyBroadcast(project, from, "status", msg.ID)
+		} else {
+			h.registry.Notify(project, to, from, "status", msg.ID)
+		}
 
-	action := "send"
-	if to == "*" {
-		action = "broadcast"
-	} else if conversationID != nil {
-		action = "conversation"
+		action := "send"
+		if to == "*" {
+			action = "broadcast"
+		} else if conversationID != nil {
+			action = "conversation"
+		}
+		h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: "status", Priority: priority, MsgType: "status"})
 	}
-	h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: "status", Priority: priority, MsgType: "status"})
 
 	return h.resultJSONTracked(project, from, "send_status", msg)
 }

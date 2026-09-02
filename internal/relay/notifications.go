@@ -453,12 +453,18 @@ func (n *Notifier) doMessage(rule models.NotificationRule, project string, paylo
 
 	var sent int
 	for _, to := range recipients {
-		msg, _, err := n.db.InsertMessageWithDeliveries(project, "notifier", to, "notification", subject, content, meta, priority, ttl, nil, nil, []string{to}, actionReq)
+		msg, dedupHit, err := n.db.InsertMessageWithDeliveries(project, "notifier", to, "notification", subject, content, meta, priority, ttl, nil, nil, []string{to}, actionReq)
 		if err != nil {
 			rec.Error = err.Error()
 			continue
 		}
-		n.registry.Notify(project, to, "notifier", subject, msg.ID)
+		// No idempotencyKey is passed above, so dedupHit is always false today;
+		// gated anyway so a future idempotency_key addition here can't silently
+		// double-wake (task cee47c61's original bug, forward-footgun flagged by
+		// review-cee47c61 round 2).
+		if !dedupHit {
+			n.registry.Notify(project, to, "notifier", subject, msg.ID)
+		}
 		sent++
 	}
 	if sent > 0 {

@@ -387,15 +387,21 @@ func (r *Relay) apiFederationInbound(w http.ResponseWriter, req *http.Request) {
 		replyTo = &s
 	}
 
-	msg, _, err := r.DB.InsertMessageWithDeliveries(project, fromLabel, to, msgType, subject(fm.Subject), fm.Content, string(metaBytes), priority, ttl, replyTo, nil, []string{to}, "")
+	msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(project, fromLabel, to, msgType, subject(fm.Subject), fm.Content, string(metaBytes), priority, ttl, replyTo, nil, []string{to}, "")
 	if err != nil {
 		apiError(w, http.StatusInternalServerError, "failed to deliver federated message", err)
 		return
 	}
 
-	// Best-effort wake-up; the message is already durable if this no-ops.
-	r.Registry.Notify(project, to, fromLabel, fm.Subject, msg.ID)
-	r.Events.Emit(MCPEvent{Type: "message", Action: "federated_in", Agent: fromLabel, Project: project, Target: to, Label: fm.Subject, MsgType: msgType})
+	// No idempotency_key on this inbound federation path today, so dedupHit is
+	// always false; gated anyway — a federation retry is exactly the kind of
+	// caller that would legitimately want one later, and this is the same
+	// forward-footgun review-cee47c61 flagged.
+	if !dedupHit {
+		// Best-effort wake-up; the message is already durable if this no-ops.
+		r.Registry.Notify(project, to, fromLabel, fm.Subject, msg.ID)
+		r.Events.Emit(MCPEvent{Type: "message", Action: "federated_in", Agent: fromLabel, Project: project, Target: to, Label: fm.Subject, MsgType: msgType})
+	}
 
 	writeJSON(w, map[string]any{"delivered": true, "message_id": msg.ID})
 }

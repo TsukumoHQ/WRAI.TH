@@ -197,34 +197,41 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 				recipients = append(recipients, m)
 			}
 		}
-		msg, _, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
+		msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
 		if err != nil {
 			http.Error(w, `{"error":"failed to send"}`, http.StatusInternalServerError)
 			return
 		}
 		_ = r.DB.AddToTeamInbox(team.ID, msg.ID)
-		for _, m := range recipients {
-			r.Registry.Notify(project, m, from, body.Subject, msg.ID)
+		// No idempotency_key on this REST path today, so dedupHit is always
+		// false here; gated anyway so a future retry-key addition can't
+		// silently double-wake (forward-footgun flagged by review-cee47c61).
+		if !dedupHit {
+			for _, m := range recipients {
+				r.Registry.Notify(project, m, from, body.Subject, msg.ID)
+			}
+			r.Events.Emit(MCPEvent{Type: "message", Action: "team", Agent: from, Project: project, Label: to, Priority: priority, MsgType: msgType})
 		}
-		r.Events.Emit(MCPEvent{Type: "message", Action: "team", Agent: from, Project: project, Label: to, Priority: priority, MsgType: msgType})
 		writeJSON(w, msg)
 		return
 	}
 
 	// Direct or broadcast.
 	recipients, _ := r.DB.ResolveRecipients(project, to, from, nil)
-	msg, _, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
+	msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(project, from, to, msgType, body.Subject, body.Content, metadata, priority, ttl, nil, nil, recipients, "")
 	if err != nil {
 		http.Error(w, `{"error":"failed to send"}`, http.StatusInternalServerError)
 		return
 	}
-	action := "send"
-	if to == "*" {
-		r.Registry.NotifyBroadcast(project, from, body.Subject, msg.ID)
-		action = "broadcast"
-	} else {
-		r.Registry.Notify(project, to, from, body.Subject, msg.ID)
+	if !dedupHit {
+		action := "send"
+		if to == "*" {
+			r.Registry.NotifyBroadcast(project, from, body.Subject, msg.ID)
+			action = "broadcast"
+		} else {
+			r.Registry.Notify(project, to, from, body.Subject, msg.ID)
+		}
+		r.Events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Label: to, Priority: priority, MsgType: msgType})
 	}
-	r.Events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Label: to, Priority: priority, MsgType: msgType})
 	writeJSON(w, msg)
 }
