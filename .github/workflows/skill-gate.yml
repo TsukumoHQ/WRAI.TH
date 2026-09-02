@@ -15,10 +15,57 @@ jobs:
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
-          if printf '%s' "$BODY" | grep -qiE 'review-(trovex|wraith|dokan|yoru|tsukumo|donna)|anti-ai-slop'; then
+          if printf '%s' "$BODY" | grep -qiE '(^|[^a-z0-9-])review-[a-z0-9-]+( verdict)?:|anti-ai-slop'; then
             echo "self-review verdict block found"
           else
             echo "::error::PR body is missing the review-<lane> self-review verdict block."
             echo "Run your lane's domain review skill (persona -> pr-review-self -> review-<lane>) on your diff and paste its verdict into the PR body, then re-trigger (edit the body)."
             exit 1
           fi
+
+  verdict-grep-selftest:
+    # Pins the verdict-line pattern against known false-positive/false-negative
+    # samples so a future regex edit can't silently regress this gate again.
+    # History: enumerated lane list (review-(trovex|wraith|...)) false-negatived
+    # on domain-scoped skills (review-backend-dashboard); the unanchored
+    # fix (review-[a-z0-9-]+) false-positived on substrings (pr-review-self,
+    # code-review-checklist, #pullrequestreview-N); the colon-only-anchored
+    # fix still false-positived when a colon happened to follow those same
+    # substrings (pr-review-self: done, ...review-1234: comment).
+    name: verdict-grep regex self-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Assert match/no-match samples against the gate's regex
+        run: |
+          RE='(^|[^a-z0-9-])review-[a-z0-9-]+( verdict)?:|anti-ai-slop'
+          fail=0
+          assert_match() {
+            if printf '%s' "$1" | grep -qiE "$RE"; then
+              echo "ok (matches): $1"
+            else
+              echo "::error::expected MATCH, got no-match: $1"
+              fail=1
+            fi
+          }
+          assert_no_match() {
+            if printf '%s' "$1" | grep -qiE "$RE"; then
+              echo "::error::expected NO-MATCH, got match: $1"
+              fail=1
+            else
+              echo "ok (no-match): $1"
+            fi
+          }
+          # true positives — legitimate verdict lines must pass
+          assert_match "review-backend-dashboard: APPROVED"
+          assert_match "## review-yoru verdict: SHIP"
+          assert_match "anti-ai-slop pass"
+          # true negatives — no verdict present, or a verdict-shaped substring
+          # inside unrelated text (skill names, GH permalinks, prose)
+          assert_no_match "just a normal PR body with no verdict block at all"
+          assert_no_match "pr-review-self run locally, all clear"
+          assert_no_match "code-review-checklist done"
+          assert_no_match "See #pullrequestreview-12345"
+          assert_no_match "Self-review-pending on this one"
+          assert_no_match "pr-review-self: done"
+          assert_no_match "see #pullrequestreview-1234: comment"
+          exit $fail
