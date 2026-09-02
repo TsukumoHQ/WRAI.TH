@@ -178,7 +178,15 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 // an existing message (no new row/delivery was written). Callers that fan out
 // a live wake push (SSE Notify/NotifyBroadcast) after the insert MUST check it
 // and skip the push on a dedup hit — the recipient already saw this message,
-// so re-pushing is a duplicate wake, not a duplicate delivery (task cee47c61).
+// so re-pushing is a duplicate wake, not a duplicate delivery (task cee47c61,
+// closed out across all 7 callers by 1a7e18b1/e60624d9).
+//
+// GOTCHA for the next caller to add an idempotencyKey: on a dedup hit this
+// looks up existingID then calls GetMessage(existingID), which returns
+// (nil, nil) if that row was deleted between the lookup and the fetch — so
+// msg can be nil here even with a nil error. A caller that dereferences
+// msg.ID unconditionally after a dedup hit (e.g. AddToTeamInbox(msg.ID),
+// or echoing msg.ID in an HTTP response) must nil-check first.
 func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority string, ttlSeconds int, replyTo, conversationID *string, recipients []string, actionRequired string, idempotencyKey ...string) (*models.Message, bool, error) {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
 	if priority == "" {

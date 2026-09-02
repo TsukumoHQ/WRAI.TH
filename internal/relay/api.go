@@ -875,14 +875,20 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 
 	replyTo := optionalString(body.ReplyTo)
 
-	msg, _, err := r.DB.InsertMessageWithDeliveries(body.Project, "user", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To}, "")
+	msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(body.Project, "user", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To}, "")
 	if err != nil {
 		http.Error(w, `{"error":"failed to send response"}`, http.StatusInternalServerError)
 		return
 	}
 
-	// Push notification to the target agent
-	r.Registry.Notify(body.Project, body.To, "user", "User response", msg.ID)
+	// No idempotency_key on this path today, so dedupHit is always false;
+	// gated anyway so a future retry-key addition can't silently double-wake
+	// (forward-footgun flagged by review-cee47c61 / review-1a7e18b1 — this is
+	// the 7th and last of InsertMessageWithDeliveries' 7 callers to close it).
+	if !dedupHit {
+		// Push notification to the target agent
+		r.Registry.Notify(body.Project, body.To, "user", "User response", msg.ID)
+	}
 
 	writeJSON(w, map[string]any{"ok": true, "message_id": msg.ID})
 }
