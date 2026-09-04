@@ -732,7 +732,7 @@ func deleteBoardTool() mcp.Tool {
 func updateTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"update_task",
-		mcp.WithDescription("Update task fields without changing status. progress_note appends a timestamped update. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited"),
+		mcp.WithDescription("Update task fields without changing status. progress_note appends a timestamped note. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited. assigned_to/profile_slug reassign (dispatcher/lead/exec only): assigned_to transfers a claimed lease + notifies the old doer; profile_slug alone on a claimed task refused. Unknown fields refused, not ignored."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -740,6 +740,8 @@ func updateTaskTool() mcp.Tool {
 		mcp.WithString("description", mcp.Description("New description")),
 		mcp.WithString("priority", mcp.Description("New priority"), mcp.Enum("P0", "P1", "P2", "P3")),
 		mcp.WithString("board_id", mcp.Description("Move to board")),
+		mcp.WithString("assigned_to", mcp.Description("Reassign to this agent")),
+		mcp.WithString("profile_slug", mcp.Description("Reassign to this profile")),
 		mcp.WithString("progress_note", mcp.Description("Short progress note (does not change status)")),
 		mcp.WithString("goal", mcp.Description("Intent")),
 		mcp.WithString("acceptance_criteria", mcp.Description("JSON array")),

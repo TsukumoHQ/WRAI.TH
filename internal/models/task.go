@@ -146,13 +146,18 @@ type Task struct {
 
 // LeaseTransfer describes a change of a task's lease holder, carried on the
 // task.lease_transferred event (SSE) and the audit trail. Reason is one of
-// "expired" | "deregistered" (dead-holder re-claim), or "voluntary" (the holder
-// released via complete/block/cancel, or an orchestrator reassign). To is empty
-// on a pure release (holder → none).
+// "expired" | "deregistered" (dead-holder re-claim), "voluntary" (the holder
+// released via complete/block/cancel, or an orchestrator reassign), or
+// "reassigned" (a dispatcher/lead handed a held task to another agent via
+// update_task, DEC-wraith-update-task-reassign-1). To is empty on a pure release
+// (holder → none). By names the caller who initiated the transfer, set on a
+// "reassigned" hand-off so the audit trail records who moved the work; empty for
+// self-service/automatic transfers.
 type LeaseTransfer struct {
 	From   string `json:"from"`
 	To     string `json:"to,omitempty"`
 	Reason string `json:"reason"`
+	By     string `json:"by,omitempty"`
 }
 
 // AuditEntry is one logged orchestrator/agent action against a resource — the

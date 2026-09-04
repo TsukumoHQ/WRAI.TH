@@ -46,7 +46,7 @@ Loopback / same-host clients connect **keyless** (local `.mcp.json`, API scripts
 
 > On Linear-mirror projects, every status transition (claim/start/review/complete/block/cancel) is mirrored back to the issue's Linear workflow state; `comment` and the status change are the only writes that reach Linear.
 - `list_tasks` — filtered list (status, profile, priority, board_id, assigned_to). Use status="active" for non-done/cancelled. include_archived option.
-- `update_task` — update title, description, priority, board_id without changing status
+- `update_task` — update task fields without changing status. Updatable fields: `title`, `description`, `priority`, `board_id`, `progress_note`, `assigned_to`, `profile_slug`, and (dispatcher-only, audited) `goal`/`acceptance_criteria`/`dod`/`verify_cmd`. An unknown field is refused, naming it — never silently ignored. `assigned_to`/`profile_slug` REASSIGN the task (dispatcher, a lead in the doer's chain, or an executive only; a doer cannot reassign its own task): on a claimed task, `assigned_to` atomically transfers the lease to the new agent and notifies the old doer, while `profile_slug` alone is refused (pass `assigned_to`); on a pending task both update freely. Status changes use start/complete/block/cancel/resume/review verbs.
 - `move_task` — move task to a different board (shortcut for update_task)
 - `archive_tasks` — bulk archive done/cancelled tasks by status/board
 - `batch_complete_tasks` — complete multiple tasks at once (JSON array of {task_id, result})

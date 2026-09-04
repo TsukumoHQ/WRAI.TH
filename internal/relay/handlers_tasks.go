@@ -880,6 +880,21 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		return toolResultError(err.Error()), nil
 	}
 
+	// AC2 / rule (e): a field update_task does not recognise is refused loudly,
+	// naming it — never silently ignored with a 200 + unchanged record (the
+	// original defect that dropped profile_slug/assigned_to). A status change is
+	// not a field edit: it has its own verbs.
+	for k := range req.GetArguments() {
+		if !updateTaskArgs[k] {
+			return validationError(CodeInvalidArgument, fmt.Sprintf(
+				"%q is not an updatable field of update_task — updatable: title, description, priority, board_id, assigned_to, profile_slug, progress_note, goal, acceptance_criteria, dod, verify_cmd (change status with start_task/complete_task/block_task/cancel_task/resume_task/review_task)",
+				k)), nil
+		}
+	}
+
+	assignedTo := optionalString(strings.TrimSpace(req.GetString("assigned_to", "")))
+	profileSlug := optionalString(strings.TrimSpace(req.GetString("profile_slug", "")))
+
 	title := optionalString(req.GetString("title", ""))
 	description := optionalString(req.GetString("description", ""))
 	priority := optionalString(req.GetString("priority", ""))
@@ -920,9 +935,38 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	task, err := h.db.UpdateTaskFields(taskID, project, agent, title, description, priority, boardID, goal, acceptanceCriteria, dod, verifyCmd)
-	if err != nil {
-		return taskOpError(err, "failed to update task: %v", err), nil
+	hasFieldEdit := title != nil || description != nil || priority != nil || boardID != nil ||
+		goal != nil || acceptanceCriteria != nil || dod != nil || verifyCmd != nil
+
+	var task *models.Task
+	if hasFieldEdit {
+		task, err = h.db.UpdateTaskFields(taskID, project, agent, title, description, priority, boardID, goal, acceptanceCriteria, dod, verifyCmd)
+		if err != nil {
+			return taskOpError(err, "failed to update task: %v", err), nil
+		}
+	}
+
+	// assigned_to / profile_slug REASSIGN the task without changing its status
+	// (DEC-wraith-update-task-reassign-1). Handled after the plain field edits so a
+	// single call may edit fields and hand the task on in one shot.
+	if assignedTo != nil || profileSlug != nil {
+		reassigned, res := h.reassignViaUpdate(project, agent, taskID, assignedTo, profileSlug)
+		if res != nil {
+			return res, nil
+		}
+		task = reassigned
+	}
+
+	if task == nil {
+		// progress_note-only (or empty) update: nothing was written above, so
+		// re-read the row to still return the current record.
+		task, err = h.db.GetTask(taskID, project)
+		if err != nil {
+			return toolResultError(fmt.Sprintf("failed to update task: %v", err)), nil
+		}
+		if task == nil {
+			return toolResultError(fmt.Sprintf("task not found: %s", taskID)), nil
+		}
 	}
 
 	if progressNote != "" {
@@ -933,6 +977,122 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "update", Agent: agent, Project: project, Label: task.Title})
 	return h.resultJSONTracked(project, agent, "update_task", task)
+}
+
+// updateTaskArgs is the whitelist of arguments update_task recognises. A key
+// outside it is refused (rule (e)) rather than silently ignored — as/project/
+// task_id are transport, the rest are the updatable fields.
+var updateTaskArgs = map[string]bool{
+	"as": true, "project": true, "task_id": true,
+	"title": true, "description": true, "priority": true, "board_id": true,
+	"assigned_to": true, "profile_slug": true, "progress_note": true,
+	"goal": true, "acceptance_criteria": true, "dod": true, "verify_cmd": true,
+}
+
+// reassignViaUpdate applies the assigned_to/profile_slug reassignment path of
+// update_task per DEC-wraith-update-task-reassign-1. It returns either the
+// updated task, or a non-nil tool result to hand straight back (a permission or
+// validation refusal). caller is the acting agent.
+func (h *Handlers) reassignViaUpdate(project, caller, taskID string, assignedTo, profileSlug *string) (*models.Task, *mcp.CallToolResult) {
+	existing, err := h.db.GetTask(taskID, project)
+	if err != nil {
+		return nil, toolResultError(fmt.Sprintf("failed to update task: %v", err))
+	}
+	if existing == nil {
+		return nil, toolResultError(fmt.Sprintf("task not found: %s", taskID))
+	}
+	if existing.Source == "linear" {
+		return nil, validationError(CodeInvalidArgument,
+			"task is mirrored from Linear (read-only here — Linear is the source of truth)")
+	}
+
+	// (d) Only the dispatcher, an agent in the assignee's lead chain, or an
+	// executive may reassign — a doer cannot reassign its own task.
+	if !h.callerMayReassign(project, caller, existing) {
+		return nil, permissionError(CodeForbidden, fmt.Sprintf(
+			"only this task's dispatcher (%s), an agent in its lead chain, or an executive may reassign it — a doer cannot reassign its own task",
+			existing.DispatchedBy))
+	}
+
+	switch existing.Status {
+	case "pending":
+		// (c) On a pending task both fields update freely; no lease is minted.
+		task, rErr := h.db.ReassignTaskFields(taskID, project, caller, assignedTo, profileSlug, false)
+		if rErr != nil {
+			return nil, taskOpError(rErr, "failed to reassign task: %v", rErr)
+		}
+		return task, nil
+	case "accepted", "in-progress", "in-review":
+		holder := taskHolder(existing)
+		if assignedTo == nil {
+			// (b) A profile_slug change alone on a claimed task is refused — never
+			// silently re-profile held work.
+			return nil, validationError(CodeInvalidArgument, fmt.Sprintf(
+				"task is claimed by %s; pass assigned_to to transfer the lease, or have %s release it", holder, holder))
+		}
+		// (a) assigned_to on a claimed task = atomic lease transfer.
+		task, rErr := h.db.ReassignTaskFields(taskID, project, caller, assignedTo, profileSlug, true)
+		if rErr != nil {
+			return nil, taskOpError(rErr, "failed to reassign task: %v", rErr)
+		}
+		if holder != "" && !strings.EqualFold(holder, *assignedTo) {
+			h.registry.Notify(project, holder, caller,
+				fmt.Sprintf("Task reassigned to %s by %s: %s", *assignedTo, caller, task.Title), taskID)
+		}
+		return task, nil
+	default:
+		return nil, validationError(CodeInvalidArgument, fmt.Sprintf(
+			"cannot reassign a %s task — reassignment applies to a pending or held (accepted/in-progress/in-review) task", existing.Status))
+	}
+}
+
+// taskHolder is the agent currently holding a task: its claimed_by, else its
+// lease_holder, else "".
+func taskHolder(t *models.Task) string {
+	if t.ClaimedBy != nil && *t.ClaimedBy != "" {
+		return *t.ClaimedBy
+	}
+	if t.LeaseHolder != nil && *t.LeaseHolder != "" {
+		return *t.LeaseHolder
+	}
+	return ""
+}
+
+// callerMayReassign reports whether caller may hand this task to another
+// profile/agent (DEC rule (d)): the task's dispatcher, any executive, or an
+// agent in the doer's lead chain (a reports_to ancestor of the assignee). A
+// plain doer — including the task's own holder — is not, so it cannot reassign
+// its own work. Agent names are stored lowercase, so comparisons fold case.
+func (h *Handlers) callerMayReassign(project, caller string, task *models.Task) bool {
+	if caller == "" {
+		return false
+	}
+	if strings.EqualFold(caller, task.DispatchedBy) {
+		return true
+	}
+	if ag, _ := h.db.GetAgent(project, strings.ToLower(caller)); ag != nil && ag.IsExecutive {
+		return true
+	}
+	// Walk reports_to up from the doer; the caller is authorised if it is a lead
+	// (ancestor) of the doer. Bounded by a seen-set against a cyclic chain.
+	cur := strings.ToLower(taskHolder(task))
+	if cur == "" && task.AssignedTo != nil {
+		cur = strings.ToLower(*task.AssignedTo)
+	}
+	seen := map[string]bool{}
+	for cur != "" && !seen[cur] {
+		seen[cur] = true
+		ag, err := h.db.GetAgent(project, cur)
+		if err != nil || ag == nil || ag.ReportsTo == nil || *ag.ReportsTo == "" {
+			break
+		}
+		lead := strings.ToLower(*ag.ReportsTo)
+		if strings.EqualFold(lead, caller) {
+			return true
+		}
+		cur = lead
+	}
+	return false
 }
 
 func (h *Handlers) HandleArchiveTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

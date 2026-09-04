@@ -1627,6 +1627,107 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 	return task, nil
 }
 
+// ReassignTaskFields repoints a task's assigned_to and/or profile_slug WITHOUT
+// changing its status — the update_task reassignment path ruled in
+// DEC-wraith-update-task-reassign-1. It is CAS-guarded on the (lease_holder,
+// status) it read, so a claim/complete/transfer racing this hand-off makes the
+// write hit 0 rows and return CodeTaskStateConflict rather than clobbering the
+// winner (the double-claim TOCTOU the wraith review gate guards against).
+//
+//   - transferLease=true (the task is currently HELD, and newAssignee is set):
+//     the lease moves to the new assignee in the SAME write — claimed_by,
+//     claimed_at, lease_holder, lease_expires_at and lease_heartbeat_at all
+//     repoint — and a LeaseTransfer{reason:"reassigned",by:caller} is stamped so
+//     the old doer stops owning the work the instant the hand-off lands.
+//   - transferLease=false (a PENDING task): the fields update without minting a
+//     lease, so the task stays claimable by the new profile/agent.
+//
+// profile_slug: an explicit newProfile always wins; otherwise, when the assignee
+// changes, it is recomputed from the new assignee's registered profile (T3
+// display/skill-routing follows the hand-off), guarded so an unregistered
+// assignee never blanks an existing slug. caller is the audit "who".
+// PERMISSION (who may reassign) is the handler's job, per this file's convention.
+func (d *DB) ReassignTaskFields(taskID, project, caller string, newAssignee, newProfile *string, transferLease bool) (*models.Task, error) {
+	task, err := d.GetTask(taskID, project)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, newTaskError(CodeTaskNotFound, "task not found: %s", taskID)
+	}
+	if task.Source == "linear" {
+		return nil, errLinearReadOnly
+	}
+
+	priorHolder := strVal(task.LeaseHolder)
+	priorStatus := task.Status
+	now := time.Now().UTC().Format(memoryTimeFmt)
+
+	setCols := "last_activity_at = ?"
+	args := []any{now}
+
+	newHolder := priorHolder
+	if newAssignee != nil {
+		setCols += ", assigned_to = ?"
+		args = append(args, *newAssignee)
+		// Recompute profile_slug from the new assignee unless the caller pins one
+		// explicitly below; skip when the assignee has no usable registered slug so
+		// an empty lookup never blanks the task's existing profile.
+		if newProfile == nil {
+			if slug, has := d.profileSlugForAgent(project, *newAssignee); has {
+				setCols += ", profile_slug = ?"
+				args = append(args, slug)
+				task.ProfileSlug = slug
+			}
+		}
+		if transferLease {
+			expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
+			setCols += ", claimed_by = ?, claimed_at = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?"
+			args = append(args, *newAssignee, now, *newAssignee, expires, now)
+			task.ClaimedBy = newAssignee
+			task.ClaimedAt = &now
+			task.LeaseHolder = newAssignee
+			task.LeaseExpiresAt = &expires
+			task.LeaseHeartbeatAt = &now
+			newHolder = *newAssignee
+		}
+		task.AssignedTo = newAssignee
+	}
+	if newProfile != nil {
+		setCols += ", profile_slug = ?"
+		args = append(args, *newProfile)
+		task.ProfileSlug = *newProfile
+	}
+
+	// CAS on (lease_holder, status) as read: a concurrent claim/complete/transfer
+	// that moved either since GetTask makes this update match 0 rows.
+	args = append(args, taskID, project, priorHolder, priorStatus)
+	res, err := d.writerExec(
+		"UPDATE tasks SET "+setCols+" WHERE id = ? AND project = ? AND COALESCE(lease_holder,'') = ? AND status = ?",
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("reassign task fields: %w", err)
+	}
+	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
+		return nil, newTaskError(CodeTaskStateConflict,
+			"task %s changed before reassignment by %q could apply", taskID, caller)
+	}
+
+	if transferLease && newAssignee != nil && priorHolder != newHolder {
+		transfer := &models.LeaseTransfer{From: priorHolder, To: newHolder, Reason: "reassigned", By: caller}
+		task.LeaseTransfer = transfer
+		d.auditLeaseTransfer(project, taskID, caller, transfer)
+	}
+
+	// On-write soft-mark (Phase 2 §7.1): if the new assignee does not resolve to a
+	// live agent, flag the misroute now rather than at the next scan. Never reject.
+	if newAssignee != nil && !d.refResolvesToLiveAgent(project, *newAssignee) {
+		_ = d.MarkQuarantine("tasks", taskID, "assigned_to", *newAssignee, "orphan_assignee", project)
+	}
+	return task, nil
+}
+
 // profileSlugForAgent returns an agent's registered profile_slug and whether it
 // is usable (a registered agent with a NON-EMPTY slug). Reassignment recomputes
 // a task's profile_slug from its new assignee so display + skill routing follow
