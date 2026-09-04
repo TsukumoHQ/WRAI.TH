@@ -245,10 +245,96 @@ func (c *Connector) StartReconcile(interval time.Duration, done <-chan struct{})
 	}()
 }
 
+// Reconcile backoff bounds. On failure the poll backs off instead of retrying
+// every interval forever (the 21 803x-401 log flood, TSU audit §A1):
+//
+//   - Auth (401/403): a dead/revoked key. Surface ONCE at ERROR naming the fix,
+//     then pause with an exponential backoff capped at 1h. Reset only on a
+//     successful poll or a connector rebuild (key change / process restart) — a
+//     new key builds a fresh Connector via ReconfigureLinear.
+//   - Transient (timeout/5xx/network): a short bounded exponential backoff.
+const (
+	authBackoffBase      = 15 * time.Minute
+	authBackoffCap       = 1 * time.Hour
+	transientBackoffBase = 30 * time.Second
+	transientBackoffCap  = 10 * time.Minute
+)
+
+// now returns the current time via the test clock hook when set.
+func (c *Connector) now() time.Time {
+	if c.nowFn != nil {
+		return c.nowFn()
+	}
+	return time.Now()
+}
+
+// reconcileDue reports whether the backoff window has elapsed and a poll may run.
+func (c *Connector) reconcileDue() bool {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	return !c.now().Before(c.reconcileNextAt)
+}
+
+// nextBackoff doubles cur within [base, ceiling]; a zero/negative cur starts at base.
+func nextBackoff(cur, base, ceiling time.Duration) time.Duration {
+	if cur <= 0 {
+		return base
+	}
+	d := cur * 2
+	if d < base {
+		d = base
+	}
+	if d > ceiling {
+		d = ceiling
+	}
+	return d
+}
+
+// noteReconcileResult folds a poll's outcome into the backoff state. Success
+// clears the backoff; an auth failure latches a long backoff and surfaces ONCE
+// at ERROR; a transient failure uses a short bounded backoff. Errors are logged
+// at ERROR/WARN — never INFO — so a persistent failure is visible without
+// flooding the log every interval.
+func (c *Connector) noteReconcileResult(err error) {
+	c.reconcileMu.Lock()
+	defer c.reconcileMu.Unlock()
+	now := c.now()
+	switch {
+	case err == nil:
+		c.reconcileDelay = 0
+		c.reconcileNextAt = time.Time{}
+		c.authLatched = false
+	case isAuthError(err):
+		if !c.authLatched {
+			// First auth failure: name the fix loudly, exactly once per latch.
+			log.Printf("[linear] reconcile ERROR: Linear API authentication failed (%v) — the API key is rejected. "+
+				"Rotate LINEAR_API_KEY (or disable the connector: set linear_enabled=0) then restart the relay. "+
+				"Pausing the reconcile poll with backoff up to %s until the key changes or the relay restarts.", err, authBackoffCap)
+			c.reconcileDelay = authBackoffBase
+		} else {
+			c.reconcileDelay = nextBackoff(c.reconcileDelay, authBackoffBase, authBackoffCap)
+		}
+		c.authLatched = true
+		c.reconcileNextAt = now.Add(c.reconcileDelay)
+	default:
+		// Transient (timeout/5xx/network): short bounded backoff. Clears the auth
+		// latch so a recovered-then-transient sequence isn't stuck on the auth cap.
+		c.authLatched = false
+		c.reconcileDelay = nextBackoff(c.reconcileDelay, transientBackoffBase, transientBackoffCap)
+		c.reconcileNextAt = now.Add(c.reconcileDelay)
+		log.Printf("[linear] reconcile WARN: transient error (%v) — backing off %s before the next poll", err, c.reconcileDelay)
+	}
+}
+
 func (c *Connector) runReconcile() {
+	// Respect the backoff window: on a persistent failure the ticker still fires
+	// every interval, but the actual API call is skipped until the backoff elapses.
+	if !c.reconcileDue() {
+		return
+	}
 	n, err := c.ReconcileCycle(c.project)
+	c.noteReconcileResult(err)
 	if err != nil {
-		log.Printf("[linear] reconcile error: %v", err)
 		return
 	}
 	if n > 0 {

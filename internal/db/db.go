@@ -177,33 +177,71 @@ func (d *DB) writerExec(query string, args ...interface{}) (sql.Result, error) {
 // the transaction is finished, instead of leaking it until writerTimeout
 // fires. If the caller never calls Commit/Rollback within writerTimeout, the
 // ctx expires and database/sql rolls the transaction back automatically.
+//
+// conn is the dedicated writer connection the tx runs on, checked out of the
+// pool by beginWriterTx and returned to it on Commit/Rollback. Holding an
+// explicit connection lets the pool-acquire wait and the transaction body use
+// SEPARATE deadlines (see beginWriterTx): a slow acquire can no longer eat into
+// the body's budget and guillotine an already-open tx mid-statement.
 type writerTx struct {
 	*sql.Tx
 	cancel context.CancelFunc
+	conn   *sql.Conn
 }
 
 func (t *writerTx) Commit() error {
 	err := t.Tx.Commit()
 	t.cancel()
+	t.release()
 	return err
 }
 
 func (t *writerTx) Rollback() error {
 	err := t.Tx.Rollback()
 	t.cancel()
+	t.release()
 	return err
 }
 
-// beginWriterTx starts a transaction on the writer connection bounded by
-// writerTimeout (see writerExec).
+// release returns the dedicated writer connection to the pool exactly once, so
+// the common Commit()-then-deferred-Rollback() pattern doesn't double-close it.
+func (t *writerTx) release() {
+	if t.conn != nil {
+		_ = t.conn.Close()
+		t.conn = nil
+	}
+}
+
+// beginWriterTx starts a transaction on the writer connection. It bounds the
+// pool-acquire and the transaction body with SEPARATE writerTimeout budgets:
+//
+//   - acqCtx bounds only checking the single writer connection out of the pool,
+//     so a wedged/held writer can never hang the caller forever (serve-wedge
+//     fix, task 34037526).
+//   - the body context (cancelled only by Commit/Rollback) starts fresh once the
+//     connection is in hand, giving every statement + the commit a full budget.
+//
+// Previously a single shared ctx bounded both: under writer contention (the
+// 2026-09-02 window) a slow acquire consumed most of the deadline, then the
+// deadline fired mid-body, database/sql rolled the tx back on its own
+// goroutine, and the following Exec/Commit hit an already-finished tx —
+// "sql: transaction has already been committed or rolled back". Splitting the
+// budgets means the body is never reused after a background rollback.
 func (d *DB) beginWriterTx() (*writerTx, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
-	tx, err := d.conn.BeginTx(ctx, nil)
+	acqCtx, acqCancel := context.WithTimeout(context.Background(), writerTimeout)
+	conn, err := d.conn.Conn(acqCtx)
+	acqCancel()
 	if err != nil {
-		cancel()
 		return nil, err
 	}
-	return &writerTx{Tx: tx, cancel: cancel}, nil
+	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		cancel()
+		_ = conn.Close() // return the connection to the pool
+		return nil, err
+	}
+	return &writerTx{Tx: tx, cancel: cancel, conn: conn}, nil
 }
 
 // Path returns the database file path.

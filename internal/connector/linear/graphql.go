@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -15,6 +16,34 @@ import (
 // linearAPIURL is the Linear GraphQL endpoint. Overridable in tests via the
 // connector's gql.url field (set by a test httptest server).
 const linearAPIURL = "https://api.linear.app/graphql"
+
+// httpError is returned by do() for a non-2xx HTTP response. It carries the
+// status code so the reconcile loop can classify auth failures (401/403 — a
+// dead API key, pause with a long backoff) from transient errors (5xx/network —
+// short bounded backoff). Its Error() text is unchanged ("gql http status N")
+// so string-matching callers (isFieldError) keep working.
+type httpError struct{ code int }
+
+func (e *httpError) Error() string { return fmt.Sprintf("gql http status %d", e.code) }
+
+// httpStatus extracts the HTTP status code from a do() error chain, if any.
+func httpStatus(err error) (int, bool) {
+	var he *httpError
+	if errors.As(err, &he) {
+		return he.code, true
+	}
+	return 0, false
+}
+
+// isAuthError reports whether err is an HTTP 401/403 from Linear — an
+// authentication/authorization failure (dead or revoked API key) that no
+// amount of retrying fixes until the credential changes.
+func isAuthError(err error) bool {
+	if code, ok := httpStatus(err); ok {
+		return code == http.StatusUnauthorized || code == http.StatusForbidden
+	}
+	return false
+}
 
 // graphqlClient is a tiny hand-written GraphQL client (no SDK). Personal API
 // keys are sent in the Authorization header verbatim (no "Bearer" prefix).
@@ -66,7 +95,7 @@ func (c *graphqlClient) do(ctx context.Context, query string, vars map[string]an
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("gql http status %d", resp.StatusCode)
+		return &httpError{code: resp.StatusCode}
 	}
 
 	var env gqlResponse

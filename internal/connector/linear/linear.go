@@ -37,6 +37,18 @@ type Connector struct {
 	lastReconcileAt atomic.Int64 // unix ms
 	writerFailures  atomic.Int64
 
+	// Reconcile backoff (guarded by reconcileMu). A failed poll backs off instead
+	// of retrying every interval forever: an auth failure (dead/revoked API key)
+	// pauses with a long exponential backoff and surfaces ONCE at ERROR naming the
+	// fix; transient errors (5xx/network/timeout) use a short bounded backoff.
+	// Reset only on a successful poll or a connector rebuild (key change / process
+	// restart) — a new API key produces a new Connector via ReconfigureLinear.
+	reconcileMu     sync.Mutex
+	reconcileNextAt time.Time        // earliest wall-clock time the next poll may run
+	reconcileDelay  time.Duration    // current backoff delay (0 = healthy)
+	authLatched     bool             // an auth failure is currently latched (surfaced once)
+	nowFn           func() time.Time // clock hook for tests; nil => time.Now
+
 	// onEvent receives semantic events found OUTSIDE the webhook path (the
 	// reconcile poll detecting a → In Progress transition). The webhook path
 	// returns events from Ingest instead; this sink exists because reconcile

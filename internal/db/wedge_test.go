@@ -117,3 +117,53 @@ func TestBeginWriterTx_TimesOutOnPoolExhaustion(t *testing.T) {
 // that caused replays should itself become rare-to-none. Follow-up: add a
 // caller-supplied idempotency key if replay is still observed after this fix
 // ships.
+
+// TestBeginWriterTx_FreshBodyBudgetAfterSlowAcquire is the regression test for
+// the "sql: transaction has already been committed or rolled back" error
+// observed in the expire-deliveries sweep during the 2026-09-02 writer-
+// contention window. beginWriterTx once bounded the pool-acquire AND the
+// transaction body with ONE shared deadline: a slow acquire (writer held by a
+// concurrent op) left only a sliver of that deadline for the body, the deadline
+// then fired mid-transaction, database/sql rolled the tx back on its own
+// goroutine, and the caller's next Exec/Commit hit an already-finished tx.
+//
+// Here the sole writer connection is held for most of writerTimeout, so the
+// acquire consumes nearly the whole (old) shared budget; a small body delay then
+// pushes the Exec/Commit past where the old shared deadline would have fired.
+// With the acquire/body split the body has its own fresh budget, so Exec and
+// Commit succeed instead of returning ErrTxDone.
+func TestBeginWriterTx_FreshBodyBudgetAfterSlowAcquire(t *testing.T) {
+	d := soakDB(t)
+	orig := writerTimeout
+	writerTimeout = 300 * time.Millisecond
+	defer func() { writerTimeout = orig }()
+
+	// Hold the writer pool's ONLY connection for most of writerTimeout, then
+	// release it so beginWriterTx can acquire with almost no shared budget left.
+	hold, err := d.conn.Begin()
+	if err != nil {
+		t.Fatalf("hold begin: %v", err)
+	}
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		_ = hold.Rollback()
+	}()
+
+	tx, err := d.beginWriterTx() // blocks ~250ms acquiring the connection
+	if err != nil {
+		t.Fatalf("beginWriterTx after slow acquire: %v", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// A body slice that outlives the *remaining* sliver of the old shared
+	// deadline but fits comfortably in a fresh per-body budget. Pre-fix, the
+	// shared ctx expired here and the Exec below returned
+	// "sql: transaction has already been committed or rolled back".
+	time.Sleep(100 * time.Millisecond)
+	if _, err := tx.Exec("UPDATE agents SET last_seen = ? WHERE name = ?", "x", "nobody"); err != nil {
+		t.Fatalf("tx.Exec after slow acquire (tx guillotined mid-body?): %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("tx.Commit after slow acquire (tx guillotined mid-body?): %v", err)
+	}
+}
