@@ -237,6 +237,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiSignalWebhook(w, req)
 	case path == "/agents/avatar" && req.Method == http.MethodPut:
 		r.apiSetAgentAvatar(w, req)
+	case strings.HasPrefix(path, "/agents/") && strings.HasSuffix(path, "/deactivate") && req.Method == http.MethodPost:
+		r.apiDeactivateAgent(w, req, strings.TrimSuffix(strings.TrimPrefix(path, "/agents/"), "/deactivate"))
+	case strings.HasPrefix(path, "/agents/") && req.Method == http.MethodDelete:
+		r.apiDeleteAgent(w, req, strings.TrimPrefix(path, "/agents/"))
 	default:
 		http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
 	}
@@ -2192,4 +2196,58 @@ func (r *Relay) apiSetAgentAvatar(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true, "agent": body.Name, "avatar_url": u})
+}
+
+// apiDeactivateAgent is the REST wrapper for the deactivate_agent MCP tool
+// (audit b983684b §1: MCP-only, zero REST route). Reuses the same DB call +
+// soft-cascade (Phase 2) as HandleDeactivateAgent — no new business logic.
+func (r *Relay) apiDeactivateAgent(w http.ResponseWriter, req *http.Request, name string) {
+	if name == "" {
+		http.Error(w, `{"error":"missing agent name"}`, http.StatusBadRequest)
+		return
+	}
+	project := projectFromRequest(req)
+	agent, err := r.DB.GetAgent(project, name)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to look up agent", err)
+		return
+	}
+	if agent == nil {
+		http.Error(w, `{"error":"agent not found"}`, http.StatusNotFound)
+		return
+	}
+	if err := r.DB.DeactivateAgent(project, name); err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to deactivate agent", err)
+		return
+	}
+	r.Events.Emit(MCPEvent{Type: "register", Action: "deactivate", Agent: name, Project: project})
+	r.Handlers.cascadeDeactivatedAgent(project, name)
+	writeJSON(w, map[string]any{"deactivated": true, "agent": name})
+}
+
+// apiDeleteAgent is the REST wrapper for the delete_agent MCP tool (audit
+// b983684b §1: MCP-only, zero REST route). Reuses the same DB call + soft-
+// cascade (Phase 2) as HandleDeleteAgent — no new business logic. DeleteAgent
+// is a tombstone (status='deleted'), not a hard row delete.
+func (r *Relay) apiDeleteAgent(w http.ResponseWriter, req *http.Request, name string) {
+	if name == "" {
+		http.Error(w, `{"error":"missing agent name"}`, http.StatusBadRequest)
+		return
+	}
+	project := projectFromRequest(req)
+	agent, err := r.DB.GetAgent(project, name)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to look up agent", err)
+		return
+	}
+	if agent == nil {
+		http.Error(w, `{"error":"agent not found"}`, http.StatusNotFound)
+		return
+	}
+	if err := r.DB.DeleteAgent(project, name); err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to delete agent", err)
+		return
+	}
+	r.Handlers.cascadeDeactivatedAgent(project, name)
+	writeJSON(w, map[string]any{"deleted": true, "agent": name})
 }
