@@ -1,8 +1,10 @@
 package relay
 
 import (
+	"agent-relay/internal/db"
 	"agent-relay/internal/models"
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -45,6 +47,10 @@ func (h *Handlers) HandleArchiveBoard(ctx context.Context, req mcp.CallToolReque
 	}
 
 	if err := h.db.ArchiveBoard(project, boardID); err != nil {
+		var lt *db.LinearTasksOnBoardError
+		if errors.As(err, &lt) {
+			return permissionError("BOARD_HAS_LINEAR_TASKS", lt.Error()), nil
+		}
 		return toolResultError(fmt.Sprintf("failed to archive board: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Board %s archived (with all its tasks)", boardID)), nil
@@ -58,6 +64,10 @@ func (h *Handlers) HandleDeleteBoard(ctx context.Context, req mcp.CallToolReques
 	}
 
 	if err := h.db.DeleteBoard(project, boardID); err != nil {
+		var lt *db.LinearTasksOnBoardError
+		if errors.As(err, &lt) {
+			return permissionError("BOARD_HAS_LINEAR_TASKS", lt.Error()), nil
+		}
 		return toolResultError(fmt.Sprintf("failed to delete board: %v", err)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Board %s permanently deleted", boardID)), nil

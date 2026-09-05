@@ -94,37 +94,107 @@ func (d *DB) GetBoard(project, slug string) (*models.Board, error) {
 	return &b, nil
 }
 
-// ArchiveBoard soft-deletes a board and archives all its tasks.
+// LinearTasksOnBoardError refuses a board archive/delete that would silently
+// desync Linear-mirrored tasks. Boards carry no Linear coupling of their own;
+// the hazard is the task side — archive cascades archived_at onto open mirror
+// rows, delete orphans their board_id (DEC-wraith-boards-linear-guard-1). Op is
+// "archive" or "delete"; Count is the number of offending source='linear' tasks
+// (open for archive, any for delete). The relay handler maps it to the typed
+// BOARD_HAS_LINEAR_TASKS refusal.
+type LinearTasksOnBoardError struct {
+	Op    string
+	Count int
+}
+
+func (e *LinearTasksOnBoardError) Error() string {
+	if e.Op == "delete" {
+		return fmt.Sprintf("%d Linear-mirrored tasks still reference this board", e.Count)
+	}
+	return fmt.Sprintf("%d open Linear-mirrored tasks on this board — move_task them off or close them in Linear first", e.Count)
+}
+
+// ArchiveBoard soft-deletes a board and archives all its tasks. It refuses,
+// fail-closed and inside the same writer tx as the cascade, when the board
+// carries any OPEN Linear-mirrored task (source='linear', not archived, not
+// done/cancelled): the cascade would stamp archived_at onto a live mirror row
+// and silently desync it from Linear. A board whose mirrored tasks are all
+// terminal/archived archives freely, exactly as before.
 func (d *DB) ArchiveBoard(project, boardID string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
-	_, err := d.writerExec(
-		`UPDATE boards SET archived_at = ? WHERE id = ? AND project = ? AND archived_at IS NULL`,
-		now, boardID, project,
-	)
+	tx, err := d.beginWriterTx()
 	if err != nil {
-		return fmt.Errorf("archive board: %w", err)
+		return fmt.Errorf("archive board begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Guard BEFORE the cascade. A query error refuses (fail closed) — the
+	// destructive UPDATEs below never run, so the board is left untouched.
+	var open int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM tasks
+		   WHERE board_id = ? AND project = ? AND source = 'linear'
+		     AND archived_at IS NULL AND status NOT IN ('done','cancelled')`,
+		boardID, project,
+	).Scan(&open); err != nil {
+		return fmt.Errorf("archive board linear check: %w", err)
+	}
+	if open > 0 {
+		return &LinearTasksOnBoardError{Op: "archive", Count: open}
 	}
 
-	// Also archive all tasks on this board
-	_, err = d.writerExec(
+	if _, err := tx.Exec(
+		`UPDATE boards SET archived_at = ? WHERE id = ? AND project = ? AND archived_at IS NULL`,
+		now, boardID, project,
+	); err != nil {
+		return fmt.Errorf("archive board: %w", err)
+	}
+	// Also archive all tasks on this board.
+	if _, err := tx.Exec(
 		`UPDATE tasks SET archived_at = ? WHERE board_id = ? AND project = ? AND archived_at IS NULL`,
 		now, boardID, project,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("archive board tasks: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("archive board commit: %w", err)
 	}
 	return nil
 }
 
-// DeleteBoard hard-deletes a board (only if already archived).
+// DeleteBoard hard-deletes a board (only if already archived). It refuses,
+// fail-closed and inside the same writer tx as the delete, when ANY task — any
+// status, archived included — still references the board via source='linear':
+// deleting the board would orphan those mirror rows' board_id
+// (DEC-wraith-boards-linear-guard-1).
 func (d *DB) DeleteBoard(project, boardID string) error {
-	_, err := d.writerExec(
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return fmt.Errorf("delete board begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Guard BEFORE the delete. A query error refuses (fail closed) — the DELETE
+	// below never runs, so the board row is left untouched.
+	var refs int
+	if err := tx.QueryRow(
+		`SELECT COUNT(*) FROM tasks WHERE board_id = ? AND project = ? AND source = 'linear'`,
+		boardID, project,
+	).Scan(&refs); err != nil {
+		return fmt.Errorf("delete board linear check: %w", err)
+	}
+	if refs > 0 {
+		return &LinearTasksOnBoardError{Op: "delete", Count: refs}
+	}
+
+	if _, err := tx.Exec(
 		`DELETE FROM boards WHERE id = ? AND project = ? AND archived_at IS NOT NULL`,
 		boardID, project,
-	)
-	if err != nil {
+	); err != nil {
 		return fmt.Errorf("delete board: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete board commit: %w", err)
 	}
 	return nil
 }
