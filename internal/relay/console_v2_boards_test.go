@@ -68,7 +68,7 @@ func TestV2Boards(t *testing.T) {
 		af := strings.Index(board, "function applyFilters")
 		branch := strings.Index(board, "if (boardSel !== 'all')")
 		next := strings.Index(board, "const filtersActive")
-		if af < 0 || branch < 0 || next < 0 || !(af < branch && branch < next) {
+		if af < 0 || branch < 0 || next < 0 || af >= branch || branch >= next {
 			t.Error("the board_id filter must sit inside applyFilters")
 		}
 	})
