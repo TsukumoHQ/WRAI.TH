@@ -67,3 +67,35 @@ func (h *Handlers) HandleDeleteProject(ctx context.Context, req mcp.CallToolRequ
 		"project": project,
 	})
 }
+
+func (h *Handlers) HandleArchiveProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := NormalizeProject(req.GetString("project", ""))
+	if project == "" {
+		return toolResultError("project is required"), nil
+	}
+
+	if err := h.db.ArchiveProject(project); err != nil {
+		return toolResultError(fmt.Sprintf("failed to archive project: %v", err)), nil
+	}
+
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "archive_project", map[string]any{
+		"archived": true,
+		"project":  project,
+	})
+}
+
+func (h *Handlers) HandleUnarchiveProject(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := NormalizeProject(req.GetString("project", ""))
+	if project == "" {
+		return toolResultError("project is required"), nil
+	}
+
+	if err := h.db.UnarchiveProject(project); err != nil {
+		return toolResultError(fmt.Sprintf("failed to unarchive project: %v", err)), nil
+	}
+
+	return h.resultJSONTracked(h.resolveProject(ctx, req), "", "unarchive_project", map[string]any{
+		"unarchived": true,
+		"project":    project,
+	})
+}

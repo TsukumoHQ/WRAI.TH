@@ -25,4 +25,5 @@ type ProjectInfo struct {
 	BlockedTasks int    `json:"blocked_tasks"`
 	Tokens24h    int64  `json:"tokens_24h"`
 	LastActivity string `json:"last_activity"` // ISO ts of the most recent task movement; "" if none
+	ArchivedAt   string `json:"archived_at"`   // RFC3339 when archived; "" if active (DEC-wraith-archive-project-1)
 }

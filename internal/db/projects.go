@@ -3,6 +3,7 @@ package db
 import (
 	"agent-relay/internal/models"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"strings"
@@ -195,9 +196,101 @@ func (d *DB) DeleteProject(name string) error {
 	return nil
 }
 
-// ListProjectsWithInfo returns all projects with their planet_type and stats.
+// isLinearBackedProject reports whether name is a mirror target in
+// linear_project_map — a VALUE in the {linearProjectId: relayProject} JSON.
+// Archiving such a project is fail-closed until S7 (design §5): the
+// reconcile/backfill loop would keep writing to a frozen project. name is
+// expected already canonicalized by the caller.
+func (d *DB) isLinearBackedProject(name string) bool {
+	raw := d.GetSetting("linear_project_map")
+	if raw == "" {
+		return false
+	}
+	var m map[string]string
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return false
+	}
+	for _, relayProj := range m {
+		if canonicalProject(relayProj) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// ArchiveProject soft-archives a project: a reversible status flip with ZERO
+// cascade (DEC-wraith-archive-project-1). No other table is touched — agents,
+// tasks, messages, memories, deliveries all persist, frozen. Already-archived or
+// unknown = explicit error (refuse loudly). Fail-closed on Linear-backed
+// projects until S7.
+func (d *DB) ArchiveProject(name string) error {
+	name = canonicalProject(name)
+	if name == "" {
+		return fmt.Errorf("project name is required")
+	}
+	if d.isLinearBackedProject(name) {
+		return fmt.Errorf("project %q is Linear-backed (in linear_project_map); unlink it from Linear before archiving", name)
+	}
+	res, err := d.writerExec(
+		"UPDATE projects SET archived_at = ? WHERE name = ? AND archived_at IS NULL",
+		time.Now().UTC().Format(time.RFC3339), name)
+	if err != nil {
+		return fmt.Errorf("archive project: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		// Distinguish not-found from already-archived for a loud, actionable error.
+		var archivedAt sql.NullString
+		switch err := d.ro().QueryRow("SELECT archived_at FROM projects WHERE name = ?", name).Scan(&archivedAt); err {
+		case sql.ErrNoRows:
+			return fmt.Errorf("project %q not found", name)
+		case nil:
+			return fmt.Errorf("project %q is already archived", name)
+		default:
+			return fmt.Errorf("archive project: %w", err)
+		}
+	}
+	return nil
+}
+
+// UnarchiveProject reverses ArchiveProject with zero data loss (nothing was ever
+// deleted). Unknown or not-archived = explicit error.
+func (d *DB) UnarchiveProject(name string) error {
+	name = canonicalProject(name)
+	if name == "" {
+		return fmt.Errorf("project name is required")
+	}
+	res, err := d.writerExec(
+		"UPDATE projects SET archived_at = NULL WHERE name = ? AND archived_at IS NOT NULL", name)
+	if err != nil {
+		return fmt.Errorf("unarchive project: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var cnt int
+		_ = d.ro().QueryRow("SELECT COUNT(*) FROM projects WHERE name = ?", name).Scan(&cnt)
+		if cnt == 0 {
+			return fmt.Errorf("project %q not found", name)
+		}
+		return fmt.Errorf("project %q is not archived", name)
+	}
+	return nil
+}
+
+// ListProjectsWithInfo returns ACTIVE projects with their planet_type and stats.
+// Archived projects are excluded (DEC-wraith-archive-project-1); use
+// ListProjectsWithInfoFiltered(true) to include them.
 func (d *DB) ListProjectsWithInfo() ([]models.ProjectInfo, error) {
+	return d.ListProjectsWithInfoFiltered(false)
+}
+
+// ListProjectsWithInfoFiltered returns projects with stats. When includeArchived
+// is false, archived projects (projects.archived_at IS NOT NULL) are excluded;
+// when true they are returned with archived_at populated.
+func (d *DB) ListProjectsWithInfoFiltered(includeArchived bool) ([]models.ProjectInfo, error) {
 	since24h := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
+	where := ""
+	if !includeArchived {
+		where = "WHERE p.archived_at IS NULL"
+	}
 	rows, err := d.ro().Query(`
 		SELECT p.name, p.planet_type, p.created_at,
 			COALESCE(ac.agent_count, 0),
@@ -207,7 +300,8 @@ func (d *DB) ListProjectsWithInfo() ([]models.ProjectInfo, error) {
 			COALESCE(tc.done_tasks, 0),
 			COALESCE(tc.blocked_tasks, 0),
 			COALESCE(tu.tokens_24h, 0),
-			COALESCE(tc.last_activity, '')
+			COALESCE(tc.last_activity, ''),
+			COALESCE(p.archived_at, '')
 		FROM projects p
 		LEFT JOIN (
 			SELECT project, COUNT(*) as agent_count,
@@ -227,6 +321,7 @@ func (d *DB) ListProjectsWithInfo() ([]models.ProjectInfo, error) {
 			SELECT project, SUM(bytes)/4 as tokens_24h
 			FROM token_usage WHERE created_at >= ? GROUP BY project
 		) tu ON tu.project = p.name
+		`+where+`
 		ORDER BY p.name
 	`, since24h)
 	if err != nil {
@@ -237,7 +332,7 @@ func (d *DB) ListProjectsWithInfo() ([]models.ProjectInfo, error) {
 	var projects []models.ProjectInfo
 	for rows.Next() {
 		var p models.ProjectInfo
-		if err := rows.Scan(&p.Name, &p.PlanetType, &p.CreatedAt, &p.AgentCount, &p.OnlineCount, &p.TotalTasks, &p.ActiveTasks, &p.DoneTasks, &p.BlockedTasks, &p.Tokens24h, &p.LastActivity); err != nil {
+		if err := rows.Scan(&p.Name, &p.PlanetType, &p.CreatedAt, &p.AgentCount, &p.OnlineCount, &p.TotalTasks, &p.ActiveTasks, &p.DoneTasks, &p.BlockedTasks, &p.Tokens24h, &p.LastActivity, &p.ArchivedAt); err != nil {
 			return nil, err
 		}
 		projects = append(projects, p)

@@ -17,7 +17,7 @@ var formatParam = mcp.WithString("format", mcp.Description("'md' (default, markd
 func whoamiTool() mcp.Tool {
 	return mcp.NewTool(
 		"whoami",
-		mcp.WithDescription("Find your Claude Code session ID. Generate a salt (3+ random words), write it in your conversation, then call this with it — the relay greps ~/.claude transcripts for the salt. Use the returned session_id in register_agent."),
+		mcp.WithDescription("Find your Claude Code session ID. Write a salt (3+ random words) in your conversation, then call this with it — the relay greps ~/.claude transcripts for the salt, returns session_id for register_agent."),
 		mcp.WithString("salt", mcp.Description("Unique string of 3+ random words you just wrote in your conversation (e.g. 'purple-falcon-nebula')."), mcp.Required()),
 	)
 }
@@ -25,7 +25,7 @@ func whoamiTool() mcp.Tool {
 func registerAgentTool() mcp.Tool {
 	return mcp.NewTool(
 		"register_agent",
-		mcp.WithDescription("Register an agent (once at startup; re-registering updates it). Returns session_context (profile, tasks, unread, conversations). On re-register, OMITTED identity fields (reports_to, profile_slug, is_executive, session_id) are PRESERVED; role/description/interest_tags/max_context_bytes always update. is_executive=true auto-creates the 'leadership' admin team, enabling broadcast (to='*')."),
+		mcp.WithDescription("Register an agent (at startup; re-registering updates it). Returns session_context (profile, tasks, unread, conversations). On re-register, OMITTED identity fields (reports_to, profile_slug, is_executive, session_id) are PRESERVED; other fields always update. is_executive=true auto-creates the 'leadership' admin team for broadcast (to='*')."),
 		projectParam,
 		mcp.WithString("name", mcp.Description("Unique agent name (e.g. 'backend'). Re-register same name to update. To rename: register new name, deactivate_agent the old."), mcp.Required()),
 		mcp.WithString("role", mcp.Description("Role description (e.g. 'FastAPI backend developer')")),
@@ -35,7 +35,7 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithBoolean("is_service", mcp.Description("Service/daemon identity (monitoring/QA): always eligible to send, exempt from the liveness gate, so it posts even when every worker is dead. Preserved when omitted.")),
 		mcp.WithString("profile_slug", mcp.Description("Profile archetype this agent runs")),
 		mcp.WithString("session_id", mcp.Description("Claude Code session ID ($CLAUDE_SESSION_ID) for activity tracking")),
-		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: a SessionStart hook re-binds the rotated session_id after /clear. N agents can share one cwd (e.g. a team co-located on one worktree) — each still resolves independently by name; only a SessionStart rebind with NO agent name given refuses to guess between shared-cwd agents.")),
+		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: a SessionStart hook re-binds the rotated session_id after /clear. Agents can share one cwd (co-located team) — each resolves by name; a rebind with NO name refuses to guess between them.")),
 		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering (e.g. '[\"database\",\"auth\"]')")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
 	)
@@ -62,9 +62,9 @@ func sendMessageTool() mcp.Tool {
 			mcp.Enum("P0", "P1", "P2", "P3"),
 		),
 		mcp.WithNumber("ttl_seconds", mcp.Description("Seconds before expiry (default 14400 = 4h, 0 = never). Expired messages leave the inbox.")),
-		mcp.WithString("target_project", mcp.Description("Cross-project DM: deliver to this agent name in target_project. Both sender and recipient must be is_executive. Message lives in the target project; metadata records the source.")),
+		mcp.WithString("target_project", mcp.Description("Cross-project DM: deliver to this agent in target_project. Both sender and recipient must be is_executive. Message lives in the target project; metadata records the source.")),
 		mcp.WithString("action_required",
-			mcp.Description("Does the recipient need to act? 'none' routes no-wake (stays in inbox) — for FYIs/receipts/status. 'ask'/'do'/'decide' may wake per priority. Omit to derive from type. A question/blocker is never suppressed by 'none'."),
+			mcp.Description("Does the recipient need to act? 'none' = no-wake (stays in inbox), for FYIs/receipts/status. 'ask'/'do'/'decide' may wake per priority. Omit to derive from type. A question/blocker is never suppressed by 'none'."),
 			mcp.Enum("ask", "do", "decide", "none"),
 		),
 		mcp.WithString("idempotency_key", mcp.Description("Optional retry key; same key returns the original message, no duplicate.")),
@@ -97,7 +97,7 @@ func getInboxTool() mcp.Tool {
 		mcp.WithBoolean("unread_only", mcp.Description("Only unread (default true)")),
 		mcp.WithNumber("limit", mcp.Description("Max messages (default 10)")),
 		mcp.WithBoolean("full_content", mcp.Description("Full content instead of 300-char truncation (default false)")),
-		mcp.WithBoolean("apply_budget", mcp.Description("Prune by priority, tag relevance and freshness to fit the agent's max_context_bytes (default false)")),
+		mcp.WithBoolean("apply_budget", mcp.Description("Prune by priority, tag relevance and freshness to fit max_context_bytes (default false)")),
 		mcp.WithString("min_priority", mcp.Description("Minimum priority (e.g. 'P1' returns P0+P1)"), mcp.Enum("P0", "P1", "P2", "P3")),
 		mcp.WithString("from", mcp.Description("Filter by sender")),
 		mcp.WithString("since", mcp.Description("Only messages after this ISO timestamp")),
@@ -171,7 +171,7 @@ func listAgentsTool() mcp.Tool {
 func isEligibleTool() mcp.Tool {
 	return mcp.NewTool(
 		"is_eligible",
-		mcp.WithDescription("Read-only sender-eligibility check: {eligible, reason} for an agent without sending. Same verdict send_message would give, so a client PARKS on eligible=false instead of hot-looping a failing send. Service identities are always eligible."),
+		mcp.WithDescription("Read-only sender-eligibility check: {eligible, reason} for an agent without sending — the verdict send_message would give, so a client parks instead of hot-looping a failing send. Service identities always eligible."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Agent name to check (default: yourself, i.e. the `as` identity)")),
@@ -181,7 +181,7 @@ func isEligibleTool() mcp.Tool {
 func identityCheckTool() mcp.Tool {
 	return mcp.NewTool(
 		"identity_check",
-		mcp.WithDescription("Read-only: is a name wake-resolvable, or an unbound ghost that drops wakes? conflicting_agents lists other active agents sharing this cwd — informational (normal for a team sharing a worktree), not a failure. Returns {registered, ghost, bound_uniquely, conflicting_agents, reason}."),
+		mcp.WithDescription("Read-only: is a name wake-resolvable, or an unbound ghost that drops wakes? conflicting_agents lists other agents on this cwd — informational (normal for a co-located team), not a failure. Returns {registered, ghost, bound_uniquely, conflicting_agents, reason}."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Name to check (default caller)")),
@@ -294,14 +294,14 @@ func setMemoryTool() mcp.Tool {
 			mcp.Enum("constraints", "behavior", "context"),
 		),
 		mcp.WithBoolean("upsert", mcp.Description("true (default): overwrite. false: flag a conflict if value differs.")),
-		mcp.WithString("valid_until", mcp.Description("Optional ISO-8601 UTC expiry; past it reads 'stale' (hidden unless include_stale). Empty=none. valid_from optional too.")),
+		mcp.WithString("valid_until", mcp.Description("Optional ISO-8601 UTC expiry; past it reads 'stale' (hidden unless include_stale). Empty=none.")),
 	)
 }
 
 func rememberTool() mcp.Tool {
 	return mcp.NewTool(
 		"remember",
-		mcp.WithDescription("Record a SETTLED decision (ADR-style) so the team stops re-debating it. A project decision, surfaced at session start. Dedup-or-supersede: a near-identical decision in the same area is rejected unless you pass `supersedes`."),
+		mcp.WithDescription("Record a SETTLED decision (ADR-style) so the team stops re-debating it; surfaced at session start. Dedup-or-supersede: a near-identical decision in the same area is rejected unless you pass `supersedes`."),
 		asParam,
 		projectParam,
 		mcp.WithString("decision", mcp.Description("The settled rule, one line"), mcp.Required()),
@@ -447,7 +447,7 @@ func findProfilesTool() mcp.Tool {
 func dispatchTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"dispatch_task",
-		mcp.WithDescription("Dispatch a task to a profile (state 'pending', claimable by agents running it). profile='human' for human-action tasks (auto-created on first use). No board_id: auto-assigned on 0/1 boards ('backlog' if 0); refused (lists boards) if >1."),
+		mcp.WithDescription("Dispatch a task to a profile (state 'pending', claimable by agents running it). profile='human' = human-action tasks (auto-created). No board_id: auto-assigned on 0/1 boards ('backlog' if 0); refused (lists boards) if >1."),
 		asParam,
 		projectParam,
 		mcp.WithString("profile", mcp.Description("Profile slug to dispatch to"), mcp.Required()),
@@ -569,7 +569,7 @@ func cancelTaskTool() mcp.Tool {
 func reclaimTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"reclaim_task",
-		mcp.WithDescription("Take over a DEAD holder's task (supervisor re-claim). Succeeds only when the lease has expired OR its holder is deregistered/inactive; a live holder refuses with TASK_LEASE_HELD. On success the task moves to 'accepted' under the caller with a fresh lease."),
+		mcp.WithDescription("Take over a DEAD holder's task (supervisor re-claim). Succeeds only when the lease expired OR the holder is deregistered/inactive; a live holder refuses (TASK_LEASE_HELD). On success the task moves to 'accepted' under the caller with a fresh lease."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -593,7 +593,7 @@ func linkPrTool() mcp.Tool {
 func reconcilePrTool() mcp.Tool {
 	return mcp.NewTool(
 		"reconcile_pr",
-		mcp.WithDescription("Poll-side PR convergence (write-back for relay://pr-reconcile): a gh-owning poller passes the observed pr_state to converge the task via the webhook's one-way map (open→in-review, merged→done, closed-unmerged→blocked), no-resurrect + idempotent. Returns {task, changed}."),
+		mcp.WithDescription("Poll-side PR convergence (write-back for relay://pr-reconcile): a gh-owning poller passes the observed pr_state to converge the task via the webhook's one-way map (open→in-review, merged→done, closed-unmerged→blocked), no-resurrect + idempotent."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID (a pr-reconcile candidate)"), mcp.Required()),
@@ -606,7 +606,7 @@ func reconcilePrTool() mcp.Tool {
 func setRunTool() mcp.Tool {
 	return mcp.NewTool(
 		"set_run",
-		mcp.WithDescription("Stamp the run zone on a PARENT task (changeset-per-run): integration_branch and/or a run_state advance (open→gating→merging→merged | blocked | amputated). A run-state task is a container (groups slices, not claimable). Transition-enforced, idempotent."),
+		mcp.WithDescription("Stamp the run zone on a PARENT task (changeset-per-run): integration_branch and/or a run_state advance (open→gating→merging→merged | blocked | amputated). The task is a container (groups slices, not claimable). Transition-enforced, idempotent."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Parent task ID (the run)"), mcp.Required()),
@@ -673,7 +673,7 @@ func batchDispatchTasksTool() mcp.Tool {
 		mcp.WithDescription("Dispatch multiple tasks at once. On projects that enforce typed tickets (e.g. niwa) each item must carry goal + acceptance_criteria + dod; an item missing any is skipped and reported in errors while the rest dispatch."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\",\"goal\":\"...\",\"acceptance_criteria\":[\"item1\",\"item2\"],\"dod\":\"...\",\"verify_cmd\":\"...\"}]. profile and title always required; goal/acceptance_criteria/dod required only where typed tickets are enforced (acceptance_criteria is a real JSON array here, not a string); verify_cmd is always optional."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array: [{\"profile\":\"...\",\"title\":\"...\",\"description\":\"...\",\"priority\":\"P2\",\"board_id\":\"...\",\"goal\":\"...\",\"acceptance_criteria\":[\"item1\",\"item2\"],\"dod\":\"...\",\"verify_cmd\":\"...\"}]. profile and title always required; goal/acceptance_criteria/dod required only where typed tickets are enforced; verify_cmd always optional."), mcp.Required()),
 	)
 }
 
@@ -733,7 +733,7 @@ func deleteBoardTool() mcp.Tool {
 func updateTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"update_task",
-		mcp.WithDescription("Update task fields without changing status. progress_note appends a timestamped note. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited. assigned_to/profile_slug reassign (dispatcher/lead/exec only): assigned_to transfers a claimed lease + notifies the old doer; profile_slug alone on a claimed task refused. Unknown fields refused, not ignored."),
+		mcp.WithDescription("Update task fields (not status). progress_note appends a timestamped note. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited. Reassign (dispatcher/lead/exec): assigned_to transfers a claimed lease + notifies the old doer; profile_slug alone on a claimed task refused. Unknown fields refused, not ignored."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -838,12 +838,28 @@ func deleteProjectTool() mcp.Tool {
 	)
 }
 
+func archiveProjectTool() mcp.Tool {
+	return mcp.NewTool(
+		"archive_project",
+		mcp.WithDescription("Hide a project from listings (reversible, deletes nothing). Refused for Linear-backed projects."),
+		mcp.WithString("project", mcp.Description("Project name"), mcp.Required()),
+	)
+}
+
+func unarchiveProjectTool() mcp.Tool {
+	return mcp.NewTool(
+		"unarchive_project",
+		mcp.WithDescription("Restore an archived project (zero data loss)."),
+		mcp.WithString("project", mcp.Description("Project name"), mcp.Required()),
+	)
+}
+
 // --- Project onboarding ---
 
 func createProjectTool() mcp.Tool {
 	return mcp.NewTool(
 		"create_project",
-		mcp.WithDescription("Set up a new project — the FIRST tool to call. Creates the project and returns an onboarding plan you execute step by step as the setup agent: analyze the codebase, store knowledge, create the org, profiles, and board."),
+		mcp.WithDescription("Set up a new project — the FIRST tool to call. Creates the project and returns an onboarding plan you execute as the setup agent: analyze the codebase, store knowledge, create the org, profiles, and board."),
 		mcp.WithString("name", mcp.Description("Project name (lowercase, no spaces)"), mcp.Required()),
 		mcp.WithString("description", mcp.Description("One-line description")),
 		mcp.WithString("cwd", mcp.Description("Absolute path to the project root")),
@@ -949,7 +965,7 @@ func removeTeamMemberTool() mcp.Tool {
 func deleteTeamTool() mcp.Tool {
 	return mcp.NewTool(
 		"delete_team",
-		mcp.WithDescription("Retire a team: removes the team, its memberships, and its inbox refs. Use this to deprecate a channel — leaving a team memberless keeps its slug addressable, and a send to it reaches nobody. Delivered messages are untouched."),
+		mcp.WithDescription("Retire a team: removes the team, its memberships, and its inbox refs. To deprecate a channel, leave it memberless — its slug stays addressable but a send reaches nobody. Delivered messages untouched."),
 		asParam,
 		projectParam,
 		mcp.WithString("team", mcp.Description("Team slug"), mcp.Required()),

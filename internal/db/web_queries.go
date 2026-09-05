@@ -207,8 +207,20 @@ func (d *DB) ListAllConversationsAcrossProjects() ([]models.ConversationWithMemb
 	return convs, nil
 }
 
-// ListProjects returns all distinct project names across agents, messages, and conversations.
+// ListProjects returns distinct ACTIVE project names across agents, messages, and
+// conversations. Archived projects (projects.archived_at IS NOT NULL) are excluded
+// (DEC-wraith-archive-project-1); use ListProjectsFiltered(true) to include them.
 func (d *DB) ListProjects() ([]string, error) {
+	return d.ListProjectsFiltered(false)
+}
+
+// ListProjectsFiltered returns distinct project names. When includeArchived is
+// false, names of archived projects are excluded.
+func (d *DB) ListProjectsFiltered(includeArchived bool) ([]string, error) {
+	where := ""
+	if !includeArchived {
+		where = "WHERE project NOT IN (SELECT name FROM projects WHERE archived_at IS NOT NULL)"
+	}
 	rows, err := d.ro().Query(`
 		SELECT DISTINCT project FROM (
 			SELECT project FROM agents
@@ -216,7 +228,8 @@ func (d *DB) ListProjects() ([]string, error) {
 			SELECT project FROM messages
 			UNION
 			SELECT project FROM conversations
-		) ORDER BY project
+		) ` + where + `
+		ORDER BY project
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)

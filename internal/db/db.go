@@ -536,6 +536,15 @@ func migrate(conn *sql.DB) error {
 	seedMemoryDisciplineOn("niwa", "forest/1", "seed_niwa_memory_discipline")
 	seedMemoryDisciplineOn("tsukumo", "forest/1", "seed_tsukumo_memory_discipline")
 
+	// Soft-archive (DEC-wraith-archive-project-1). NULL = active, RFC3339 = archived.
+	// A COLUMN (not a side-table): projects has no scanProject lockstep and already
+	// carries ensureColumns lifecycle flags, so the Q2 side-table rationale does not
+	// apply. Additive + old-binary-compatible (an older binary never selects it and
+	// treats every project as active). Mirrors tasks.archived_at.
+	ensureColumns(conn, "projects", map[string]string{
+		"archived_at": "TEXT",
+	})
+
 	ensureColumns(conn, "messages", map[string]string{
 		"conversation_id": "TEXT",
 		"project":         "TEXT NOT NULL DEFAULT 'default'",

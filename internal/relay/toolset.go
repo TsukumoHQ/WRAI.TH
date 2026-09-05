@@ -162,6 +162,8 @@ func (h *Handlers) toolRegistry() []registeredTool {
 
 		{server.ServerTool{Tool: createProjectTool(), Handler: h.HandleCreateProject}, "projects"},
 		{server.ServerTool{Tool: deleteProjectTool(), Handler: h.HandleDeleteProject}, "projects"},
+		{server.ServerTool{Tool: archiveProjectTool(), Handler: h.HandleArchiveProject}, "projects"},
+		{server.ServerTool{Tool: unarchiveProjectTool(), Handler: h.HandleUnarchiveProject}, "projects"},
 	}
 	// Identity is mandatory on every actor-attributed write: a call with no
 	// resolvable agent or project is rejected before the write. Reads and the
@@ -215,7 +217,7 @@ var mutatingTools = map[string]bool{
 	// create_project is intentionally absent: it is a bootstrap tool. Requiring a
 	// registered identity in a project that does not exist yet is a chicken-and-egg
 	// lock (you cannot register under a project before creating it).
-	"delete_project": true,
+	"delete_project": true, "archive_project": true, "unarchive_project": true,
 }
 
 // guardIdentity wraps a mutating tool handler to reject any write that cannot
@@ -374,6 +376,8 @@ func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) 
 var coreDiscoveryTools = map[string]bool{
 	"create_project":      true,
 	"delete_project":      true,
+	"archive_project":     true,
+	"unarchive_project":   true,
 	"register_agent":      true,
 	"whoami":              true,
 	"get_session_context": true,
