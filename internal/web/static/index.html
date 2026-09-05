@@ -259,21 +259,20 @@
       <div class="help-section">
         <h3>Linear (SSOT mirror)</h3>
         <p class="settings-hint">Mode poll : le relay tire le cycle actif de Linear toutes les minutes. Aucun port expos&eacute;. Le board devient read-only (Linear est la source de v&eacute;rit&eacute;).</p>
-        <label class="settings-row">
-          <input type="checkbox" id="set-linear-enabled">
-          <span>Activer le mode Linear</span>
-        </label>
-        <label class="settings-row settings-col">
-          <span>API key</span>
-          <input type="password" id="set-linear-key" placeholder="lin_api_..." autocomplete="off">
-        </label>
+        <p class="settings-hint">La v1 est une vitrine en lecture seule. Pour modifier la configuration, ouvrez la <a href="/v2/" class="v2-link">console v2</a>.</p>
         <div class="settings-row">
-          <button id="set-linear-load-teams" class="settings-btn">Charger les teams</button>
-          <span id="set-linear-team-status" class="settings-hint"></span>
+          <span>Mode Linear</span>
+          <span id="set-linear-enabled-ro" class="settings-hint">&mdash;</span>
         </div>
-        <div id="set-linear-teams" class="settings-teams"></div>
         <div class="settings-row">
-          <button id="set-linear-save" class="settings-btn primary">Enregistrer</button>
+          <span>Team</span>
+          <span id="set-linear-team-ro" class="settings-hint">&mdash;</span>
+        </div>
+        <div class="settings-row">
+          <span>API key</span>
+          <span id="set-linear-key-ro" class="settings-hint">&mdash;</span>
+        </div>
+        <div class="settings-row">
           <span id="set-linear-status" class="settings-hint"></span>
         </div>
       </div>

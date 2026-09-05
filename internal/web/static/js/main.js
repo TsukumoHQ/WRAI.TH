@@ -3092,57 +3092,24 @@ const settingsModal = document.getElementById("settings-modal");
 const settingsClose = document.getElementById("settings-close");
 if (settingsBtn && settingsModal) {
   const $ = (id) => document.getElementById(id);
+  // v1 is a read-only showroom (S8): the Linear config write path lives in the v2 console.
+  // We only fetch (GET) and display; no save, no key input, no team writes.
   const openSettings = async () => {
     settingsModal.classList.remove("hidden");
     const st = await client.fetchSettings();
     const lin = (st && st.linear) || {};
-    $("set-linear-enabled").checked = !!lin.enabled;
-    $("set-linear-key").value = "";
-    $("set-linear-key").placeholder = lin.api_key_masked ? `configurée (${lin.api_key_masked})` : "lin_api_...";
-    $("set-linear-team-status").textContent = lin.team_key ? `team actuelle : ${lin.team_key}` : "";
-    $("set-linear-status").textContent = lin.source === "env" ? "config par variables d'env (prioritaire)" : "";
+    const roEnabled = $("set-linear-enabled-ro");
+    if (roEnabled) roEnabled.textContent = lin.enabled ? "activé" : "désactivé";
+    const roTeam = $("set-linear-team-ro");
+    if (roTeam) roTeam.textContent = lin.team_key || "—";
+    const roKey = $("set-linear-key-ro");
+    if (roKey) roKey.textContent = lin.api_key_masked ? `configurée (${lin.api_key_masked})` : "—";
+    const statusEl = $("set-linear-status");
+    if (statusEl) statusEl.textContent = lin.source === "env" ? "config par variables d'env (prioritaire)" : "";
   };
   settingsBtn.addEventListener("click", openSettings);
   settingsClose.addEventListener("click", () => settingsModal.classList.add("hidden"));
   settingsModal.querySelector(".help-overlay").addEventListener("click", () => settingsModal.classList.add("hidden"));
-
-  $("set-linear-load-teams").addEventListener("click", async () => {
-    const statusEl = $("set-linear-team-status");
-    statusEl.textContent = "chargement…";
-    const typed = $("set-linear-key").value.trim();
-    const qs = typed ? `?key=${encodeURIComponent(typed)}` : "";
-    try {
-      const res = await fetch(`/api/linear/teams${qs}`);
-      if (!res.ok) throw new Error((await res.json()).error || res.status);
-      const teams = await res.json();
-      const cur = (await client.fetchSettings())?.linear?.team_key || "";
-      $("set-linear-teams").innerHTML = (teams || []).map(t => `
-        <label><input type="radio" name="linear-team" value="${t.key}" ${t.key === cur ? "checked" : ""}>
-          <span>${t.key} — ${t.name}</span>
-          ${t.active_cycle ? `<span class="team-cycle">cycle actif : ${t.active_cycle}</span>` : ""}
-        </label>`).join("");
-      statusEl.textContent = `${teams.length} team(s)`;
-    } catch (e) {
-      statusEl.textContent = `erreur : ${e.message}`;
-    }
-  });
-
-  $("set-linear-save").addEventListener("click", async () => {
-    const statusEl = $("set-linear-status");
-    const payload = { linear_enabled: $("set-linear-enabled").checked ? "1" : "0" };
-    const typed = $("set-linear-key").value.trim();
-    if (typed) payload.linear_api_key = typed;
-    const team = settingsModal.querySelector('input[name="linear-team"]:checked');
-    if (team) payload.linear_team_key = team.value;
-    statusEl.textContent = "enregistrement…";
-    await client.updateSettings(payload);
-    const st = await client.fetchSettings();
-    linearMode = !!(st && st.linear_mode);
-    linearProject = (st && st.linear && st.linear.project) || "";
-    statusEl.textContent = st?.linear?.enabled
-      ? `actif — team ${st.linear.team_key}, poll ${st.linear.interval}`
-      : "désactivé";
-  });
 }
 
 const helpBtn = document.getElementById("help-btn");
