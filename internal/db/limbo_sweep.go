@@ -146,7 +146,7 @@ func (d *DB) SweepLimboAssignees(now time.Time, apply bool) (*LimboSweepResult, 
 		if r.lastActivityAt == "" || r.agentLastSeen == "" {
 			continue
 		}
-		if !(r.lastActivityAt < blockCut && r.agentLastSeen < blockCut) {
+		if r.lastActivityAt >= blockCut || r.agentLastSeen >= blockCut {
 			continue
 		}
 
