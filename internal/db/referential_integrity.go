@@ -128,14 +128,20 @@ func refChecks() []refCheck {
 		},
 		// --- task profile_slug: STRUCTURAL orphan (sparse profiles table).
 		// Tolerated + marked, never rewritten. Empty slug (Linear mirror inserts '')
-		// is not an orphan.
+		// is not an orphan. TWO resolvers: a slug is live when a profiles row matches
+		// OR any in-project agent carries it (the agents pool is the real registry —
+		// DEC-wraith-orphan-profile-burndown-1 Q1, phase3 Q5). Terminal tasks
+		// (done/cancelled) are excluded — a dead slug on a finished task is noise, not
+		// a limbo (limbo-class precedent above) — DEC-wraith-orphan-profile-burndown-1 Q2.
 		{
 			class: "orphan_profile", table: "tasks", refCol: "profile_slug",
 			orphanSQL: `SELECT t.id AS row_id, t.profile_slug AS ref_value, t.project AS project
 				FROM tasks t
 				WHERE t.profile_slug IS NOT NULL AND t.profile_slug <> ''
 				  AND t.archived_at IS NULL
-				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = t.project AND LOWER(p.slug) = LOWER(t.profile_slug))`,
+				  AND t.status NOT IN ('done', 'cancelled')
+				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = t.project AND LOWER(p.slug) = LOWER(t.profile_slug))
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND LOWER(a.profile_slug) = LOWER(t.profile_slug))`,
 		},
 		// --- task id references (uuid) ---
 		{
