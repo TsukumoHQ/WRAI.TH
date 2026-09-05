@@ -53,6 +53,10 @@ const ctx = {
   onEvent(fn) { eventSubs.add(fn); return () => eventSubs.delete(fn); },
   onSelection(fn) { selSubs.add(fn); return () => selSubs.delete(fn); },
   openSheet, closeSheet,
+  // Single source of truth for the projects list: refetch, update the shared
+  // array, and hand it back. Pages (home) read through this instead of calling
+  // api.projects() directly, so the router and every page stay in lockstep.
+  refreshProjects,
 };
 
 /* ============================================================= *
@@ -84,6 +88,17 @@ async function initHeader() {
     api.projects().catch(() => []),
     api.settings().catch(() => ({})),
   ]);
+}
+
+// Refetch the projects rollup and update the shared `projects` array in place.
+// On network error we keep the last-known list (never blank the console).
+// Returns the current array so callers can use the fresh data directly.
+async function refreshProjects() {
+  try {
+    const list = await api.projects();
+    if (Array.isArray(list)) projects = list;
+  } catch (_) { /* keep last-known list */ }
+  return projects;
 }
 
 // (Re)bind the live stream to the active scope. The stream is shared and only
@@ -183,13 +198,60 @@ function showProjectChrome(project) {
   linearStrip.update(project);
 }
 
-function route() {
+/* ---- "project not found" state — a visible dead-end, never a silent bounce ---- */
+// The panel is a router-owned concern, built here so the deep-link fix stays
+// contained to v2.js. It mounts as a .page inside #view, so the normal
+// page-visibility loop below hides it again the moment you navigate anywhere real.
+let notFoundEl = null;
+function ensureNotFound() {
+  if (notFoundEl) return notFoundEl;
+  const st = document.createElement('style');
+  st.textContent =
+    '.page-notfound{display:flex;align-items:center;justify-content:center;min-height:60vh;padding:40px}'
+    + '.page-notfound[hidden]{display:none}'
+    + '.nf-wrap{max-width:420px;text-align:center;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:32px 28px}'
+    + '.nf-icon{font-size:34px;line-height:1;color:var(--accent);margin-bottom:14px}'
+    + '.nf-title{margin:0 0 8px;font-size:18px;font-weight:600;color:var(--text)}'
+    + '.nf-msg{margin:0 0 22px;font-size:13px;line-height:1.5;color:var(--text-muted)}'
+    + '.nf-msg b{color:var(--text)}'
+    + '.nf-back{display:inline-block;padding:8px 16px;font-size:13px;font-weight:500;color:var(--bg);background:var(--accent);border-radius:var(--radius-sm);text-decoration:none}'
+    + '.nf-back:hover{filter:brightness(1.08)}';
+  document.head.appendChild(st);
+  const el = document.createElement('section');
+  el.className = 'page page-notfound';
+  el.dataset.page = '__notfound';        // never matches a real route → auto-hidden on nav
+  el.hidden = true;
+  el.innerHTML =
+    '<div class="nf-wrap" role="alert" aria-live="polite">'
+    + '<div class="nf-icon" aria-hidden="true">&#9888;</div>'
+    + '<h2 class="nf-title">Project not found</h2>'
+    + '<p class="nf-msg">No project named “<b class="nf-name"></b>” exists on this relay. It may have been renamed or removed.</p>'
+    + '<a class="nf-back" href="#/">&larr; Back to fleet</a>'
+    + '</div>';
+  (document.getElementById('view') || document.body).appendChild(el);
+  notFoundEl = el;
+  return el;
+}
+function showNotFound(name) {
+  const el = ensureNotFound();
+  showHomeChrome();                                    // strip project tabs / stop pollers
+  document.querySelectorAll('.page').forEach((p) => { p.hidden = p !== el; });
+  el.querySelector('.nf-name').textContent = name || '(unknown)';
+  el.hidden = false;
+  // scope stays 'home' (set by showHomeChrome) — home chrome is the right frame
+  // for a dead-end, and no CSS keys off an unknown 'notfound' scope.
+}
+
+async function route() {
   const next = parseHash();
 
-  // Unknown project in a deep link → fall back to home.
-  if (next.view === 'project' && projects.length && !projects.some((p) => p.name === next.project)) {
-    location.hash = '#/';
-    return;
+  // Unknown project in a deep link → verify against a FRESH list (it may have
+  // just been created elsewhere), then show a visible not-found state with a way
+  // back — never a silent redirect. v2.js owns the one projects list.
+  if (next.view === 'project') {
+    let known = projects.some((p) => p.name === next.project);
+    if (!known) { await refreshProjects(); known = projects.some((p) => p.name === next.project); }
+    if (!known) { showNotFound(next.project); return; }
   }
 
   const newSelection = next.view === 'project' ? next.project : 'all';
@@ -412,5 +474,5 @@ function overviewPage(ctx) {
  * ============================================================= */
 (async function boot() {
   await initHeader();
-  route();           // mounts the current view (home by default) + binds the stream
+  await route();     // mounts the current view (home by default) + binds the stream
 })();

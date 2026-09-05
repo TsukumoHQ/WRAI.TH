@@ -36,7 +36,7 @@ export function initHome(root, ctx) {
   async function refresh() {
     if (!loaded) skeleton();
     const [pl, al, tp] = await Promise.allSettled([
-      ctx.api.projects(),
+      ctx.refreshProjects(),           // SSOT: also updates the router's projects list
       ctx.api.agentsAll(),
       ctx.api.fleetThroughput(30),
     ]);
