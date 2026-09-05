@@ -494,3 +494,119 @@ func TestLogReferentialCountsKeepsSummaryLine(t *testing.T) {
 		t.Fatalf("summary line changed/dropped.\nwant: %q\ngot:\n%s", want, out)
 	}
 }
+
+// TestOrphanProfilePoolResolver (DEC-wraith-orphan-profile-burndown-1 Q1): a slug
+// with NO profiles row is NOT an orphan when any in-project agent carries it (the
+// agents pool is the real registry). A slug matched by neither still flags.
+func TestOrphanProfilePoolResolver(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	// Agent carries 'wraith-backend' as its profile_slug; no profiles row exists.
+	seedAgent(t, c, "p1", "wb-agent", "active", "wraith-backend", "", 0)
+	// Task slug resolves via the agents pool → NOT orphan.
+	seedTask(t, c, "t-pool", "p1", "pending", "linear", "", "", "wraith-backend", "", "", false)
+	// Task slug matches neither profiles nor agents → orphan.
+	seedTask(t, c, "t-dead", "p1", "pending", "linear", "", "", "no-such-slug", "", "", false)
+
+	if _, err := runReferentialScan(c); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got := openCount(t, c, "orphan_profile"); got != 1 {
+		t.Errorf("orphan_profile: got %d open, want 1 (only the fully-dead slug)", got)
+	}
+	if quarantineRowExists(t, c, "orphan_profile", "t-pool") {
+		t.Error("slug carried by an in-project agent must resolve via the pool, not flag")
+	}
+	if !quarantineRowExists(t, c, "orphan_profile", "t-dead") {
+		t.Error("fully-dead slug (no profile, no agent) must still flag")
+	}
+}
+
+// TestOrphanProfilePoolCaseInsensitive: the pool resolver matches on LOWER() both
+// sides, so a case difference between the task slug and the agent's profile_slug
+// still resolves.
+func TestOrphanProfilePoolCaseInsensitive(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedAgent(t, c, "p1", "wb-agent", "active", "Wraith-Backend", "", 0) // mixed case
+	seedTask(t, c, "t-ci", "p1", "pending", "linear", "", "", "wraith-backend", "", "", false)
+	// An agent in a DIFFERENT project carrying the slug must NOT resolve it.
+	seedProject(t, c, "p2")
+	seedAgent(t, c, "p2", "other", "active", "cross-slug", "", 0)
+	seedTask(t, c, "t-xproj", "p1", "pending", "linear", "", "", "cross-slug", "", "", false)
+
+	if _, err := runReferentialScan(c); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if quarantineRowExists(t, c, "orphan_profile", "t-ci") {
+		t.Error("pool resolver must be case-insensitive (LOWER on both sides)")
+	}
+	if !quarantineRowExists(t, c, "orphan_profile", "t-xproj") {
+		t.Error("an agent carrying the slug in another project must not resolve it (project-scoped)")
+	}
+}
+
+// TestOrphanProfileTerminalExclusion (DEC-wraith-orphan-profile-burndown-1 Q2):
+// done/cancelled tasks are excluded from orphan_profile — a dead slug on a
+// finished task is noise, not limbo. The same dead slug on a non-terminal task
+// still flags.
+func TestOrphanProfileTerminalExclusion(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	// Same fully-dead slug on terminal tasks → NOT flagged.
+	seedTask(t, c, "t-done", "p1", "done", "linear", "", "", "dead-slug", "", "", false)
+	seedTask(t, c, "t-cancelled", "p1", "cancelled", "linear", "", "", "dead-slug", "", "", false)
+	// ...and on a non-terminal task → STILL flagged.
+	seedTask(t, c, "t-open", "p1", "in-progress", "linear", "", "", "dead-slug", "", "", false)
+
+	if _, err := runReferentialScan(c); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if got := openCount(t, c, "orphan_profile"); got != 1 {
+		t.Errorf("orphan_profile: got %d open, want 1 (only the non-terminal task)", got)
+	}
+	if quarantineRowExists(t, c, "orphan_profile", "t-done") || quarantineRowExists(t, c, "orphan_profile", "t-cancelled") {
+		t.Error("terminal (done/cancelled) tasks must be excluded from orphan_profile")
+	}
+	if !quarantineRowExists(t, c, "orphan_profile", "t-open") {
+		t.Error("non-terminal fully-dead slug must still flag")
+	}
+}
+
+// TestOrphanProfileHealPath (AC3): a row flagged under the new definition is
+// auto-resolved (resolved_at stamped, row kept) on the next scan once an agent
+// joins the pool carrying the slug — the existing heal path, no data rewrite.
+func TestOrphanProfileHealPath(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedTask(t, c, "t-heal", "p1", "pending", "linear", "", "", "joins-later", "", "", false)
+
+	// Scan 1: no profile, no agent → flagged.
+	if _, err := runReferentialScan(c); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	if !quarantineRowExists(t, c, "orphan_profile", "t-heal") {
+		t.Fatal("expected orphan_profile flagged before the agent joins the pool")
+	}
+
+	// An agent now carries the slug → the condition clears.
+	seedAgent(t, c, "p1", "newcomer", "active", "joins-later", "", 0)
+	if _, err := runReferentialScan(c); err != nil {
+		t.Fatalf("scan 2: %v", err)
+	}
+	if openCount(t, c, "orphan_profile") != 0 {
+		t.Error("healed orphan_profile must drop out of the open count")
+	}
+	// Resolved, not deleted (audit trail preserved).
+	var resolved int
+	if err := c.QueryRow(`SELECT COUNT(*) FROM integrity_quarantine WHERE class='orphan_profile' AND row_id='t-heal' AND resolved_at IS NOT NULL`).Scan(&resolved); err != nil {
+		t.Fatal(err)
+	}
+	if resolved != 1 {
+		t.Errorf("healed quarantine row must be stamped resolved (not deleted): got %d", resolved)
+	}
+}
