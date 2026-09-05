@@ -9,13 +9,13 @@ import (
 
 // The limbo sweep's clock math, relative to a fixed now:
 //
-//	now         = 2026-06-01
-//	blockCut    = now - 7d  = 2026-05-25   (TIER 1 if both clocks are older)
-//	archiveCut  = now - 30d = 2026-05-02   (TIER 2 if both clocks are older AND
-//	                                         the dispatcher is gone/inactive)
+//	now       = 2026-06-01
+//	blockCut  = now - 7d = 2026-05-25   (BLOCK if BOTH clocks are older AND the
+//	                                      dispatcher is itself inactive)
 //
-// So a timestamp of 2026-05-10 is TIER-1 stale (past 7d, inside 30d); 2026-03-01
-// is TIER-2 stale (past 30d); 2026-05-30 is fresh (inside 7d, not limbo).
+// So a timestamp of 2026-05-10 is block-stale (past 7d); 2026-03-01 is deeply
+// stale (40d, still just a block — archive was removed); 2026-05-30 is fresh
+// (inside 7d, not limbo).
 var limboNow = time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 
 func limboTS(month, day int) string {
@@ -46,35 +46,54 @@ func limboTaskState(t *testing.T, c *sql.DB, id string) (status, reason string, 
 	return status, r.String, a.Valid && a.String != ""
 }
 
-// TIER 1: an in-progress task whose inactive assignee and own activity are both
-// past 7d is blocked (naming the dead assignee), reversibly. Dry-run reports the
-// disposition but writes nothing; apply performs the CAS block.
-func TestLimboSweepTier1BlocksInactiveAssignee(t *testing.T) {
+// limboBlockedAuditCount counts the audit rows the sweep writes per block.
+func limboBlockedAuditCount(t *testing.T, c *sql.DB) int {
+	t.Helper()
+	var n int
+	if err := c.QueryRow(`SELECT COUNT(*) FROM audit_log WHERE action = 'task.limbo_blocked'`).Scan(&n); err != nil {
+		t.Fatalf("count audit rows: %v", err)
+	}
+	return n
+}
+
+// BLOCK: an in-progress task whose inactive assignee and own activity are both
+// past 7d, AND whose dispatcher is itself inactive, is blocked (naming the dead
+// assignee and dispatcher), reversibly. Dry-run reports the disposition but
+// writes nothing (no task row, no audit row); apply performs the CAS block and
+// records exactly one audit row.
+func TestLimboSweepBlocksInactiveAssigneeAndDispatcher(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
 	seedProject(t, c, "p1")
-	seedAgent(t, c, "p1", "boss", "active", "", "", 0)
-	seedAgent(t, c, "p1", "dead", "inactive", "", "", 0)
-	seedTask(t, c, "t1", "p1", "in-progress", "boss", "dead", "dead", "", "", "", false)
+	seedAgent(t, c, "p1", "deadboss", "inactive", "", "", 0) // dispatcher inactive
+	seedAgent(t, c, "p1", "dead", "inactive", "", "", 0)     // assignee inactive
+	seedTask(t, c, "t1", "p1", "in-progress", "deadboss", "dead", "dead", "", "", "", false)
 	setTaskActivity(t, c, "t1", limboTS(5, 10))
 	setAgentSeen(t, c, "p1", "dead", limboTS(5, 10))
 
-	// dry-run: computed, not written.
+	// dry-run: computed, not written (no task row, no audit row).
 	res, err := d.SweepLimboAssignees(limboNow, false)
 	if err != nil {
 		t.Fatalf("dry-run sweep: %v", err)
 	}
-	if !res.DryRun || len(res.Blocked) != 1 || len(res.Archived) != 0 {
-		t.Fatalf("dry-run: got DryRun=%v blocked=%d archived=%d, want 1 blocked", res.DryRun, len(res.Blocked), len(res.Archived))
+	if !res.DryRun || len(res.Blocked) != 1 {
+		t.Fatalf("dry-run: got DryRun=%v blocked=%d, want 1 blocked", res.DryRun, len(res.Blocked))
 	}
-	if b := res.Blocked[0]; b.Tier != 1 || b.TaskID != "t1" || !strings.HasPrefix(b.Reason, limboReasonPrefix) {
+	if b := res.Blocked[0]; b.TaskID != "t1" || !strings.HasPrefix(b.Reason, limboReasonPrefix) ||
+		!strings.Contains(b.Reason, "dead") || !strings.Contains(b.Reason, "deadboss") {
 		t.Fatalf("dry-run disposition wrong: %+v", b)
+	}
+	if res.Blocked[0].AgeDays != 22 { // 2026-06-01 − 2026-05-10 = 22 days
+		t.Fatalf("dry-run AgeDays=%d, want 22", res.Blocked[0].AgeDays)
 	}
 	if st, _, _ := limboTaskState(t, c, "t1"); st != "in-progress" {
 		t.Fatalf("dry-run wrote status: got %q, want in-progress", st)
 	}
+	if n := limboBlockedAuditCount(t, c); n != 0 {
+		t.Fatalf("dry-run wrote %d audit row(s), want 0", n)
+	}
 
-	// apply: the block lands.
+	// apply: the block lands, exactly one audit row.
 	res, err = d.SweepLimboAssignees(limboNow, true)
 	if err != nil {
 		t.Fatalf("apply sweep: %v", err)
@@ -82,9 +101,15 @@ func TestLimboSweepTier1BlocksInactiveAssignee(t *testing.T) {
 	if res.DryRun || len(res.Blocked) != 1 {
 		t.Fatalf("apply: got DryRun=%v blocked=%d, want 1 blocked, not dry-run", res.DryRun, len(res.Blocked))
 	}
-	st, reason, _ := limboTaskState(t, c, "t1")
+	st, reason, archived := limboTaskState(t, c, "t1")
 	if st != "blocked" || !strings.HasPrefix(reason, limboReasonPrefix) || !strings.Contains(reason, "dead") {
 		t.Fatalf("apply: status=%q reason=%q, want blocked naming 'dead'", st, reason)
+	}
+	if archived {
+		t.Fatalf("apply: task was archived; the sweep must never archive")
+	}
+	if n := limboBlockedAuditCount(t, c); n != 1 {
+		t.Fatalf("apply wrote %d audit row(s), want exactly 1", n)
 	}
 }
 
@@ -95,7 +120,7 @@ func TestLimboSweepExemptsActiveServiceAndFreshClocks(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
 	seedProject(t, c, "p1")
-	seedAgent(t, c, "p1", "boss", "active", "", "", 0)
+	seedAgent(t, c, "p1", "boss", "inactive", "", "", 0) // dispatcher inactive (so only clocks/assignee gate)
 	seedAgent(t, c, "p1", "live", "active", "", "", 0)
 	seedAgent(t, c, "p1", "svc", "inactive", "", "", 1)   // service → exempt
 	seedAgent(t, c, "p1", "deadA", "inactive", "", "", 0) // dead but task fresh
@@ -120,12 +145,51 @@ func TestLimboSweepExemptsActiveServiceAndFreshClocks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if len(res.Blocked) != 0 || len(res.Archived) != 0 {
-		t.Fatalf("nothing should be limbo: blocked=%d archived=%d", len(res.Blocked), len(res.Archived))
+	if len(res.Blocked) != 0 {
+		t.Fatalf("nothing should be limbo: blocked=%d", len(res.Blocked))
 	}
 	// active + service assignees are filtered out by SQL; only the two dead-but-fresh rows are scanned.
 	if res.Scanned != 2 {
 		t.Fatalf("scanned=%d, want 2 (dead-but-fresh only; active/service excluded)", res.Scanned)
+	}
+}
+
+// A block requires the DISPATCHER to be inactive too (DEC-wraith-limbo-sweep-rule-1):
+// a stale task with a dead assignee is SKIPPED when its dispatcher is active or
+// sleeping, and blocked when the dispatcher is gone. A live lead still tracks it.
+func TestLimboSweepSkipsWhenDispatcherAlive(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedAgent(t, c, "p1", "activeboss", "active", "", "", 0)
+	seedAgent(t, c, "p1", "sleepyboss", "sleeping", "", "", 0)
+	seedAgent(t, c, "p1", "deadA", "inactive", "", "", 0)
+	seedAgent(t, c, "p1", "deadB", "inactive", "", "", 0)
+	seedAgent(t, c, "p1", "deadC", "inactive", "", "", 0)
+
+	// same stale assignee clocks for all three; only the dispatcher differs.
+	seedTask(t, c, "t-active-disp", "p1", "in-progress", "activeboss", "deadA", "deadA", "", "", "", false)
+	seedTask(t, c, "t-sleepy-disp", "p1", "in-progress", "sleepyboss", "deadB", "deadB", "", "", "", false)
+	seedTask(t, c, "t-gone-disp", "p1", "in-progress", "ghostboss", "deadC", "deadC", "", "", "", false)
+	for _, a := range []string{"deadA", "deadB", "deadC"} {
+		setAgentSeen(t, c, "p1", a, limboTS(5, 10))
+	}
+	for _, id := range []string{"t-active-disp", "t-sleepy-disp", "t-gone-disp"} {
+		setTaskActivity(t, c, id, limboTS(5, 10))
+	}
+
+	res, err := d.SweepLimboAssignees(limboNow, true)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if len(res.Blocked) != 1 || res.Blocked[0].TaskID != "t-gone-disp" {
+		t.Fatalf("want only t-gone-disp blocked (active/sleeping dispatchers skipped), got %+v", res.Blocked)
+	}
+	if st, _, _ := limboTaskState(t, c, "t-active-disp"); st != "in-progress" {
+		t.Fatalf("t-active-disp: status=%q, want kept in-progress", st)
+	}
+	if st, _, _ := limboTaskState(t, c, "t-sleepy-disp"); st != "in-progress" {
+		t.Fatalf("t-sleepy-disp: status=%q, want kept in-progress", st)
 	}
 }
 
@@ -136,18 +200,18 @@ func TestLimboSweepIdempotent(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
 	seedProject(t, c, "p1")
-	seedAgent(t, c, "p1", "boss", "active", "", "", 0)
+	seedAgent(t, c, "p1", "deadboss", "inactive", "", "", 0) // dispatcher inactive
 	seedAgent(t, c, "p1", "dead", "inactive", "", "", 0)
 
 	// already blocked by a prior limbo sweep.
-	seedTask(t, c, "t-done", "p1", "blocked", "boss", "dead", "dead", "", "", "", false)
+	seedTask(t, c, "t-done", "p1", "blocked", "deadboss", "dead", "dead", "", "", "", false)
 	if _, err := c.Exec(`UPDATE tasks SET blocked_reason = ? WHERE id = 't-done'`,
-		limboReasonPrefix+": dead (last_seen "+limboTS(5, 10)+")"); err != nil {
+		limboReasonPrefix+": dead (last_seen "+limboTS(5, 10)+") dispatcher deadboss"); err != nil {
 		t.Fatalf("preset blocked_reason: %v", err)
 	}
 	setTaskActivity(t, c, "t-done", limboTS(5, 10))
 	// a fresh candidate still to be caught.
-	seedTask(t, c, "t-new", "p1", "in-progress", "boss", "dead", "dead", "", "", "", false)
+	seedTask(t, c, "t-new", "p1", "in-progress", "deadboss", "dead", "dead", "", "", "", false)
 	setTaskActivity(t, c, "t-new", limboTS(5, 10))
 	setAgentSeen(t, c, "p1", "dead", limboTS(5, 10))
 
@@ -160,10 +224,11 @@ func TestLimboSweepIdempotent(t *testing.T) {
 	}
 }
 
-// TIER 2: past 30d on both clocks AND the dispatcher is itself gone → archive
-// (reversible, nullable column). If the dispatcher is still alive, the same-age
-// task falls to a TIER-1 block instead of an archive.
-func TestLimboSweepTier2ArchiveOnlyWhenDispatcherGone(t *testing.T) {
+// The sweep NEVER archives (the earlier tier-2 archive was removed by
+// DEC-wraith-limbo-sweep-rule-1): a 40d-stale task whose dispatcher is gone ends
+// BLOCKED with archived_at still NULL. A same-age task whose dispatcher is alive
+// is simply kept.
+func TestLimboSweepNeverArchives(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
 	seedProject(t, c, "p1")
@@ -171,46 +236,41 @@ func TestLimboSweepTier2ArchiveOnlyWhenDispatcherGone(t *testing.T) {
 	seedAgent(t, c, "p1", "dead1", "inactive", "", "", 0)
 	seedAgent(t, c, "p1", "dead2", "inactive", "", "", 0)
 
-	// dispatcher "ghostboss" is NOT seeded (gone) → archive-eligible.
-	seedTask(t, c, "t-arch", "p1", "in-progress", "ghostboss", "dead1", "dead1", "", "", "", false)
-	setTaskActivity(t, c, "t-arch", limboTS(3, 1))
+	// dispatcher "ghostboss" is NOT seeded (gone) → blocks (never archives).
+	seedTask(t, c, "t-deep", "p1", "in-progress", "ghostboss", "dead1", "dead1", "", "", "", false)
+	setTaskActivity(t, c, "t-deep", limboTS(3, 1)) // 40d+ stale
 	setAgentSeen(t, c, "p1", "dead1", limboTS(3, 1))
-	// dispatcher "boss" is alive → same age blocks (TIER 1), never archives.
-	seedTask(t, c, "t-block", "p1", "in-progress", "boss", "dead2", "dead2", "", "", "", false)
-	setTaskActivity(t, c, "t-block", limboTS(3, 1))
+	// dispatcher "boss" is alive → same age is kept (dispatcher tracks it).
+	seedTask(t, c, "t-keep", "p1", "in-progress", "boss", "dead2", "dead2", "", "", "", false)
+	setTaskActivity(t, c, "t-keep", limboTS(3, 1))
 	setAgentSeen(t, c, "p1", "dead2", limboTS(3, 1))
 
 	res, err := d.SweepLimboAssignees(limboNow, true)
 	if err != nil {
 		t.Fatalf("sweep: %v", err)
 	}
-	if len(res.Archived) != 1 || res.Archived[0].TaskID != "t-arch" || res.Archived[0].Tier != 2 {
-		t.Fatalf("want t-arch archived (tier 2), got archived=%+v", res.Archived)
+	if len(res.Blocked) != 1 || res.Blocked[0].TaskID != "t-deep" {
+		t.Fatalf("want t-deep blocked, got blocked=%+v", res.Blocked)
 	}
-	if len(res.Blocked) != 1 || res.Blocked[0].TaskID != "t-block" {
-		t.Fatalf("want t-block blocked (dispatcher alive), got blocked=%+v", res.Blocked)
+	if st, _, archived := limboTaskState(t, c, "t-deep"); st != "blocked" || archived {
+		t.Fatalf("t-deep: status=%q archived=%v, want blocked + archived_at NULL", st, archived)
 	}
-	if _, _, archived := limboTaskState(t, c, "t-arch"); !archived {
-		t.Fatalf("t-arch archived_at not stamped")
-	}
-	if st, _, archived := limboTaskState(t, c, "t-block"); st != "blocked" || archived {
-		t.Fatalf("t-block: status=%q archived=%v, want blocked + not archived", st, archived)
+	if st, _, archived := limboTaskState(t, c, "t-keep"); st != "in-progress" || archived {
+		t.Fatalf("t-keep: status=%q archived=%v, want kept in-progress + not archived", st, archived)
 	}
 }
 
-// Dry-run computes both tiers but writes zero rows: a full before/after snapshot
-// of (status, archived_at) is identical, while the result still reports the
-// dispositions it would have applied.
+// Dry-run computes the dispositions but writes zero rows — neither task rows nor
+// audit rows: a full before/after snapshot of (status, archived_at) is identical
+// and the audit_log stays empty, while the result still reports the would-blocks.
 func TestLimboSweepDryRunWritesNothing(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
 	seedProject(t, c, "p1")
 	seedAgent(t, c, "p1", "dead", "inactive", "", "", 0)
-	// TIER 1 candidate (dispatcher alive).
-	seedAgent(t, c, "p1", "boss", "active", "", "", 0)
-	seedTask(t, c, "t1", "p1", "in-progress", "boss", "dead", "dead", "", "", "", false)
+	// two would-block candidates, both with a gone dispatcher.
+	seedTask(t, c, "t1", "p1", "in-progress", "ghostboss", "dead", "dead", "", "", "", false)
 	setTaskActivity(t, c, "t1", limboTS(5, 10))
-	// TIER 2 candidate (dispatcher gone).
 	seedTask(t, c, "t2", "p1", "in-progress", "ghostboss", "dead", "dead", "", "", "", false)
 	setTaskActivity(t, c, "t2", limboTS(3, 1))
 	setAgentSeen(t, c, "p1", "dead", limboTS(3, 1))
@@ -224,8 +284,11 @@ func TestLimboSweepDryRunWritesNothing(t *testing.T) {
 	if before != after {
 		t.Fatalf("dry-run mutated tasks:\n before=%s\n after =%s", before, after)
 	}
-	if len(res.Blocked)+len(res.Archived) == 0 {
-		t.Fatalf("dry-run reported no dispositions; expected it to compute the block+archive")
+	if len(res.Blocked) != 2 {
+		t.Fatalf("dry-run reported %d would-blocks; expected 2", len(res.Blocked))
+	}
+	if n := limboBlockedAuditCount(t, c); n != 0 {
+		t.Fatalf("dry-run wrote %d audit row(s), want 0", n)
 	}
 }
 

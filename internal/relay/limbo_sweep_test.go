@@ -57,6 +57,19 @@ func TestDigestLimboBlocksGroupsAndSuppresses(t *testing.T) {
 	}
 }
 
+// The dry-run shadow line is EXACTLY `integrity: limbo would-block <task> <age>d
+// <assignee> <dispatcher>` — the format cto-tsukumo greps + counts after
+// redeploy (`grep -c 'limbo would-block'`).
+func TestLimboShadowLineFormat(t *testing.T) {
+	got := limboShadowLine(db.LimboDisposition{
+		TaskID: "abc123", AgeDays: 42, AssignedTo: "dead", DispatchedBy: "ghostboss",
+	})
+	want := "integrity: limbo would-block abc123 42d dead ghostboss"
+	if got != want {
+		t.Fatalf("shadow line = %q, want %q", got, want)
+	}
+}
+
 // limboSweepApply defaults to dry-run; the DB setting enables writes, and the env
 // override wins over the setting in both directions.
 func TestLimboSweepApplyGating(t *testing.T) {

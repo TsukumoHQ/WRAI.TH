@@ -165,10 +165,14 @@ func (r *Relay) limboSweepApply() bool {
 	return r.DB.GetSetting("limbo_sweep_apply") == "1"
 }
 
-// sweepLimboAssignees (A1-ii) blocks (>7d) then archives (>30d) tasks stranded
-// on an inactive assignee, so no task stays claimed for life by a dead agent.
-// Every disposition is journaled with the `integrity:` prefix (consistent with
-// the referential/A2 logging). In apply mode it also sends ONE digest per
+// sweepLimboAssignees (A1-ii, DEC-wraith-limbo-sweep-rule-1) blocks (>7d) tasks
+// stranded on an inactive assignee WHOSE DISPATCHER is itself inactive, so no
+// task stays claimed for life by a dead agent — never auto-archiving, never
+// deleting. Every disposition is journaled with the `integrity:` prefix
+// (consistent with the referential/A2 logging): dry-run emits the countable
+// shadow line `limbo would-block <task> <age>d <assignee> <dispatcher>` so the
+// post-redeploy observation can be grepped and counted against the A1-i baseline;
+// apply keeps the tier=1 block line. In apply mode it also sends ONE digest per
 // dispatcher of that sweep's newly-blocked tasks — but only to a dispatcher that
 // is itself still active; for a gone/inactive dispatcher the digest is a journal
 // line only, never a message into the void.
@@ -184,20 +188,29 @@ func (r *Relay) sweepLimboAssignees() {
 		mode = "dry-run"
 	}
 	for _, b := range res.Blocked {
+		if res.DryRun {
+			log.Print(limboShadowLine(b))
+			continue
+		}
 		log.Printf("integrity: limbo tier=1 action=block mode=%s task=%s project=%s assignee=%q from=%s reason=%q",
 			mode, b.TaskID, b.Project, b.AssignedTo, b.FromStatus, b.Reason)
 	}
-	for _, a := range res.Archived {
-		log.Printf("integrity: limbo tier=2 action=archive mode=%s task=%s project=%s assignee=%q dispatcher=%q",
-			mode, a.TaskID, a.Project, a.AssignedTo, a.DispatchedBy)
-	}
-	if len(res.Blocked)+len(res.Archived) > 0 {
-		log.Printf("integrity: limbo sweep (%s) — %d blocked, %d archived (scanned %d)",
-			mode, len(res.Blocked), len(res.Archived), res.Scanned)
+	if len(res.Blocked) > 0 {
+		log.Printf("integrity: limbo sweep (%s) — %d blocked (scanned %d)",
+			mode, len(res.Blocked), res.Scanned)
 	}
 	if !res.DryRun {
 		r.digestLimboBlocks(res.Blocked)
 	}
+}
+
+// limboShadowLine is the EXACT dry-run journal line for one would-block. Kept as
+// a named helper so its format is asserted directly (relay test) and stays
+// greppable for the post-redeploy observation: `grep -c 'limbo would-block'`.
+// Fields: task id, whole-days age since last_activity_at, assignee, dispatcher.
+func limboShadowLine(b db.LimboDisposition) string {
+	return fmt.Sprintf("integrity: limbo would-block %s %dd %s %s",
+		b.TaskID, b.AgeDays, b.AssignedTo, b.DispatchedBy)
 }
 
 // danglingBoardApply decides whether the dangling-board sweep WRITES or only

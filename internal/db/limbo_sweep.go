@@ -1,28 +1,36 @@
 package db
 
 import (
+	"agent-relay/internal/models"
 	"fmt"
 	"strings"
 	"time"
 )
 
-// Limbo sweep (A1-ii). A task claimed by an agent that has since gone inactive
-// stays owned forever: no live agent will ever resume it, yet it is not pending
-// so the lease sweep (which only requeues an EXPIRED lease of a dead holder to
-// pending) never converges it either — it just sits, held by a ghost. This rule
-// closes that class in two reversible steps, on the SAME 2-minute maintenance
-// ticker as the referential and lease sweeps:
+// Limbo sweep (A1-ii, aligned to DEC-wraith-limbo-sweep-rule-1). A task claimed
+// by an agent that has since gone inactive stays owned forever: no live agent
+// will ever resume it, yet it is not pending so the lease sweep (which only
+// requeues an EXPIRED lease of a dead holder to pending) never converges it
+// either — it just sits, held by a ghost. This rule closes that class in ONE
+// reversible step, on the SAME 2-minute maintenance ticker as the referential
+// and lease sweeps:
 //
-//	TIER 1 (blockLimboAfter): the task is BLOCKED with a reason naming the dead
-//	    assignee. Reversible (a blocked task can be resumed), nothing lost. One
-//	    digest per dispatcher per sweep is emitted by the relay layer.
+//	BLOCK (blockLimboAfter): the task is BLOCKED with a reason naming the dead
+//	    assignee and its dispatcher. Reversible (a blocked task can be resumed
+//	    via update_task/resume_task), nothing lost. One digest per dispatcher per
+//	    sweep is emitted by the relay layer, and — in apply mode — one audit row
+//	    per successful block records the action.
 //
-//	TIER 2 (archiveLimboAfter, AND the dispatcher is itself gone/inactive): the
-//	    task is ARCHIVED (archived_at stamped). Still reversible — archive is a
-//	    nullable column, no row is ever deleted.
+// A task is limbo only when ALL THREE hold (DEC-wraith-limbo-sweep-rule-1):
+//   - the ASSIGNEE is inactive (SQL prefilter) and both clocks are >7d stale,
+//   - the DISPATCHER is itself inactive (row missing OR status not in
+//     active/sleeping — no last_seen threshold). A live lead still tracking the
+//     task keeps it out of limbo.
 //
-// The assignee is NEVER reassigned (DEC-wraith-update-task-reassign-1): a dead
-// agent's work is quarantined, not silently handed to someone else.
+// The task is NEVER auto-archived and NEVER deleted (the earlier tier-2 archive
+// was removed by the ruling), and the assignee is NEVER reassigned
+// (DEC-wraith-update-task-reassign-1): a dead agent's work is quarantined, not
+// silently handed to someone else or dropped.
 //
 // Staleness is measured on BOTH clocks — the task's last_activity_at AND the
 // agent's last_seen — and both must be past the threshold. created_at alone is
@@ -30,15 +38,15 @@ import (
 // not limbo yet.
 //
 // Dry-run is the DEFAULT at first deploy (the relay layer decides `apply`):
-// every disposition is computed and journaled, but ZERO rows are written, so the
-// first real runs can be audited against the expected set before anything moves.
+// every disposition is computed and journaled (ZERO rows written, including
+// audit), so the first real runs can be audited against the expected set before
+// anything moves.
 const (
-	blockLimboAfter   = 7 * 24 * time.Hour
-	archiveLimboAfter = 30 * 24 * time.Hour
+	blockLimboAfter = 7 * 24 * time.Hour
 	// limboReasonPrefix is both the reason we stamp and the idempotence marker: a
 	// task already blocked with this prefix is skipped, so re-running the sweep is
 	// a no-op (never a second block, never a churn of blocked_periods windows).
-	limboReasonPrefix = "assignee inactive"
+	limboReasonPrefix = "limbo-sweep"
 )
 
 // LimboDisposition is one task the sweep acted on (or, in dry-run, would act on).
@@ -47,17 +55,16 @@ type LimboDisposition struct {
 	Project      string
 	AssignedTo   string
 	DispatchedBy string
-	FromStatus   string // status before a TIER 1 block (for the CAS + journal)
-	Tier         int    // 1 = block, 2 = archive
-	Reason       string // the blocked_reason a TIER 1 block stamps
+	FromStatus   string // status before the block (for the CAS + journal)
+	AgeDays      int    // whole days since last_activity_at (dry-run shadow line)
+	Reason       string // the blocked_reason the block stamps
 }
 
 // LimboSweepResult is the outcome of one sweep pass.
 type LimboSweepResult struct {
-	DryRun   bool
-	Scanned  int                // rows that passed the cheap SQL filter
-	Blocked  []LimboDisposition // TIER 1
-	Archived []LimboDisposition // TIER 2
+	DryRun  bool
+	Scanned int                // rows that passed the cheap SQL filter
+	Blocked []LimboDisposition // tasks blocked (or, in dry-run, would-block)
 }
 
 // limboRow is a scanned candidate before the Go-side liveness/staleness filters.
@@ -75,13 +82,12 @@ type limboRow struct {
 func (d *DB) SweepLimboAssignees(now time.Time, apply bool) (*LimboSweepResult, error) {
 	nowStr := now.UTC().Format(memoryTimeFmt)
 	blockCut := now.Add(-blockLimboAfter).UTC().Format(memoryTimeFmt)
-	archiveCut := now.Add(-archiveLimboAfter).UTC().Format(memoryTimeFmt)
 
 	// Cheap SQL pre-filter: non-terminal, live (not archived), actually assigned,
 	// whose assignee agent row exists and is NOT active and is NOT a service. The
 	// (project, LOWER(name)) join mirrors the referential scan's identity key.
-	// The finer conditions (live-lease, both-clock staleness, idempotence, tier)
-	// are applied per row below.
+	// The finer conditions (live-lease, both-clock staleness, idempotence,
+	// dispatcher liveness) are applied per row below.
 	rows, err := d.ro().Query(`
 		SELECT t.id, t.project, t.assigned_to, t.dispatched_by, t.status,
 		       COALESCE(t.last_activity_at, ''), COALESCE(t.lease_holder, ''),
@@ -136,47 +142,30 @@ func (d *DB) SweepLimboAssignees(now time.Time, apply bool) (*LimboSweepResult, 
 		if r.lastActivityAt == "" || r.agentLastSeen == "" {
 			continue
 		}
-		taskStaleForBlock := r.lastActivityAt < blockCut
-		agentStaleForBlock := r.agentLastSeen < blockCut
-		if !(taskStaleForBlock && agentStaleForBlock) {
+		if !(r.lastActivityAt < blockCut && r.agentLastSeen < blockCut) {
 			continue
 		}
 
-		// TIER 2 (archive) takes precedence: both clocks past 30d AND the
-		// dispatcher is itself gone or long-inactive. Otherwise TIER 1 (block).
-		taskStaleForArchive := r.lastActivityAt < archiveCut
-		agentStaleForArchive := r.agentLastSeen < archiveCut
+		// The DISPATCHER must ALSO be inactive (DEC-wraith-limbo-sweep-rule-1): a
+		// live lead still tracking the task keeps it out of limbo. Inactive = agent
+		// row missing OR status not in active/sleeping; NO last_seen threshold on
+		// the dispatcher.
 		dl, seen := dispCache[r.dispatchedBy]
 		if !seen {
 			dl = d.lookupAgentLiveness(r.project, r.dispatchedBy)
 			dispCache[r.dispatchedBy] = dl
 		}
-		dispatcherGoneOrStale := !dl.exists ||
-			(!dl.active && dl.lastSeen != "" && dl.lastSeen < archiveCut)
-
-		if taskStaleForArchive && agentStaleForArchive && dispatcherGoneOrStale {
-			disposition := LimboDisposition{
-				TaskID: r.id, Project: r.project, AssignedTo: r.assignedTo,
-				DispatchedBy: r.dispatchedBy, FromStatus: r.status, Tier: 2,
-			}
-			if apply {
-				ok, err := d.archiveLimboTask(r.id, r.project, nowStr)
-				if err != nil {
-					return res, fmt.Errorf("limbo sweep: archive %s: %w", r.id, err)
-				}
-				if !ok {
-					continue // raced (already archived/terminal) — CAS no-op
-				}
-			}
-			res.Archived = append(res.Archived, disposition)
-			continue
+		if dl.exists && dl.active {
+			continue // dispatcher active or sleeping → not limbo, keep
 		}
 
-		// TIER 1 — block, naming the dead assignee and its last_seen.
-		reason := fmt.Sprintf("%s: %s (last_seen %s)", limboReasonPrefix, r.assignedTo, r.agentLastSeen)
+		// BLOCK — naming the dead assignee (with last_seen) and its dispatcher.
+		reason := fmt.Sprintf("%s: %s (last_seen %s) dispatcher %s",
+			limboReasonPrefix, r.assignedTo, r.agentLastSeen, r.dispatchedBy)
 		disposition := LimboDisposition{
 			TaskID: r.id, Project: r.project, AssignedTo: r.assignedTo,
-			DispatchedBy: r.dispatchedBy, FromStatus: r.status, Tier: 1, Reason: reason,
+			DispatchedBy: r.dispatchedBy, FromStatus: r.status,
+			AgeDays: limboAgeDays(now, r.lastActivityAt), Reason: reason,
 		}
 		if apply {
 			ok, err := d.blockLimboTask(r.id, r.project, r.status, reason, r.blockedPeriods, nowStr)
@@ -186,10 +175,35 @@ func (d *DB) SweepLimboAssignees(now time.Time, apply bool) (*LimboSweepResult, 
 			if !ok {
 				continue // raced (status changed under us) — CAS no-op
 			}
+			// One audit row per successful block (apply only; dry-run writes zero,
+			// including this). Best-effort: audit failure never blocks the sweep.
+			_ = d.RecordAudit(models.AuditEntry{
+				Action:       "task.limbo_blocked",
+				Actor:        "relay-sweeper",
+				Project:      r.project,
+				ResourceType: "task",
+				ResourceID:   r.id,
+				Reason:       reason,
+			})
 		}
 		res.Blocked = append(res.Blocked, disposition)
 	}
 	return res, nil
+}
+
+// limboAgeDays is the whole number of days between a task's last_activity_at and
+// now — the age the dry-run shadow line reports. A missing/unparseable timestamp
+// (never expected for a scanned candidate) or a future stamp yields 0.
+func limboAgeDays(now time.Time, lastActivityAt string) int {
+	ts, err := time.Parse(memoryTimeFmt, lastActivityAt)
+	if err != nil {
+		return 0
+	}
+	days := int(now.UTC().Sub(ts) / (24 * time.Hour))
+	if days < 0 {
+		return 0
+	}
+	return days
 }
 
 // AgentActive reports whether an agent is a live owner candidate (active or
@@ -206,7 +220,7 @@ type agentLiveness struct {
 	lastSeen string
 }
 
-// lookupAgentLiveness reads an agent row for the tier-2 dispatcher check. A
+// lookupAgentLiveness reads an agent row for the dispatcher liveness check. A
 // missing row means gone.
 func (d *DB) lookupAgentLiveness(project, name string) agentLiveness {
 	if name == "" {
@@ -223,8 +237,8 @@ func (d *DB) lookupAgentLiveness(project, name string) agentLiveness {
 	return agentLiveness{exists: true, active: status == "active" || status == "sleeping", lastSeen: lastSeen}
 }
 
-// blockLimboTask performs the TIER 1 transition as a single-writer CAS. It is
-// the "équivalent single-writer" the ruling allows: BlockTask goes through
+// blockLimboTask performs the block transition as a single-writer CAS. It is the
+// "équivalent single-writer" the ruling allows: BlockTask goes through
 // validTransitions, which does not permit accepted→blocked, yet an accepted task
 // claimed by a dead agent is exactly a limbo case. This writes the same columns
 // the blocked branch of transitionTask does (status, blocked_reason, an opened
@@ -237,23 +251,6 @@ func (d *DB) blockLimboTask(taskID, project, fromStatus, reason, blockedPeriods,
 		`UPDATE tasks SET status = 'blocked', blocked_reason = ?, blocked_periods = ?
 		 WHERE id = ? AND project = ? AND status = ? AND status NOT IN ('done', 'cancelled')`,
 		reason, bp, taskID, project, fromStatus,
-	)
-	if err != nil {
-		return false, err
-	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
-}
-
-// archiveLimboTask performs the TIER 2 archive as a single-writer CAS. Only the
-// nullable archived_at is stamped — the row is untouched otherwise and nothing
-// is deleted, so an archived limbo task is fully recoverable. The
-// archived_at IS NULL guard makes a re-run (or a race) a no-op.
-func (d *DB) archiveLimboTask(taskID, project, now string) (bool, error) {
-	res, err := d.writerExec(
-		`UPDATE tasks SET archived_at = ?
-		 WHERE id = ? AND project = ? AND archived_at IS NULL AND status NOT IN ('done', 'cancelled')`,
-		now, taskID, project,
 	)
 	if err != nil {
 		return false, err
