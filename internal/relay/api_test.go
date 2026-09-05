@@ -892,3 +892,91 @@ func TestApiPutSetting_Allowlist(t *testing.T) {
 		t.Fatalf("disallowed key was written: %q", got)
 	}
 }
+
+// TestArchiveBoardRESTRefusesOpenLinearTasks (S7b-2 AC1): POST
+// /api/boards/{id}/archive on a board holding an OPEN Linear-mirrored task
+// returns a typed 403 whose body carries .code == BOARD_HAS_LINEAR_TASKS and
+// .error == the LinearTasksOnBoardError message verbatim, and writes NO
+// archived_at on either the board or the task.
+func TestArchiveBoardRESTRefusesOpenLinearTasks(t *testing.T) {
+	r := testRelay(t)
+	boardID, slug, taskID := seedBoardWithLinearTask(t, r.Handlers, "p1", "in-progress")
+
+	w := doAPI(r, http.MethodPost, "/boards/"+boardID+"/archive?project=p1", "")
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d: %s", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+		t.Fatalf("want Content-Type application/json, got %q", ct)
+	}
+	body := decodeJSON(t, w)
+	if body["code"] != "BOARD_HAS_LINEAR_TASKS" {
+		t.Fatalf("want code BOARD_HAS_LINEAR_TASKS, got %v", body["code"])
+	}
+	want := (&db.LinearTasksOnBoardError{Op: "archive", Count: 1}).Error()
+	if body["error"] != want {
+		t.Fatalf("refusal not verbatim:\n got %q\nwant %q", body["error"], want)
+	}
+	b, err := r.DB.GetBoard("p1", slug)
+	if err != nil || b == nil {
+		t.Fatalf("get board: %v (nil=%v)", err, b == nil)
+	}
+	if b.ArchivedAt != nil {
+		t.Fatalf("board must not be archived after refusal, got %v", *b.ArchivedAt)
+	}
+	tk, err := r.DB.GetTask(taskID, "p1")
+	if err != nil || tk == nil {
+		t.Fatalf("get task: %v (nil=%v)", err, tk == nil)
+	}
+	if tk.ArchivedAt != nil {
+		t.Fatalf("task must not be archived after refusal")
+	}
+}
+
+// TestArchiveBoardRESTNativeAndUnknown (S7b-2 AC2): the same route archives a
+// native-only board (200, board + its tasks archived) and 404s an unknown board
+// with a non-empty JSON error.
+func TestArchiveBoardRESTNativeAndUnknown(t *testing.T) {
+	r := testRelay(t)
+	b, err := r.DB.CreateBoard("p1", "Native", "native", "", "creator")
+	if err != nil {
+		t.Fatalf("create board: %v", err)
+	}
+	task, err := r.DB.DispatchTask("p1", "worker", "creator", "native task", "", "P2", nil, &b.ID, db.TypedTicket{}, false, nil)
+	if err != nil {
+		t.Fatalf("dispatch native task: %v", err)
+	}
+
+	w := doAPI(r, http.MethodPost, "/boards/"+b.ID+"/archive?project=p1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := decodeJSON(t, w)
+	if body["archived"] != true || body["board_id"] != b.ID {
+		t.Fatalf("unexpected success body: %v", body)
+	}
+	got, err := r.DB.GetBoard("p1", b.Slug)
+	if err != nil || got == nil {
+		t.Fatalf("get board: %v", err)
+	}
+	if got.ArchivedAt == nil {
+		t.Fatal("native board should be archived")
+	}
+	tk, err := r.DB.GetTask(task.ID, "p1")
+	if err != nil || tk == nil {
+		t.Fatalf("get task: %v (nil=%v)", err, tk == nil)
+	}
+	if tk.ArchivedAt == nil {
+		t.Fatal("native board's task should be archived by the cascade")
+	}
+
+	// Unknown board → 404 JSON with a non-empty error.
+	w2 := doAPI(r, http.MethodPost, "/boards/does-not-exist/archive?project=p1", "")
+	if w2.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d: %s", w2.Code, w2.Body.String())
+	}
+	nb := decodeJSON(t, w2)
+	if s, _ := nb["error"].(string); s == "" {
+		t.Fatalf("404 body must carry a non-empty error, got %v", nb)
+	}
+}

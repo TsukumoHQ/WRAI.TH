@@ -173,6 +173,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetBoards(w, req)
 	case path == "/boards/all" && req.Method == http.MethodGet:
 		r.apiGetAllBoards(w)
+	case strings.HasPrefix(path, "/boards/") && strings.HasSuffix(path, "/archive") && req.Method == http.MethodPost:
+		r.apiArchiveBoard(w, req, strings.TrimSuffix(strings.TrimPrefix(path, "/boards/"), "/archive"))
 	// Token usage
 	case path == "/token-usage" && req.Method == http.MethodGet:
 		r.apiGetTokenUsage(w, req)
@@ -2048,6 +2050,64 @@ func (r *Relay) apiGetAllBoards(w http.ResponseWriter) {
 		boards = []models.Board{}
 	}
 	writeJSON(w, boards)
+}
+
+// jsonErrorCode writes {"error": msg, "code": code} as application/json — the
+// same marshalled-not-literal discipline as jsonError (json_error.go): a typed
+// refusal reason (which may carry quotes/control bytes) round-trips verbatim so
+// the console can branch on .code and show .error unswallowed. Kept local to
+// this file to stay inside the slice's file budget; TestNoDynamicJSONErrorLiterals
+// still passes (no hand-built dynamic literal — the map is marshalled).
+func jsonErrorCode(w http.ResponseWriter, status int, msg, code string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	b, err := json.Marshal(map[string]string{"error": msg, "code": code})
+	if err != nil {
+		b = []byte(`{"error":"internal error"}`)
+	}
+	_, _ = w.Write(b)
+}
+
+// apiArchiveBoard soft-archives a board via POST /api/boards/{id}/archive. The
+// relay refuses (fail-closed) when the board still holds an OPEN Linear-mirrored
+// task — that refusal is surfaced verbatim as a typed BOARD_HAS_LINEAR_TASKS
+// 403 so the console never swallows the reason. No force flag, no cascade beyond
+// db.ArchiveBoard's own tx (DEC-wraith-boards-linear-guard-1).
+func (r *Relay) apiArchiveBoard(w http.ResponseWriter, req *http.Request, id string) {
+	project := projectFromRequest(req)
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "board id required")
+		return
+	}
+	// db.ArchiveBoard is a no-op (nil, not an error) on a missing board, so the
+	// 404 is decided here from the active-board set. This is a handler-side read
+	// only — no change to internal/db.
+	boards, err := r.DB.ListBoards(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to list boards")
+		return
+	}
+	found := false
+	for i := range boards {
+		if boards[i].ID == id {
+			found = true
+			break
+		}
+	}
+	if !found {
+		jsonError(w, http.StatusNotFound, "board not found")
+		return
+	}
+	if err := r.DB.ArchiveBoard(project, id); err != nil {
+		var lt *db.LinearTasksOnBoardError
+		if errors.As(err, &lt) {
+			jsonErrorCode(w, http.StatusForbidden, lt.Error(), "BOARD_HAS_LINEAR_TASKS")
+			return
+		}
+		jsonError(w, http.StatusInternalServerError, "failed to archive board")
+		return
+	}
+	writeJSON(w, map[string]any{"archived": true, "board_id": id})
 }
 
 func (r *Relay) apiGetFileLocks(w http.ResponseWriter, req *http.Request) {

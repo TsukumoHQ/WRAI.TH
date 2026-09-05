@@ -43,6 +43,11 @@ export function initSettings(el, ctx) {
   const esc = ctx.esc;
   let s = null;            // last-loaded settings snapshot
   let msg = null;          // {kind:'ok'|'err', text}
+  // Boards group (S7b-2): archive a board through POST /api/boards/{id}/archive.
+  // Independent of the settings snapshot above so it works even when the config
+  // load fails. A refusal is shown verbatim inline; the row stays, no force, no retry.
+  let boards = [];
+  let boardsProject = null;
 
   async function load() {
     try {
@@ -107,6 +112,81 @@ export function initSettings(el, ctx) {
     </section>`;
   }
 
+  // The Boards group: a project picker + one row per active board with an
+  // Archive button and an inline slot for a verbatim server refusal. No force
+  // control is rendered and no retry is performed — the row is removed only when
+  // the server returns 200 (loadBoards refetches the active set).
+  function boardsGroupHTML() {
+    const projs = (ctx.projects || []).map((p) => p.name);
+    if (boardsProject == null) {
+      boardsProject = (ctx.selection && ctx.selection !== 'all') ? ctx.selection : (projs[0] || '');
+    }
+    const opts = projs.map((n) => `<option value="${esc(n)}" ${n === boardsProject ? 'selected' : ''}>${esc(n)}</option>`).join('');
+    const rows = boards.length
+      ? boards.map((b) => `
+          <div class="cfg-row" data-board="${esc(b.id)}">
+            <span class="cfg-lbl">${esc(b.name || b.slug || b.id)}</span>
+            <button class="cfg-save board-arch" data-board="${esc(b.id)}">Archive</button>
+          </div>
+          <div class="board-msg" data-board="${esc(b.id)}" role="status"></div>`).join('')
+      : `<div class="cfg-note">${boardsProject ? 'No active boards.' : 'No project selected.'}</div>`;
+    return `<section class="cfg-group">
+      <h3 class="cfg-gtitle">Boards</h3>
+      <div class="cfg-note">Archive a board. Refused if it still holds open Linear-mirrored tasks.</div>
+      <label class="cfg-row"><span class="cfg-lbl">Project</span>
+        <select class="cfg-in" id="boardsProj" ${projs.length ? '' : 'disabled'}>${opts}</select></label>
+      <div class="cfg-fields">${rows}</div>
+    </section>`;
+  }
+
+  async function loadBoards() {
+    try {
+      boards = boardsProject ? (await api.boards(boardsProject)) : [];
+    } catch (_) {
+      boards = [];
+    }
+    if (!Array.isArray(boards)) boards = [];
+    render();
+  }
+
+  // Best-effort "which ones": list the open Linear-mirrored tasks still on the
+  // refused board, from the existing /api/tasks/all data (no new endpoint).
+  async function showOffenders(id, msgEl) {
+    if (!msgEl) return;
+    let tasks = [];
+    try { tasks = await api.tasksAll(); } catch (_) { return; }
+    const open = (tasks || []).filter((t) => t.board_id === id && t.source === 'linear'
+      && t.archived_at == null && t.status !== 'done' && t.status !== 'cancelled');
+    if (!open.length) return;
+    const ul = document.createElement('ul');
+    ul.className = 'board-offenders';
+    ul.innerHTML = open.slice(0, 20).map((t) => `<li>${esc(t.title || t.id)}</li>`).join('');
+    msgEl.appendChild(ul);
+  }
+
+  function wireBoards() {
+    const sel = el.querySelector('#boardsProj');
+    if (sel) sel.onchange = () => { boardsProject = sel.value; loadBoards(); };
+    el.querySelectorAll('.board-arch').forEach((btn) => {
+      btn.onclick = async () => {
+        const id = btn.dataset.board;
+        const msgEl = el.querySelector(`.board-msg[data-board="${id}"]`);
+        if (msgEl) { msgEl.textContent = ''; msgEl.className = 'board-msg'; }
+        btn.disabled = true;
+        try {
+          await api.archiveBoard(boardsProject, id);
+          await loadBoards();                 // 200 → row gone from the active set
+        } catch (e) {
+          // Verbatim server refusal. Keep the row and the button (a human may act
+          // and click again); no automatic retry, no force/override path.
+          if (msgEl) { msgEl.textContent = e.message; msgEl.className = 'cfg-note cfg-note-err'; }
+          btn.disabled = false;
+          await showOffenders(id, msgEl);
+        }
+      };
+    });
+  }
+
   function render() {
     const banner = msg
       ? `<div class="cfg-note ${msg.kind === 'err' ? 'cfg-note-err' : 'cfg-note-ok'}" role="status">${esc(msg.text)}</div>`
@@ -120,6 +200,7 @@ export function initSettings(el, ctx) {
         ${banner}
         ${groupHTML('Console')}
         ${groupHTML('Linear')}
+        ${boardsGroupHTML()}
         <div class="cfg-actions">
           ${s
             ? `<button class="cfg-save" id="cfgSave">Save</button>`
@@ -152,6 +233,9 @@ export function initSettings(el, ctx) {
   }
 
   function wire() {
+    // The Boards group is independent of the settings snapshot — wire it first so
+    // it stays live even when the config load failed (s === null).
+    wireBoards();
     // Failed load: no settings snapshot, so bind ONLY the Retry button and
     // return before any save handler exists — collect()/PUT is unreachable, so a
     // click cannot wipe the stored config.
@@ -178,5 +262,5 @@ export function initSettings(el, ctx) {
     };
   }
 
-  return { activate() { msg = null; load(); } };
+  return { activate() { msg = null; load(); loadBoards(); } };
 }

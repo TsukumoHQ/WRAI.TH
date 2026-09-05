@@ -31,6 +31,12 @@ export const api = {
   saveSettings: (body) => sendJSON('PUT', '/api/settings', body),
   board: (project, cycle = 'active') =>
     getJSON(`/api/tasks/board?${q({ project, cycle })}`),
+  boards: (project) => getJSON(`/api/boards?${q({ project })}`),
+  // Archive a board. A refusal (open Linear-mirrored tasks on it) comes back as
+  // a typed 403; sendJSON throws j.error verbatim so the caller shows it inline.
+  // No force flag exists here by design (DEC-wraith-boards-linear-guard-1).
+  archiveBoard: (project, id) =>
+    sendJSON('POST', `/api/boards/${encodeURIComponent(id)}/archive?${q({ project })}`),
   cycles: (project) => getJSON(`/api/cycles?${q({ project })}`),
   profiles: (project) => getJSON(`/api/profiles?${q({ project })}`),
   agents: (project) => getJSON(`/api/agents?${q({ project })}`),

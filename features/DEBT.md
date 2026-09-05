@@ -9,3 +9,4 @@
 - - See [LEGACY_OPPORTUNITY] above: REST `/api/memories` has no `valid_until` field, so `layer=context` writes are unconditionally rejected there on an opted-in project. Pre-existing gap in REST feature parity with the MCP tool, not introduced by this change; flagged as a follow-up candidate, not blocking.
 - - REST /api/memories has no valid_until field — see [LEGACY_OPPORTUNITY] above.
 - [LEGACY_OPPORTUNITY] none — additive/subtractive UI change; no dead legacy path uncovered beyond the removed write handlers themselves.
+- [LEGACY_OPPORTUNITY] none — additive wiring over an existing guard; no dead code uncovered.
