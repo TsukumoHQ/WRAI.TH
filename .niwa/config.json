@@ -1,0 +1,1 @@
+{"version":1,"target_branch":"main","check_kind":"go","check_args":["build","-tags","fts5","./..."],"test_args":["test","-tags","fts5","./..."]}
