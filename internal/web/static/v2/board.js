@@ -13,6 +13,15 @@ export function initBoard(root, ctx) {
   const distEl = root.querySelector('#boardDist');
   const cycleEl = root.querySelector('#cycleFilter');
   const modeEl = root.querySelector('#boardMode');
+  // Board selector host — created in JS (no HTML template change) and inserted
+  // into the board controls before the cycle filter. Reuses the cycle-filter
+  // pill styling so it needs no new CSS.
+  const boardFilterEl = document.createElement('div');
+  boardFilterEl.className = 'cycle-filter board-filter';
+  boardFilterEl.id = 'boardFilter';
+  boardFilterEl.hidden = true;
+  const boardControls = root.querySelector('.board-controls');
+  if (boardControls) boardControls.insertBefore(boardFilterEl, cycleEl);
 
   let tasks = [];
   let byId = new Map();
@@ -28,6 +37,9 @@ export function initBoard(root, ctx) {
   const filters = { q: '', agent: '', priority: '', label: '' };
   let childrenOf = new Map();    // parent_task_id → child tasks (precomputed)
   let activeByAgent = new Map(); // agent → active task count (overload signal)
+  let boards = [];               // active boards for the selected project
+  let boardById = new Map();     // board_id → name (chip + filter resolution)
+  let boardSel = 'all';          // 'all' | '__none__' | <board_id>
   const STALE_MS = 24 * 3600e3;  // in-progress older than this = stale
   const OVERLOAD = 5;            // agent with more active tasks than this = overloaded
 
@@ -41,15 +53,19 @@ export function initBoard(root, ctx) {
     const token = ++loadToken;
     boardEl.innerHTML = skeleton();
 
-    // cycles + profiles (single project only)
-    if (sel === 'all') { cycles = []; profiles = []; }
+    // cycles + profiles + boards (single project only)
+    if (sel === 'all') { cycles = []; profiles = []; boards = []; }
     else {
-      [cycles, profiles] = await Promise.all([
+      [cycles, profiles, boards] = await Promise.all([
         ctx.api.cycles(sel).catch(() => []),
         canEdit ? ctx.api.profiles(sel).catch(() => []) : Promise.resolve([]),
+        ctx.api.boards(sel).catch(() => []),
       ]);
     }
     if (token !== loadToken) return;
+    boardById = new Map((boards || []).map((b) => [b.id, b.name]));
+    // A project switch (resetCycle) clears the board selection back to 'Tous'.
+    if (resetCycle) boardSel = 'all';
     if (resetCycle) {
       const active = cycles.find((c) => c.active);
       cycle = active ? active.id : (cycles.length ? cycles[0].id : 'active');
@@ -67,6 +83,7 @@ export function initBoard(root, ctx) {
     indexTasks();
     loadedFor = `${sel}|${cycle}`;
     renderCycleFilter();
+    renderBoardFilter();
     renderMode();
     renderFilters();
     render();
@@ -102,6 +119,14 @@ export function initBoard(root, ctx) {
       if (filters.agent && taskAgent(t) !== filters.agent) return false;
       if (filters.priority && (t.priority || 'P2').toUpperCase() !== filters.priority) return false;
       if (filters.label && !parseLabels(t).includes(filters.label)) return false;
+      // Board filter. '__none__' keeps tasks with an empty OR dangling board_id
+      // (id not among the fetched boards — tolerated, never a crash); a specific
+      // board_id keeps exactly its own tasks. 'all' is a no-op.
+      if (boardSel !== 'all') {
+        const resolved = t.board_id && boardById.has(t.board_id);
+        if (boardSel === '__none__') { if (resolved) return false; }
+        else if (t.board_id !== boardSel) return false;
+      }
       return true;
     });
   }
@@ -203,6 +228,9 @@ export function initBoard(root, ctx) {
     const ext = t.source === 'linear' && t.external_url;
     const pr = priorityRank(t.priority);
     const stale = staleness(t);
+    // Board name chip — only when the id resolves; a dangling/empty board_id
+    // yields no chip (undefined is falsy) and never throws.
+    const boardName = t.board_id ? boardById.get(t.board_id) : '';
     // Drag only makes sense in status mode (drop maps a column → a status).
     // Status-mode drag: native tasks on writable projects, and mirror tasks
     // (the status move round-trips to Linear). Not in the all-projects view.
@@ -220,6 +248,7 @@ export function initBoard(root, ctx) {
       </div>
       <div class="kcard-title">${esc(t.title || '(untitled)')}</div>
       <div class="kcard-meta">
+        ${boardName ? `<span class="lchip kcard-board" title="board">${esc(boardName)}</span>` : ''}
         ${labels.map((l) => `<span class="lchip">${esc(l)}</span>`).join('')}
         ${roll ? `<span class="rollup" title="${roll.done}/${roll.total} sub-issues done">▣ ${roll.done}/${roll.total}</span>` : ''}
         ${stale ? `<span class="stale-badge" title="no movement in ${fmtDur(stale / 1000)}">stale ${fmtDur(stale / 1000)}</span>` : ''}
@@ -265,6 +294,34 @@ export function initBoard(root, ctx) {
     cycleEl.innerHTML = pills.join('');
     cycleEl.querySelectorAll('.cyc-pill').forEach((b) => b.addEventListener('click', () => {
       cycle = b.dataset.cycle; load(false);
+    }));
+  }
+  // Board selector — 'Tous' (default, current behaviour) + one pill per active
+  // board + '(sans board)' for tasks whose board_id is empty or dangling. Hidden
+  // in the all-projects view or when the project has no boards. Client-side only:
+  // a click sets boardSel and re-renders (applyFilters does the filtering); no
+  // refetch, no new REST route. Reuses the cycle-filter pill styling.
+  function renderBoardFilter() {
+    if (!boardFilterEl) return;
+    if (selection() === 'all' || !boards.length) {
+      boardFilterEl.hidden = true; boardFilterEl.innerHTML = ''; return;
+    }
+    // Per-board task counts; empty/dangling board_id collapses into '(sans board)'.
+    const counts = new Map();
+    let noneCount = 0;
+    for (const t of tasks) {
+      if (t.board_id && boardById.has(t.board_id)) counts.set(t.board_id, (counts.get(t.board_id) || 0) + 1);
+      else noneCount++;
+    }
+    const pill = (key, label, n) =>
+      `<button class="cyc-pill board-pill${boardSel === key ? ' on' : ''}" data-board="${esc(key)}">${esc(label)}${n != null ? ` <b>${n}</b>` : ''}</button>`;
+    let html = pill('all', 'Tous', tasks.length);
+    for (const b of boards) html += pill(b.id, b.name || '(board)', counts.get(b.id) || 0);
+    if (noneCount) html += pill('__none__', '(sans board)', noneCount);
+    boardFilterEl.hidden = false;
+    boardFilterEl.innerHTML = html;
+    boardFilterEl.querySelectorAll('.board-pill').forEach((b) => b.addEventListener('click', () => {
+      boardSel = b.dataset.board; renderBoardFilter(); render();
     }));
   }
   function renderMode() {
@@ -383,6 +440,7 @@ export function initBoard(root, ctx) {
         indexTasks();
       });
       renderFilters();
+      renderBoardFilter();
     }, 600);
   }
 
