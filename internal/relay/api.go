@@ -38,6 +38,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiHealth(w)
 	case path == "/projects" && req.Method == http.MethodGet:
 		r.apiGetProjects(w)
+	case path == "/projects" && req.Method == http.MethodPost:
+		r.apiCreateProject(w, req)
 	case path == "/fleet/throughput" && req.Method == http.MethodGet:
 		r.apiFleetThroughput(w, req)
 	case strings.HasPrefix(path, "/projects/") && req.Method == http.MethodDelete:
@@ -349,6 +351,49 @@ func (r *Relay) apiPatchProject(w http.ResponseWriter, req *http.Request, name s
 		return
 	}
 	writeJSON(w, map[string]string{"ok": "true"})
+}
+
+// apiCreateProject is the REST wrapper for creating a project (audit b983684b
+// §1: create_project was MCP-tool-only). It reuses the existing name primitives
+// — NormalizeProject + validProjectName (which already rejects "" and the
+// reserved "default") and the DB EnsureProject — with no new validation logic.
+// It does NOT call HandleCreateProject: that MCP handler returns the interactive
+// onboarding mega-prompt and treats a pre-existing project as a success
+// ("already_configured"), which is wrong for a REST create — the AC requires a
+// duplicate to surface as an error, so this checks GetProject first.
+func (r *Relay) apiCreateProject(w http.ResponseWriter, req *http.Request) {
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
+		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
+		return
+	}
+	name := NormalizeProject(body.Name)
+	if name == "" {
+		http.Error(w, `{"error":"name is required"}`, http.StatusBadRequest)
+		return
+	}
+	if !validProjectName(name) {
+		http.Error(w, `{"error":"invalid project name — use letters, digits, - or _, 1-64 chars, not the reserved name 'default'"}`, http.StatusBadRequest)
+		return
+	}
+	existing, err := r.DB.GetProject(name)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to look up project", err)
+		return
+	}
+	if existing != nil {
+		http.Error(w, `{"error":"project already exists"}`, http.StatusConflict)
+		return
+	}
+	r.DB.EnsureProject(name)
+	proj, err := r.DB.GetProject(name)
+	if err != nil {
+		apiError(w, http.StatusInternalServerError, "failed to read created project", err)
+		return
+	}
+	writeJSON(w, map[string]any{"created": true, "project": proj})
 }
 
 func (r *Relay) apiDeleteProject(w http.ResponseWriter, name string) {
