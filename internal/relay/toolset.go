@@ -46,6 +46,45 @@ func anonymousRefusedError(name, project string) *mcp.CallToolResult {
 		map[string]any{"reason": reason, "name": name, "project": project})
 }
 
+// archivedRefusedTools introduce NEW work into a project; once it is archived
+// they are refused at the guardIdentity seam (register_agent calls the same
+// check from its own handler — it is a bootstrap tool, not wrapped here).
+// complete_task, update_task (without reassign), resume/cancel/release stay
+// allowed so in-flight work can be closed out (allow-to-close).
+var archivedRefusedTools = map[string]bool{
+	"register_agent": true,
+	"dispatch_task":  true,
+	"send_message":   true,
+	"claim_task":     true,
+}
+
+// archivedProjectError is the TYPED refusal for a write into an archived
+// project. Permission-category, non-retryable: it stays archived until an
+// operator unarchives it, so the client must PARK, not hot-loop.
+func archivedProjectError(project, toolName string) *mcp.CallToolResult {
+	return toolError("ARCHIVED_PROJECT", CategoryPermission, false,
+		fmt.Sprintf("project %q is archived — %q refused (new work is frozen). Existing work can still be closed (complete_task / update_task without reassign / release); an operator can unarchive_project to reopen it.", project, toolName),
+		map[string]any{"project": project, "tool": toolName})
+}
+
+// refuseIfArchived is the SINGLE archived-project guard. Returns a typed
+// refusal for a new-work write into an archived project, or an update_task
+// carrying a reassign (assigned_to); nil (allow) otherwise. Every mutating
+// tool flows through guardIdentity which calls this; register_agent calls it
+// from HandleRegisterAgent (bootstrap tool, not wrapped).
+func (h *Handlers) refuseIfArchived(project, toolName string, req mcp.CallToolRequest) *mcp.CallToolResult {
+	if !h.db.IsProjectArchived(project) {
+		return nil
+	}
+	if archivedRefusedTools[toolName] {
+		return archivedProjectError(project, toolName)
+	}
+	if toolName == "update_task" && strings.TrimSpace(req.GetString("assigned_to", "")) != "" {
+		return archivedProjectError(project, "update_task (reassign)")
+	}
+	return nil
+}
+
 // registeredTool pairs a ServerTool with the category used by discover_tools.
 type registeredTool struct {
 	server.ServerTool
@@ -232,6 +271,13 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 		project := h.resolveProject(ctx, req)
 		if project == "" {
 			return toolResultError("no project resolved: pass project=<name> (or connect with ?project=<name>) — the 'default' catch-all was removed."), nil
+		}
+		// Archived-project freeze (S3b, DEC-wraith-archive-project-1 §2): refuse
+		// NEW work into an archived project (dispatch/claim/send + task reassign)
+		// with a typed code so the client parks. Allow-to-close tools and reads
+		// pass through.
+		if res := h.refuseIfArchived(project, toolName, req); res != nil {
+			return res, nil
 		}
 		from := strings.ToLower(resolveAgent(ctx, req))
 		if from == "" {

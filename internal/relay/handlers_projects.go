@@ -57,6 +57,9 @@ func (h *Handlers) HandleDeleteProject(ctx context.Context, req mcp.CallToolRequ
 	if project == "" {
 		return toolResultError("project is required"), nil
 	}
+	if !h.db.IsProjectArchived(project) {
+		return toolResultError(fmt.Sprintf("project %q is active — archive_project it first, then delete_project purges it (purge requires archived, DEC-wraith-archive-project-1 §2).", project)), nil
+	}
 
 	if err := h.db.DeleteProject(project); err != nil {
 		return toolResultError(fmt.Sprintf("failed to delete project: %v", err)), nil

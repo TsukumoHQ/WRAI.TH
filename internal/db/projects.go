@@ -275,6 +275,23 @@ func (d *DB) UnarchiveProject(name string) error {
 	return nil
 }
 
+// IsProjectArchived reports whether a project exists and is archived
+// (archived_at IS NOT NULL). A missing project or a read error returns false
+// (fail-open — the caller's existence/identity checks own unknown projects).
+// Read-only; the S3b archived-project freeze guard's single source of truth.
+func (d *DB) IsProjectArchived(name string) bool {
+	name = canonicalProject(name)
+	if name == "" {
+		return false
+	}
+	var archivedAt sql.NullString
+	if err := d.ro().QueryRow(
+		"SELECT archived_at FROM projects WHERE name = ?", name).Scan(&archivedAt); err != nil {
+		return false
+	}
+	return archivedAt.Valid && archivedAt.String != ""
+}
+
 // ListProjectsWithInfo returns ACTIVE projects with their planet_type and stats.
 // Archived projects are excluded (DEC-wraith-archive-project-1); use
 // ListProjectsWithInfoFiltered(true) to include them.

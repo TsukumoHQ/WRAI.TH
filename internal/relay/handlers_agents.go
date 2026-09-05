@@ -90,6 +90,9 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	if name == "" || name == "anonymous" || project == "default" {
 		return anonymousRefusedError(name, project), nil
 	}
+	if res := h.refuseIfArchived(project, "register_agent", req); res != nil {
+		return res, nil
+	}
 	if !validProjectName(project) {
 		return toolResultError(fmt.Sprintf("invalid project name %q — use letters, digits, - or _, 1-64 chars, no leading dot/slash", project)), nil
 	}
