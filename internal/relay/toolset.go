@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
 
 	"agent-relay/internal/db"
+	"agent-relay/internal/models"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -259,6 +261,68 @@ var mutatingTools = map[string]bool{
 	"delete_project": true, "archive_project": true, "unarchive_project": true,
 }
 
+// taskRefusalAuditedTools are the mutating task-lifecycle tools whose REFUSALS
+// must leave a relay-side trace (INFO log line + a task.refused audit row). The
+// motivating incident: a niwa daemon's block/resume/complete calls were refused
+// (NOT_FOUND from a wrong project passed, "task is not blocked" on resume) yet
+// left no record anywhere while the caller's own journal logged "applied" — a
+// coordination fault invisible to everyone. Scoped to the single-task lifecycle
+// verbs the ticket names; batch_* and read tools are intentionally absent.
+var taskRefusalAuditedTools = map[string]bool{
+	"claim_task": true, "start_task": true, "complete_task": true,
+	"block_task": true, "resume_task": true, "cancel_task": true,
+	"update_task": true,
+}
+
+// refusalCodeMessage extracts the typed code and prose message from a tool's
+// error envelope (every relay tool error is the {code,errorCategory,isRetryable,
+// message} JSON from toolError). It reads exactly what the caller received, so
+// the log/audit never diverge from the response. Falls back to the raw text (or
+// INTERNAL) if the body is not the canonical envelope, so a refusal is never
+// swallowed.
+func refusalCodeMessage(res *mcp.CallToolResult) (code, message string) {
+	code, message = CodeInternal, ""
+	if res == nil || len(res.Content) == 0 {
+		return code, message
+	}
+	tc, ok := res.Content[0].(mcp.TextContent)
+	if !ok {
+		return code, message
+	}
+	message = tc.Text
+	var body struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal([]byte(tc.Text), &body); err == nil {
+		if body.Code != "" {
+			code = body.Code
+		}
+		if body.Message != "" {
+			message = body.Message
+		}
+	}
+	return code, message
+}
+
+// recordTaskRefusal makes a refused mutating task call visible relay-side: one
+// INFO line naming the caller identity, the project it sent, the task id and the
+// typed refusal code, and one audit_log row (action=task.refused, reason=code +
+// ": " + message) so a caller-side "applied" claim can be checked against the
+// relay's own record. Best-effort (audit failures never block the response),
+// zero schema change — it reuses the existing audit_log columns.
+func (h *Handlers) recordTaskRefusal(tool, as, project, taskID string, res *mcp.CallToolResult) {
+	code, message := refusalCodeMessage(res)
+	log.Printf("task-call refused tool=%s as=%s project=%s task=%s code=%s", tool, as, project, taskID, code)
+	_ = h.db.RecordAudit(models.AuditEntry{
+		Action:     "task.refused",
+		Actor:      as,
+		Project:    project,
+		ResourceID: taskID,
+		Reason:     code + ": " + message,
+	})
+}
+
 // guardIdentity wraps a mutating tool handler to reject any write that cannot
 // be attributed to a real agent in a real project. It enforces three things,
 // in order: a resolvable project, a resolvable agent identity, and that the
@@ -312,7 +376,16 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 				return toolResultError(fmt.Sprintf("identity mismatch: this connection is registered as %q in project %q and cannot act as %q — use your own identity (or register_agent as %q).", owner, project, from, from)), nil
 			}
 		}
-		return next(ctx, req)
+		res, err := next(ctx, req)
+		// Observability: a refused mutating task call is a coordination fault that
+		// must be visible relay-side. Log + audit the refusal (identity, project,
+		// task, code) without altering the response — the refusal itself is
+		// unchanged. A successful call (res not an error) writes nothing, so there
+		// are no false positives.
+		if err == nil && res != nil && res.IsError && taskRefusalAuditedTools[toolName] {
+			h.recordTaskRefusal(toolName, from, project, req.GetString("task_id", ""), res)
+		}
+		return res, err
 	}
 }
 

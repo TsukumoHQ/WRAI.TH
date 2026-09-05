@@ -10,3 +10,4 @@
 - - REST /api/memories has no valid_until field — see [LEGACY_OPPORTUNITY] above.
 - [LEGACY_OPPORTUNITY] none — additive/subtractive UI change; no dead legacy path uncovered beyond the removed write handlers themselves.
 - [LEGACY_OPPORTUNITY] none — additive wiring over an existing guard; no dead code uncovered.
+- NON-BLOCKING NOTE ([LEGACY_OPPORTUNITY]): the resume "task is not blocked" refusal currently classifies to code=INTERNAL / isRetryable=true via classifyMessage — a latent miscoding (a deterministic not-blocked refusal is not transient/retryable). This observability change now makes that visible in the audit trail. Retyping that refusal to a non-retryable validation code is a separate follow-up (it changes the envelope a caller receives, which this ticket must not do).
