@@ -1,9 +1,30 @@
 package db
 
 import (
+	"bytes"
 	"database/sql"
+	"log"
+	"strings"
 	"testing"
 )
+
+// captureLog redirects the stdlib logger (what referential_integrity.go writes
+// through — same as the production bridge routes to slog) into a buffer for the
+// duration of fn, then restores it. Returns everything logged.
+func captureLog(t *testing.T, fn func()) string {
+	t.Helper()
+	var buf bytes.Buffer
+	prevOut := log.Writer()
+	prevFlags := log.Flags()
+	log.SetOutput(&buf)
+	log.SetFlags(0)
+	defer func() {
+		log.SetOutput(prevOut)
+		log.SetFlags(prevFlags)
+	}()
+	fn()
+	return buf.String()
+}
 
 // seedAgent inserts an agent row with explicit status/is_service so the test can
 // craft dead / service / live identities deterministically.
@@ -364,5 +385,112 @@ func TestReferentialScanReopensRegressedRef(t *testing.T) {
 	}
 	if openCount(t, c, "orphan_dispatcher") != 1 {
 		t.Error("regressed ref must be re-opened as an orphan")
+	}
+}
+
+// TestReferentialScanEmitsDetectLinePerRow: a newly-orphaned row produces one
+// `integrity: detect ...` line carrying class, ref=table.col, value and row id.
+func TestReferentialScanEmitsDetectLinePerRow(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	// dispatched_by='ghost' with no such agent → orphan_dispatcher; every other
+	// ref column empty/valid so this is the only class that fires.
+	seedTask(t, c, "t-odisp", "p1", "pending", "ghost", "", "", "", "", "", false)
+
+	out := captureLog(t, func() {
+		if _, err := d.RunReferentialScan(); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+	})
+	want := "integrity: detect class=orphan_dispatcher ref=tasks.dispatched_by value=ghost row=t-odisp"
+	if !strings.Contains(out, want) {
+		t.Fatalf("missing detect line.\nwant substring: %q\ngot:\n%s", want, out)
+	}
+	if got := strings.Count(out, "row=t-odisp"); got != 1 {
+		t.Fatalf("expected exactly one detect line for the row, got %d:\n%s", got, out)
+	}
+}
+
+// TestReferentialScanEmitsHealLinePerResolution: once the dangling ref resolves
+// (the missing agent appears), the next scan emits one `integrity: heal ...`
+// line with the row id, an action and resolved_at.
+func TestReferentialScanEmitsHealLinePerResolution(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedTask(t, c, "t-odisp", "p1", "pending", "ghost", "", "", "", "", "", false)
+
+	if _, err := d.RunReferentialScan(); err != nil { // opens the quarantine row
+		t.Fatalf("first scan: %v", err)
+	}
+	seedAgent(t, c, "p1", "ghost", "active", "", "", 0) // ref now resolves
+
+	out := captureLog(t, func() {
+		if _, err := d.RunReferentialScan(); err != nil {
+			t.Fatalf("second scan: %v", err)
+		}
+	})
+	if !strings.Contains(out, "integrity: heal class=orphan_dispatcher row=t-odisp action=ref_resolved resolved_at=") {
+		t.Fatalf("missing heal line.\ngot:\n%s", out)
+	}
+}
+
+// TestReferentialScanPerRowLinesAreTransitionOnly: a re-scan of an unchanged DB
+// re-emits NO per-row detect/heal lines. This is the bounded-volume invariant —
+// a restart logs only the delta, not every open row.
+func TestReferentialScanPerRowLinesAreTransitionOnly(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedTask(t, c, "t-odisp", "p1", "pending", "ghost", "", "", "", "", "", false)
+
+	if _, err := d.RunReferentialScan(); err != nil { // first scan logs the detect
+		t.Fatalf("first scan: %v", err)
+	}
+	out := captureLog(t, func() {
+		if _, err := d.RunReferentialScan(); err != nil { // unchanged → silent
+			t.Fatalf("second scan: %v", err)
+		}
+	})
+	if strings.Contains(out, "integrity: detect") || strings.Contains(out, "integrity: heal") {
+		t.Fatalf("re-scan of unchanged DB must emit no per-row lines, got:\n%s", out)
+	}
+}
+
+// TestMarkQuarantineEmitsDetectOnlyOnInsert: the on-write soft-mark path logs one
+// detect line when it actually inserts, and stays silent on an idempotent dedup.
+func TestMarkQuarantineEmitsDetectOnlyOnInsert(t *testing.T) {
+	d := testDB(t)
+
+	first := captureLog(t, func() {
+		if err := d.MarkQuarantine("tasks", "t-1", "assigned_to", "ghost", "orphan_assignee", "p1"); err != nil {
+			t.Fatalf("first mark: %v", err)
+		}
+	})
+	want := "integrity: detect class=orphan_assignee ref=tasks.assigned_to value=ghost row=t-1"
+	if !strings.Contains(first, want) {
+		t.Fatalf("first MarkQuarantine must log detect.\nwant: %q\ngot:\n%s", want, first)
+	}
+
+	second := captureLog(t, func() {
+		if err := d.MarkQuarantine("tasks", "t-1", "assigned_to", "ghost", "orphan_assignee", "p1"); err != nil {
+			t.Fatalf("second mark: %v", err)
+		}
+	})
+	if strings.Contains(second, "integrity: detect") {
+		t.Fatalf("idempotent MarkQuarantine dedup must not re-log detect, got:\n%s", second)
+	}
+}
+
+// TestLogReferentialCountsKeepsSummaryLine: the aggregate summary line the audit
+// relied on is preserved alongside the new per-row lines (regression guard).
+func TestLogReferentialCountsKeepsSummaryLine(t *testing.T) {
+	out := captureLog(t, func() {
+		logReferentialCounts("startup", map[string]int{"orphan_dispatcher": 2, "limbo": 1})
+	})
+	want := "integrity: startup referential scan — 3 open across 2 class(es): limbo=1 orphan_dispatcher=2"
+	if !strings.Contains(out, want) {
+		t.Fatalf("summary line changed/dropped.\nwant: %q\ngot:\n%s", want, out)
 	}
 }

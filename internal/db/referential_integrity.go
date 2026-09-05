@@ -263,7 +263,62 @@ func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
+	// Per-row transition logging (emitted post-commit, transition-only so a
+	// restart re-emits just the delta — not every open row — keeping the live
+	// log bounded). detect = a row about to open (a brand-new orphan, or a
+	// previously-resolved row regressing to orphan); heal = an open row whose
+	// ref now resolves. Captured BEFORE the mutations below so the "not yet
+	// open" / "still open" sets are the pre-scan state.
+	var detectLines, healLines []string
+
 	for _, c := range refChecks() {
+		ref := c.table + "." + c.refCol
+		drows, err := tx.QueryContext(ctx,
+			`SELECT o.row_id, o.ref_value FROM (`+c.orphanSQL+`) o
+			 WHERE o.row_id NOT IN (
+			   SELECT row_id FROM integrity_quarantine WHERE class = ? AND resolved_at IS NULL)`,
+			c.class)
+		if err != nil {
+			return nil, fmt.Errorf("referential scan %s: detect capture: %w", c.class, err)
+		}
+		for drows.Next() {
+			var rowID, refValue string
+			if err := drows.Scan(&rowID, &refValue); err != nil {
+				_ = drows.Close()
+				return nil, fmt.Errorf("referential scan %s: detect scan: %w", c.class, err)
+			}
+			detectLines = append(detectLines, fmt.Sprintf(
+				"integrity: detect class=%s ref=%s value=%s row=%s", c.class, ref, refValue, rowID))
+		}
+		if err := drows.Err(); err != nil {
+			_ = drows.Close()
+			return nil, fmt.Errorf("referential scan %s: detect rows: %w", c.class, err)
+		}
+		_ = drows.Close()
+
+		hrows, err := tx.QueryContext(ctx,
+			`SELECT row_id FROM integrity_quarantine
+			 WHERE class = ? AND resolved_at IS NULL
+			   AND row_id NOT IN (SELECT o.row_id FROM (`+c.orphanSQL+`) o)`,
+			c.class)
+		if err != nil {
+			return nil, fmt.Errorf("referential scan %s: heal capture: %w", c.class, err)
+		}
+		for hrows.Next() {
+			var rowID string
+			if err := hrows.Scan(&rowID); err != nil {
+				_ = hrows.Close()
+				return nil, fmt.Errorf("referential scan %s: heal scan: %w", c.class, err)
+			}
+			healLines = append(healLines, fmt.Sprintf(
+				"integrity: heal class=%s row=%s action=ref_resolved resolved_at=%s", c.class, rowID, now))
+		}
+		if err := hrows.Err(); err != nil {
+			_ = hrows.Close()
+			return nil, fmt.Errorf("referential scan %s: heal rows: %w", c.class, err)
+		}
+		_ = hrows.Close()
+
 		// 1. insert new orphans
 		if _, err := tx.ExecContext(ctx,
 			`INSERT OR IGNORE INTO integrity_quarantine
@@ -320,6 +375,14 @@ func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("referential scan: commit: %w", err)
 	}
+	// Emit per-row lines only after the tx commits, so a rolled-back scan logs
+	// nothing. Volume is the transition delta (see the capture note above).
+	for _, l := range detectLines {
+		log.Print(l)
+	}
+	for _, l := range healLines {
+		log.Print(l)
+	}
 	return counts, nil
 }
 
@@ -343,7 +406,7 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 // already present (open) is left as-is (first-seen detected_at preserved).
 func (d *DB) MarkQuarantine(table, rowID, refCol, refValue, class, project string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	_, err := d.writerExec(
+	res, err := d.writerExec(
 		`INSERT OR IGNORE INTO integrity_quarantine
 		   (table_name, row_id, ref_col, ref_value, class, project, detected_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -351,6 +414,14 @@ func (d *DB) MarkQuarantine(table, rowID, refCol, refValue, class, project strin
 	)
 	if err != nil {
 		return fmt.Errorf("mark quarantine %s/%s: %w", class, rowID, err)
+	}
+	// One detect line per actual insert (RowsAffected==0 = idempotent dedup of an
+	// already-open row, which must not re-log). Mirrors the scan's detect line so
+	// `grep 'integrity: detect'` on the live log covers both the batch scan and
+	// this on-write soft-mark path.
+	if n, _ := res.RowsAffected(); n > 0 {
+		log.Printf("integrity: detect class=%s ref=%s value=%s row=%s",
+			class, table+"."+refCol, refValue, rowID)
 	}
 	return nil
 }
