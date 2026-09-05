@@ -52,6 +52,12 @@ type Relay struct {
 	shutdownCancel context.CancelFunc
 }
 
+// serverInstructions is returned in the MCP initialize response. It carries the
+// shared-parameter semantics that used to live in every tool's `as`/`project`
+// description (~137 duplicated copies across the registry); stating them once
+// here reclaims that schema budget with zero contract change.
+const serverInstructions = "Most tools accept optional `as` and `project` parameters. `as` overrides the acting agent identity otherwise derived from the connection URL; `project` overrides the default project namespace from the connection URL — so an agent can act under a different identity or switch projects without changing the MCP connection."
+
 // New creates a fully wired Relay with all tools registered.
 // Caller should set r.Version after construction if known (injected from main.Version).
 func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
@@ -62,6 +68,7 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 	mcpSrv := server.NewMCPServer(
 		"wrai.th",
 		version,
+		server.WithInstructions(serverInstructions),
 		server.WithToolCapabilities(false),
 		// CCAR-G2: advertise read-only resources (no subscribe, no listChanged —
 		// the catalogs are read on demand, not pushed).
