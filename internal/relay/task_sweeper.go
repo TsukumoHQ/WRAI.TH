@@ -1,8 +1,13 @@
 package relay
 
 import (
+	"fmt"
 	"log"
+	"os"
+	"strings"
 	"time"
+
+	"agent-relay/internal/db"
 )
 
 // Task maintenance sweeper (G3/G4). Two relay-INTERNAL periodic sweeps that make
@@ -40,6 +45,7 @@ func (r *Relay) StartTaskMaintenanceSweeper(done <-chan struct{}) {
 				r.sweepStrandedPRTasks()
 				r.sweepExpiredLeases()
 				r.sweepReferentialIntegrity()
+				r.sweepLimboAssignees()
 			}
 		}
 	}()
@@ -138,5 +144,90 @@ func (r *Relay) sweepExpiredLeases() {
 	}
 	if len(swept) > 0 {
 		log.Printf("lease sweep: recovered %d stuck task(s)", len(swept))
+	}
+}
+
+// limboSweepApply decides whether the limbo sweep WRITES or only dry-runs.
+// Dry-run is the DEFAULT (safe first deploy): the sweep computes and journals
+// its dispositions but changes nothing. Writes are enabled only by an explicit
+// opt-in — the env RELAY_LIMBO_SWEEP_APPLY (1/true/yes) or, absent an env
+// override, the DB setting limbo_sweep_apply='1'. The env wins so an operator
+// can force dry-run or apply at boot without a DB write; a DB setting lets it be
+// flipped live once the first real runs have been audited.
+func (r *Relay) limboSweepApply() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_LIMBO_SWEEP_APPLY"))) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	return r.DB.GetSetting("limbo_sweep_apply") == "1"
+}
+
+// sweepLimboAssignees (A1-ii) blocks (>7d) then archives (>30d) tasks stranded
+// on an inactive assignee, so no task stays claimed for life by a dead agent.
+// Every disposition is journaled with the `integrity:` prefix (consistent with
+// the referential/A2 logging). In apply mode it also sends ONE digest per
+// dispatcher of that sweep's newly-blocked tasks — but only to a dispatcher that
+// is itself still active; for a gone/inactive dispatcher the digest is a journal
+// line only, never a message into the void.
+func (r *Relay) sweepLimboAssignees() {
+	apply := r.limboSweepApply()
+	res, err := r.DB.SweepLimboAssignees(time.Now(), apply)
+	if err != nil {
+		log.Printf("integrity: limbo sweep error: %v", err)
+		return
+	}
+	mode := "apply"
+	if res.DryRun {
+		mode = "dry-run"
+	}
+	for _, b := range res.Blocked {
+		log.Printf("integrity: limbo tier=1 action=block mode=%s task=%s project=%s assignee=%q from=%s reason=%q",
+			mode, b.TaskID, b.Project, b.AssignedTo, b.FromStatus, b.Reason)
+	}
+	for _, a := range res.Archived {
+		log.Printf("integrity: limbo tier=2 action=archive mode=%s task=%s project=%s assignee=%q dispatcher=%q",
+			mode, a.TaskID, a.Project, a.AssignedTo, a.DispatchedBy)
+	}
+	if len(res.Blocked)+len(res.Archived) > 0 {
+		log.Printf("integrity: limbo sweep (%s) — %d blocked, %d archived (scanned %d)",
+			mode, len(res.Blocked), len(res.Archived), res.Scanned)
+	}
+	if !res.DryRun {
+		r.digestLimboBlocks(res.Blocked)
+	}
+}
+
+// digestLimboBlocks sends one grouped digest per dispatcher of the tasks blocked
+// this sweep. A dispatcher that is gone or inactive gets a journal line instead
+// of a message (nobody live to read it). Never fired in dry-run.
+func (r *Relay) digestLimboBlocks(blocked []db.LimboDisposition) {
+	if r.Registry == nil || len(blocked) == 0 {
+		return
+	}
+	// group task ids by (project, dispatcher); preserve first-seen order.
+	type key struct{ project, dispatcher string }
+	order := []key{}
+	byDispatcher := map[key][]string{}
+	for _, b := range blocked {
+		if b.DispatchedBy == "" {
+			continue
+		}
+		k := key{b.Project, b.DispatchedBy}
+		if _, ok := byDispatcher[k]; !ok {
+			order = append(order, k)
+		}
+		byDispatcher[k] = append(byDispatcher[k], b.TaskID)
+	}
+	for _, k := range order {
+		ids := byDispatcher[k]
+		subject := fmt.Sprintf("%d task(s) blocked — assignee inactive: %s", len(ids), strings.Join(ids, ", "))
+		if r.DB.AgentActive(k.project, k.dispatcher) {
+			r.Registry.Notify(k.project, k.dispatcher, "relay-sweeper", subject, "")
+		} else {
+			log.Printf("integrity: limbo digest suppressed (dispatcher %q inactive) project=%s: %s",
+				k.dispatcher, k.project, subject)
+		}
 	}
 }
