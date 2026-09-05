@@ -163,6 +163,41 @@ func refChecks() []refCheck {
 				  AND t.archived_at IS NULL
 				  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = t.project)`,
 		},
+		// --- project refs on the 4 tables the Phase 0 scan originally missed
+		// (audit 494b6323 observed triggers.project 33, memories.project 3,
+		// workflows.project 3, cycles.project 1 — never wired into refChecks()
+		// until now; ruled GO in DEC-wraith-referential-integrity-phase3-1 §7-Q3).
+		// Same shape as orphan_task_project: no sentinel guard needed (a project
+		// name is not a principal, so {linear,cron,user} never appear here). ---
+		{
+			class: "orphan_trigger_project", table: "triggers", refCol: "project",
+			orphanSQL: `SELECT tr.id AS row_id, tr.project AS ref_value, tr.project AS project
+				FROM triggers tr
+				WHERE tr.project IS NOT NULL AND tr.project <> ''
+				  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = tr.project)`,
+		},
+		{
+			class: "orphan_memory_project", table: "memories", refCol: "project",
+			orphanSQL: `SELECT m.id AS row_id, m.project AS ref_value, m.project AS project
+				FROM memories m
+				WHERE m.project IS NOT NULL AND m.project <> ''
+				  AND m.archived_at IS NULL
+				  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = m.project)`,
+		},
+		{
+			class: "orphan_workflow_project", table: "workflows", refCol: "project",
+			orphanSQL: `SELECT w.id AS row_id, w.project AS ref_value, w.project AS project
+				FROM workflows w
+				WHERE w.project IS NOT NULL AND w.project <> ''
+				  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = w.project)`,
+		},
+		{
+			class: "orphan_cycle_project", table: "cycles", refCol: "project",
+			orphanSQL: `SELECT c.id AS row_id, c.project AS ref_value, c.project AS project
+				FROM cycles c
+				WHERE c.project IS NOT NULL AND c.project <> ''
+				  AND NOT EXISTS (SELECT 1 FROM projects p WHERE p.name = c.project)`,
+		},
 		// --- agent self references ---
 		{
 			class: "orphan_reports_to", table: "agents", refCol: "reports_to",

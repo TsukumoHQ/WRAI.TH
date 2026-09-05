@@ -65,6 +65,50 @@ func seedMessage(t *testing.T, conn *sql.DB, id, project, from, to string) {
 	}
 }
 
+func seedTrigger(t *testing.T, conn *sql.DB, id, project string) {
+	t.Helper()
+	if _, err := conn.Exec(
+		`INSERT INTO triggers (id, project, event, profile_slug, cycle, created_at, updated_at) VALUES (?, ?, 'test.event', 'backend', 'once', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		id, project,
+	); err != nil {
+		t.Fatalf("seed trigger %s: %v", id, err)
+	}
+}
+
+func seedMemory(t *testing.T, conn *sql.DB, id, project string, archived bool) {
+	t.Helper()
+	var archivedAt interface{}
+	if archived {
+		archivedAt = "2026-01-01T00:00:00Z"
+	}
+	if _, err := conn.Exec(
+		`INSERT INTO memories (id, key, value, scope, project, agent_name, created_at, updated_at, archived_at) VALUES (?, ?, 'v', 'project', ?, 'alice', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', ?)`,
+		id, id, project, archivedAt,
+	); err != nil {
+		t.Fatalf("seed memory %s: %v", id, err)
+	}
+}
+
+func seedWorkflow(t *testing.T, conn *sql.DB, id, project string) {
+	t.Helper()
+	if _, err := conn.Exec(
+		`INSERT INTO workflows (id, project, name, created_at, updated_at) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		id, project, id,
+	); err != nil {
+		t.Fatalf("seed workflow %s: %v", id, err)
+	}
+}
+
+func seedCycle(t *testing.T, conn *sql.DB, id, project string) {
+	t.Helper()
+	if _, err := conn.Exec(
+		`INSERT INTO cycles (id, project, name, created_at, updated_at) VALUES (?, ?, ?, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')`,
+		id, project, id,
+	); err != nil {
+		t.Fatalf("seed cycle %s: %v", id, err)
+	}
+}
+
 func nullIfEmpty(s string) interface{} {
 	if s == "" {
 		return nil
@@ -133,23 +177,38 @@ func TestReferentialScanDetectsOrphanClasses(t *testing.T) {
 	seedMessage(t, c, "m-team", "p1", "alice", "team:eng") // clean (team addressing)
 	seedMessage(t, c, "m-linear", "p1", "linear", "alice") // clean (sentinel sender)
 
+	// project refs on the 4 tables the Phase 0 scan originally missed
+	seedTrigger(t, c, "tr-clean", "p1")
+	seedTrigger(t, c, "tr-oproject", "ghost-project")
+	seedMemory(t, c, "mem-clean", "p1", false)
+	seedMemory(t, c, "mem-oproject", "ghost-project", false)
+	seedMemory(t, c, "mem-archived-oproject", "ghost-project", true) // archived → excluded
+	seedWorkflow(t, c, "wf-clean", "p1")
+	seedWorkflow(t, c, "wf-oproject", "ghost-project")
+	seedCycle(t, c, "cy-clean", "p1")
+	seedCycle(t, c, "cy-oproject", "ghost-project")
+
 	counts, err := runReferentialScan(c)
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 
 	want := map[string]int{
-		"orphan_dispatcher":    1, // t-odisp
-		"orphan_assignee":      1, // t-oassign
-		"limbo":                1, // t-limbo
-		"orphan_profile":       1, // t-oprofile
-		"orphan_task_project":  1, // t-oproject
-		"orphan_board":         1, // t-oboard
-		"orphan_parent":        1, // t-oparent
-		"orphan_reports_to":    1, // bob
-		"orphan_agent_profile": 1, // carol
-		"orphan_recipient":     1, // m-orecip
-		"orphan_sender":        1, // m-osend
+		"orphan_dispatcher":       1, // t-odisp
+		"orphan_assignee":         1, // t-oassign
+		"limbo":                   1, // t-limbo
+		"orphan_profile":          1, // t-oprofile
+		"orphan_task_project":     1, // t-oproject
+		"orphan_board":            1, // t-oboard
+		"orphan_parent":           1, // t-oparent
+		"orphan_reports_to":       1, // bob
+		"orphan_agent_profile":    1, // carol
+		"orphan_recipient":        1, // m-orecip
+		"orphan_sender":           1, // m-osend
+		"orphan_trigger_project":  1, // tr-oproject
+		"orphan_memory_project":   1, // mem-oproject
+		"orphan_workflow_project": 1, // wf-oproject
+		"orphan_cycle_project":    1, // cy-oproject
 	}
 	for class, exp := range want {
 		if got := counts[class]; got != exp {
@@ -174,6 +233,19 @@ func TestReferentialScanDetectsOrphanClasses(t *testing.T) {
 	if quarantineRowExists(t, c, "orphan_dispatcher", "t-archived") {
 		t.Error("archived task must be excluded from the scan")
 	}
+	if quarantineRowExists(t, c, "orphan_memory_project", "mem-archived-oproject") {
+		t.Error("archived memory must be excluded from the scan")
+	}
+	for _, row := range []struct{ class, id string }{
+		{"orphan_trigger_project", "tr-clean"},
+		{"orphan_memory_project", "mem-clean"},
+		{"orphan_workflow_project", "wf-clean"},
+		{"orphan_cycle_project", "cy-clean"},
+	} {
+		if quarantineRowExists(t, c, row.class, row.id) {
+			t.Errorf("%s %s: live project must resolve, not flag", row.class, row.id)
+		}
+	}
 	// The clean task must be flagged by NOTHING.
 	var cleanFlags int
 	if err := c.QueryRow(`SELECT COUNT(*) FROM integrity_quarantine WHERE row_id = 't-clean'`).Scan(&cleanFlags); err != nil {
@@ -195,6 +267,10 @@ func TestReferentialScanIdempotent(t *testing.T) {
 	seedAgent(t, c, "p1", "alice", "active", "backend", "", 0)
 	seedTask(t, c, "t-odisp", "p1", "pending", "ghost", "", "", "backend", "", "", false)
 	seedTask(t, c, "t-oassign", "p1", "pending", "alice", "ghost2", "", "backend", "", "", false)
+	seedTrigger(t, c, "tr-oproject", "ghost-project")
+	seedMemory(t, c, "mem-oproject", "ghost-project", false)
+	seedWorkflow(t, c, "wf-oproject", "ghost-project")
+	seedCycle(t, c, "cy-oproject", "ghost-project")
 
 	first, err := runReferentialScan(c)
 	if err != nil {
@@ -215,6 +291,11 @@ func TestReferentialScanIdempotent(t *testing.T) {
 	}
 	if first["orphan_dispatcher"] != second["orphan_dispatcher"] || first["orphan_assignee"] != second["orphan_assignee"] {
 		t.Errorf("re-run changed counts: %v then %v", first, second)
+	}
+	for _, class := range []string{"orphan_trigger_project", "orphan_memory_project", "orphan_workflow_project", "orphan_cycle_project"} {
+		if first[class] != 1 || second[class] != 1 {
+			t.Errorf("class %s: got first=%d second=%d, want 1/1", class, first[class], second[class])
+		}
 	}
 }
 
