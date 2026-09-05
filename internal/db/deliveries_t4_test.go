@@ -1,6 +1,9 @@
 package db
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+)
 
 // T4: delivery_status makes the ack state auditable — surfaced/acknowledged
 // timestamps are queryable by message_id and by recipient agent.
@@ -11,7 +14,7 @@ func TestDeliveryStatusQueryable(t *testing.T) {
 		t.Fatalf("insert: %v", err)
 	}
 
-	rows, err := d.DeliveryStatus("p1", m.ID, "")
+	rows, err := d.DeliveryStatus("p1", m.ID, "", 0)
 	if err != nil {
 		t.Fatalf("delivery_status by message: %v", err)
 	}
@@ -36,7 +39,7 @@ func TestDeliveryStatusQueryable(t *testing.T) {
 	if err := d.AcknowledgeDelivery(aID); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	arows, err := d.DeliveryStatus("p1", "", "bot-a")
+	arows, err := d.DeliveryStatus("p1", "", "bot-a", 0)
 	if err != nil {
 		t.Fatalf("delivery_status by agent: %v", err)
 	}
@@ -52,8 +55,51 @@ func TestDeliveryStatusQueryable(t *testing.T) {
 	}
 
 	// Neither filter -> error, not a full-table dump.
-	if _, err := d.DeliveryStatus("p1", "", ""); err == nil {
+	if _, err := d.DeliveryStatus("p1", "", "", 0); err == nil {
 		t.Error("delivery_status with no filter must error")
+	}
+}
+
+// T4: DeliveryStatus with no limit given (0) floors to the default 50 rows —
+// a busy message must not return an unbounded row set.
+func TestDeliveryStatusDefaultClamp(t *testing.T) {
+	d := testDB(t)
+	recipients := make([]string, 60)
+	for i := range recipients {
+		recipients[i] = fmt.Sprintf("bot-%02d", i)
+	}
+	m, _, err := d.InsertMessageWithDeliveries("p1", "sender", recipients[0], "broadcast", "s", "c", "{}", "P2", 0, nil, nil, recipients, "")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	rows, err := d.DeliveryStatus("p1", m.ID, "", 0)
+	if err != nil {
+		t.Fatalf("delivery_status: %v", err)
+	}
+	if len(rows) != 50 {
+		t.Fatalf("no limit given, 60 rows seeded: want exactly 50, got %d", len(rows))
+	}
+}
+
+// T4: DeliveryStatus with an explicit limit returns exactly that many rows.
+func TestDeliveryStatusExplicitLimit(t *testing.T) {
+	d := testDB(t)
+	recipients := make([]string, 10)
+	for i := range recipients {
+		recipients[i] = fmt.Sprintf("bot-%02d", i)
+	}
+	m, _, err := d.InsertMessageWithDeliveries("p1", "sender", recipients[0], "broadcast", "s", "c", "{}", "P2", 0, nil, nil, recipients, "")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	rows, err := d.DeliveryStatus("p1", m.ID, "", 3)
+	if err != nil {
+		t.Fatalf("delivery_status: %v", err)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("limit=3, 10 rows seeded: want exactly 3, got %d", len(rows))
 	}
 }
 

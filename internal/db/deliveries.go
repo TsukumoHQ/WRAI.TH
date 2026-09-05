@@ -251,8 +251,12 @@ func (d *DB) AcknowledgeDelivery(deliveryID string) error {
 
 // DeliveryStatus returns the queryable ack state (T4) filtered by message_id OR
 // by recipient agent (at least one required). Read-only — makes surfaced/acked
-// auditable. Rows ordered oldest-first.
-func (d *DB) DeliveryStatus(project, messageID, agent string) ([]models.DeliveryStatusRow, error) {
+// auditable. Rows ordered oldest-first, bound to limit (<=0 floors to 50) so a
+// busy message/agent can't return an unbounded row set.
+func (d *DB) DeliveryStatus(project, messageID, agent string, limit int) ([]models.DeliveryStatusRow, error) {
+	if limit <= 0 {
+		limit = 50
+	}
 	var where string
 	var args []any
 	switch {
@@ -265,9 +269,10 @@ func (d *DB) DeliveryStatus(project, messageID, agent string) ([]models.Delivery
 	default:
 		return nil, fmt.Errorf("delivery_status requires message_id or agent")
 	}
+	args = append(args, limit)
 	rows, err := d.ro().Query(
 		"SELECT id, message_id, to_agent, state, created_at, surfaced_at, acknowledged_at "+
-			"FROM deliveries WHERE "+where+" ORDER BY created_at, sequence_number", args...,
+			"FROM deliveries WHERE "+where+" ORDER BY created_at, sequence_number LIMIT ?", args...,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("delivery_status: %w", err)

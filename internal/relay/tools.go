@@ -122,6 +122,7 @@ func deliveryStatusTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("message_id", mcp.Description("All deliveries of this message")),
 		mcp.WithString("agent", mcp.Description("This recipient's deliveries")),
+		mcp.WithNumber("limit", mcp.Description("Max rows (default 50)")),
 	)
 }
 

@@ -528,7 +528,8 @@ func (h *Handlers) HandleDeliveryStatus(ctx context.Context, req mcp.CallToolReq
 	if messageID == "" && target == "" {
 		return toolResultError("delivery_status requires message_id or agent"), nil
 	}
-	rows, err := h.db.DeliveryStatus(project, messageID, target)
+	limit := clampLimit(req.GetInt("limit", 50))
+	rows, err := h.db.DeliveryStatus(project, messageID, target, limit)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to get delivery status: %v", err)), nil
 	}
