@@ -43,13 +43,26 @@ const budgetHardMultiplier = 2
 
 // memValuePreview bounds a single memory's value preview in session_context.
 // Full values are fetched via get_memory(key).
-const memValuePreview = 400
+const memValuePreview = 200
 
 // sessionMemoryBudget bounds the total bytes spent on relevant_memories in
-// session_context. Constraints-layer memories bypass the budget (Def. 3:
-// constraints > behavior > context — a constraint must never silently drop
-// out of boot).
-const sessionMemoryBudget = 6000
+// session_context. Constraints-layer memories no longer bypass the budget
+// wholesale (that made the budget dead — the fleet writes nearly everything as
+// constraints, so boot ballooned to ~20 KB); only the first
+// sessionConstraintFloor constraints are guaranteed, the rest compete here.
+// Lowered 6000 -> 2600 for WRAITH R1: at 6000 ~14 fat constraints still surfaced
+// (~5.5 KB, the leak persisting); 2600 keeps relevant_memories at roughly the
+// guaranteed floor on a constraint-heavy fleet, the overflow via get_memory.
+const sessionMemoryBudget = 2600
+
+// sessionConstraintFloor is the guaranteed floor of constraints-layer memories
+// in boot: the first N (ListBootMemories orders constraints first, updated_at
+// DESC) always surface even when the soft budget is blown — a CTO constraint
+// must not silently drop out of boot (Def. 3: constraints > behavior > context).
+// Beyond the floor, constraints obey sessionMemoryBudget like any other memory.
+// This replaces the old "all constraints bypass the budget" rule, the root cause
+// of the 20 KB boot payload (WRAITH R1).
+const sessionConstraintFloor = 8
 
 // Session-context caps for the sections v1.9.0 injected RAW — the primary
 // contributors to an oversized boot payload (WRAITH-1).
@@ -465,11 +478,11 @@ func memorySummaryBytes(s MemorySummary) int {
 // checkpoint/resume blobs into them, so the byte budget (not the count) is what
 // actually keeps the section bounded. The overflow is surfaced and the rest are
 // reachable via recall_decisions.
-const sessionDecisionMax = 40
+const sessionDecisionMax = 5
 
 // decisionPreview bounds each decision's Decision/Rationale text in the boot
 // payload; the full text is fetched via recall_decisions.
-const decisionPreview = 400
+const decisionPreview = 300
 
 // decisionKeyMax bounds a decision Key. Unlike the payload fields, a Key cannot
 // be truncated — it is the lookup handle for get_memory/supersedes, so a
@@ -482,7 +495,10 @@ const decisionKeyMax = 256
 // sessionDecisionBudget bounds the total bytes spent on decisions[] in
 // session_context, mirroring sessionMemoryBudget. Without it, 40 multi-line
 // checkpoint/resume blobs dominated the entire boot payload (~50KB observed).
-const sessionDecisionBudget = 6000
+// Lowered 6000 -> 2000 for WRAITH R1 alongside sessionDecisionMax 40 -> 5: with
+// only 5 decisions surfaced, 2000 still lets short settled calls all through
+// while capping fat multi-line ones; the rest via recall_decisions.
+const sessionDecisionBudget = 2000
 
 // DecisionSummary is the compact session-context form of an accepted decision.
 type DecisionSummary struct {
@@ -566,17 +582,25 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 	if maxBytes > 0 {
 		hardCeil = maxBytes * budgetHardMultiplier
 	}
+	constraintsSeen := 0
 	for _, m := range mems {
 		s := summarizeMemory(m)
 		b := memorySummaryBytes(s)
-		// Hard ceiling caps the bypass flood; the first (most-important)
-		// constraints memory always surfaces even under a tiny budget.
-		if hardCeil > 0 && used+b > hardCeil && len(out) > 0 {
-			continue
-		}
-		if m.Layer == "constraints" {
+		// Guaranteed floor: the first sessionConstraintFloor constraints
+		// (ListBootMemories orders constraints first, updated_at DESC) always
+		// surface even under a tiny budget — a CTO constraint must not silently
+		// drop out of boot. They still count toward `used`, so the items that
+		// follow compete for the remainder. Beyond the floor, a constraint is
+		// treated like any other memory (previously ALL constraints bypassed the
+		// budget, making it dead — the 20 KB-boot root cause, WRAITH R1).
+		if m.Layer == "constraints" && constraintsSeen < sessionConstraintFloor {
+			constraintsSeen++
 			out = append(out, s)
 			used += b
+			continue
+		}
+		// Hard ceiling caps any bypass flood; the first entry always surfaces.
+		if hardCeil > 0 && used+b > hardCeil && len(out) > 0 {
 			continue
 		}
 		if maxBytes > 0 && used+b > maxBytes {

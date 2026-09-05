@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -224,6 +225,91 @@ func TestProjectMemories_ConstraintsBypassBudget(t *testing.T) {
 	}
 }
 
+// TestProjectMemories_ConstraintFloorAndBudget_R1 is AC1: constraints no longer
+// bypass the budget wholesale. The first sessionConstraintFloor constraints
+// always surface (guaranteed floor), the rest compete under the budget, and
+// memories_omitted (len(mems)-len(out)) is the exact remainder. The budget is
+// pinned explicitly in the test (per wraith-cto msg 90757bc2: AC1's "6000" is
+// test-fixture semantics, not the production constant).
+func TestProjectMemories_ConstraintFloorAndBudget_R1(t *testing.T) {
+	var mems []models.Memory
+	for i := 0; i < 20; i++ {
+		mems = append(mems, models.Memory{
+			Key: fmt.Sprintf("rule-%02d", i), Value: strings.Repeat("x", 400),
+			Scope: "project", Layer: "constraints",
+		})
+	}
+
+	// Budget pinned at 6000 (the ticket's stated value): floor 8 + whatever else
+	// fits, never all 20 — the old bypass returned every constraint.
+	out := projectMemories(mems, 6000)
+	if len(out) < sessionConstraintFloor {
+		t.Fatalf("floor not guaranteed at budget 6000: %d < %d", len(out), sessionConstraintFloor)
+	}
+	if len(out) >= len(mems) {
+		t.Fatal("all 20 constraints surfaced at budget 6000 — budget bypassed (regression)")
+	}
+	for i := 0; i < sessionConstraintFloor; i++ {
+		if out[i].Layer != "constraints" {
+			t.Fatalf("floor entry %d not a constraint: %+v", i, out[i])
+		}
+	}
+
+	// Tiny budget: exactly the floor surfaces, the rest omitted — the guarantee
+	// holds even when the soft budget is fully blown. Exact omitted count.
+	floorOnly := projectMemories(mems, 1)
+	if len(floorOnly) != sessionConstraintFloor {
+		t.Fatalf("floor-only: got %d, want %d", len(floorOnly), sessionConstraintFloor)
+	}
+	if omitted := len(mems) - len(floorOnly); omitted != len(mems)-sessionConstraintFloor {
+		t.Fatalf("memories_omitted = %d, want %d", omitted, len(mems)-sessionConstraintFloor)
+	}
+
+	// The production constant (2600) keeps relevant_memories at the floor on this
+	// constraint-heavy fixture — the actual leak fix (WRAITH R1).
+	if prod := projectMemories(mems, sessionMemoryBudget); len(prod) != sessionConstraintFloor {
+		t.Fatalf("production budget %d: got %d memories, want floor %d", sessionMemoryBudget, len(prod), sessionConstraintFloor)
+	}
+}
+
+// TestProjectMemories_PreviewCap_R1 is AC2 (memory side): a memory value preview
+// is capped at memValuePreview (200) bytes and flagged truncated.
+func TestProjectMemories_PreviewCap_R1(t *testing.T) {
+	out := projectMemories([]models.Memory{
+		{Key: "k", Value: strings.Repeat("v", 400), Scope: "project", Layer: "behavior"},
+	}, sessionMemoryBudget)
+	if len(out) != 1 {
+		t.Fatalf("want 1 memory, got %d", len(out))
+	}
+	if len(out[0].ValuePreview) > memValuePreview || !out[0].ValueTruncated {
+		t.Fatalf("preview cap: len=%d truncated=%v, want ≤%d + truncated",
+			len(out[0].ValuePreview), out[0].ValueTruncated, memValuePreview)
+	}
+}
+
+// TestProjectDecisions_CapAndPreview_R1 is AC2 (decision side): at most
+// sessionDecisionMax (5) decisions surface, each with Decision/Rationale capped
+// at decisionPreview (300) bytes.
+func TestProjectDecisions_CapAndPreview_R1(t *testing.T) {
+	decs := make([]models.Memory, 0, 20)
+	for i := 0; i < 20; i++ {
+		val := `{"decision":"` + strings.Repeat("d", 500) + `","rationale":"` + strings.Repeat("r", 500) + `","area":"ops","status":"accepted"}`
+		decs = append(decs, models.Memory{Key: fmt.Sprintf("DEC-ops-%02d", i), Value: val, Layer: "decision"})
+	}
+	out := projectDecisions(decs, sessionDecisionMax)
+	if len(out) > sessionDecisionMax {
+		t.Fatalf("count cap: got %d > %d", len(out), sessionDecisionMax)
+	}
+	if len(out) == 0 {
+		t.Fatal("expected at least one decision to surface")
+	}
+	for _, d := range out {
+		if len(d.Decision) > decisionPreview || len(d.Rationale) > decisionPreview {
+			t.Fatalf("preview cap: decision=%d rationale=%d > %d", len(d.Decision), len(d.Rationale), decisionPreview)
+		}
+	}
+}
+
 func TestProjectMemories_BudgetBound(t *testing.T) {
 	var mems []models.Memory
 	for i := 0; i < 50; i++ {
@@ -421,7 +507,10 @@ func TestProjectDecisions_EncodedBudget_ControlChars(t *testing.T) {
 func TestProjectDecisions_OmittedReflectsByteTruncation(t *testing.T) {
 	big := strings.Repeat("y", 3000)
 	val := `{"decision":"` + big + `","rationale":"` + big + `","area":"ops","status":"accepted"}`
-	decs := make([]models.Memory, 0, 30) // 30 < sessionDecisionMax (40)
+	// 30 fat decisions: the byte budget (sessionDecisionBudget) drops them well
+	// below the count cap (sessionDecisionMax), so omitted must be computed from
+	// the projected length, not the count-cap formula.
+	decs := make([]models.Memory, 0, 30)
 	for i := 0; i < 30; i++ {
 		decs = append(decs, models.Memory{Key: "DEC-ops", Value: val, Layer: "decision"})
 	}

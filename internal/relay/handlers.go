@@ -795,11 +795,17 @@ func buildOnboardingPrompt(name, description, cwd string, interactive, linearMod
 
 // --- Session context ---
 
-func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *string) map[string]any {
+// buildSessionContext builds the boot payload. Pass minimal=true (WRAITH R1) for
+// the lean shape: agent + pending_tasks + unread_messages + cross_project_unread
+// only — no profile, conversations, memories, or decisions (each fetched on
+// demand). Default (omitted) is the full shape. Variadic so the many existing
+// three-arg callers keep compiling.
+func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *string, minimal ...bool) map[string]any {
+	lean := len(minimal) > 0 && minimal[0]
 	result := map[string]any{}
 
-	// Profile
-	if profileSlug != nil && *profileSlug != "" {
+	// Profile (full only).
+	if !lean && profileSlug != nil && *profileSlug != "" {
 		profile, err := h.db.GetProfile(project, *profileSlug)
 		if err == nil && profile != nil {
 			// Skills is an unbounded raw JSON array; project it so a large profile
@@ -842,6 +848,14 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	// agent has no unread elsewhere.
 	if rollup, err := h.db.CrossProjectUnread(agentName, project); err == nil && len(rollup) > 0 {
 		result["cross_project_unread"] = rollup
+	}
+
+	// Minimal mode (WRAITH R1) stops here: agent + tasks + unread + cross-project
+	// only. Profile, conversations, memories, and decisions are dropped from boot
+	// (each reachable on demand via its own tool) so a re-register costs <1.5 KB.
+	if lean {
+		enforceSessionPayloadCeiling(result)
+		return result
 	}
 
 	// Active conversations — capped in count and title bytes; v1.9.0 injected

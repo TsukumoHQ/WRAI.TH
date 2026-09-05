@@ -3,6 +3,7 @@ package relay
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1588,6 +1589,148 @@ func TestOnboardingPromptBoardBranch(t *testing.T) {
 	}
 	if strings.Contains(linear, "dispatch_task({") {
 		t.Error("Linear onboarding must NOT emit a dispatch_task call (orphan native task)")
+	}
+}
+
+// seedBootFixture builds the WRAITH R1 boot fixture from the ticket: 20
+// constraints × 400-char values, 60 accepted decisions, 10 unread messages, and
+// 5 pending tasks for the agent's profile. Used by the byte-target and
+// minimal-mode tests.
+func seedBootFixture(t *testing.T) (*Handlers, string, string) {
+	t.Helper()
+	h := testHandlers(t)
+	const project = "p1"
+	const agent = "wraith-backend"
+	if _, err := h.db.RegisterProfile(project, "wraith-backend", "Wraith Backend", "backend dev",
+		`[{"skill":"go"},{"skill":"sqlite"}]`); err != nil {
+		t.Fatalf("register profile: %v", err)
+	}
+	if _, _, err := h.db.RegisterAgent(project, agent, "dev", "", nil, strptr("wraith-backend"),
+		false, nil, "[]", 16384, db.RegisterOptions{ProfileSlugSet: true}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		if _, err := h.db.SetMemory(project, "wraith-cto", fmt.Sprintf("rule-%02d", i),
+			strings.Repeat("x", 400), "[]", "project", "observed", "constraints"); err != nil {
+			t.Fatalf("set memory %d: %v", i, err)
+		}
+	}
+	// Only the constraints are fat per the ticket (400-char values); decisions,
+	// messages, and tasks are realistic one-liners — the boot payload's job is to
+	// PREVIEW them, and the previews (not the fixture's raw sizes) are what the
+	// byte targets measure.
+	for i := 0; i < 60; i++ {
+		if _, err := h.db.RememberDecision(project, "wraith-cto", fmt.Sprintf("ops/area-%02d", i),
+			"settled call number "+fmt.Sprintf("%02d", i), "why it was settled", nil, "", nil); err != nil {
+			t.Fatalf("remember decision %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := h.db.InsertMessage(project, "wraith-cto", agent, "notification",
+			fmt.Sprintf("subj-%02d", i), fmt.Sprintf("ping %02d, please check", i), "{}", "P2", 3600, nil, nil); err != nil {
+			t.Fatalf("insert message %d: %v", i, err)
+		}
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := h.db.DispatchTask(project, "wraith-backend", "wraith-cto",
+			fmt.Sprintf("task %02d", i), fmt.Sprintf("do the thing %02d", i), "P2", nil, nil,
+			db.TypedTicket{}, false, nil); err != nil {
+			t.Fatalf("dispatch task %d: %v", i, err)
+		}
+	}
+	return h, project, agent
+}
+
+// TestSessionContextByteTargets_R1 is AC4 (amended by wraith-cto, msg
+// 90757bc2, option A): on the ticket fixture the FULL boot payload is ≤7680 B
+// and the MINIMAL payload ≤3584 B — the "20 KB → measured floor" budget cut.
+// The original ≤5120/≤1536 targets were unreachable: floor-8 fat constraints
+// (~3.1 KB) + 10 unread summaries (~2.1 KB, metadata-heavy) + 5 tasks (~1.2 KB)
+// are the irreducible floor for this scope; per-item summary field trims are a
+// separate follow-up ticket. Asserts the marshaled JSON byte length, the size
+// the client actually pays.
+func TestSessionContextByteTargets_R1(t *testing.T) {
+	h, project, agent := seedBootFixture(t)
+	profile := strptr("wraith-backend")
+
+	full := h.buildSessionContext(project, agent, profile)
+	fb, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal full: %v", err)
+	}
+	t.Logf("full boot payload: %d bytes", len(fb))
+	if len(fb) > 7680 {
+		t.Errorf("full boot payload %d B exceeds 7680 B target", len(fb))
+	}
+
+	minimal := h.buildSessionContext(project, agent, profile, true)
+	mb, err := json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("marshal minimal: %v", err)
+	}
+	t.Logf("minimal boot payload: %d bytes", len(mb))
+	if len(mb) > 3584 {
+		t.Errorf("minimal boot payload %d B exceeds 3584 B target", len(mb))
+	}
+}
+
+// TestSessionContextMinimalKeyset_R1 is AC3: session_context='minimal' returns
+// only agent + pending_tasks + unread_messages + cross_project_unread (plus the
+// bookkeeping keys agent/project/is_respawn the handlers stamp); it drops
+// profile, active_conversations, relevant_memories, and decisions — which the
+// full default keeps. Exercised through both register_agent and
+// get_session_context so the param is honoured on both paths.
+func TestSessionContextMinimalKeyset_R1(t *testing.T) {
+	h, project, agent := seedBootFixture(t)
+	ctx := context.Background()
+
+	dropped := []string{"profile", "active_conversations", "relevant_memories", "decisions"}
+
+	okJSON := func(res *mcp.CallToolResult, err error) map[string]any {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("handler error: %v", err)
+		}
+		return parseJSON(t, res)
+	}
+
+	// get_session_context: full keeps the heavy sections, minimal drops them.
+	full := okJSON(h.HandleGetSessionContext(ctx, call(map[string]any{
+		"project": project, "as": agent,
+	})))
+	for _, k := range dropped {
+		if _, ok := full[k]; !ok {
+			t.Fatalf("full get_session_context missing %q — fixture/precondition broken", k)
+		}
+	}
+	minimal := okJSON(h.HandleGetSessionContext(ctx, call(map[string]any{
+		"project": project, "as": agent, "session_context": "minimal",
+	})))
+	for _, k := range dropped {
+		if _, ok := minimal[k]; ok {
+			t.Errorf("minimal get_session_context leaked %q", k)
+		}
+	}
+	if _, ok := minimal["pending_tasks"]; !ok {
+		t.Error("minimal get_session_context dropped pending_tasks")
+	}
+	if _, ok := minimal["unread_messages"]; !ok {
+		t.Error("minimal get_session_context dropped unread_messages")
+	}
+
+	// register_agent: the nested session_context obeys the same param.
+	reg := okJSON(h.HandleRegisterAgent(ctx, call(map[string]any{
+		"project": project, "name": agent, "profile_slug": "wraith-backend",
+		"session_context": "minimal",
+	})))
+	sc, ok := reg["session_context"].(map[string]any)
+	if !ok {
+		t.Fatalf("register_agent returned no session_context object: %T", reg["session_context"])
+	}
+	for _, k := range dropped {
+		if _, ok := sc[k]; ok {
+			t.Errorf("minimal register_agent leaked %q", k)
+		}
 	}
 }
 

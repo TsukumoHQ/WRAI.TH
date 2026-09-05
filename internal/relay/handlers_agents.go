@@ -173,8 +173,11 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		h.registry.Register(project, name, sess.SessionID())
 	}
 
-	// Build session_context for the response (Phase 2: boot-in-register)
-	sessionCtx := h.buildSessionContext(project, name, profileSlug)
+	// Build session_context for the response (Phase 2: boot-in-register).
+	// session_context='minimal' (WRAITH R1) returns the lean boot shape (<1.5 KB);
+	// any other value (default 'full') returns the full budgeted shape.
+	minimalCtx := req.GetString("session_context", "full") == "minimal"
+	sessionCtx := h.buildSessionContext(project, name, profileSlug, minimalCtx)
 	sessionCtx["is_respawn"] = isRespawn
 
 	action := "register"

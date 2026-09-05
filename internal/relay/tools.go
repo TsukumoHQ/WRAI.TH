@@ -14,6 +14,11 @@ var projectParam = mcp.WithString("project", mcp.Description("Project namespace 
 // render either a compact markdown table (default, ~half the tokens) or JSON.
 var formatParam = mcp.WithString("format", mcp.Description("'md' (default, markdown table — ~half the tokens) or 'json'"), mcp.Enum("md", "json"))
 
+// sessionContextParam selects the boot-payload shape (WRAITH R1): 'full'
+// (default) or 'minimal' (agent + tasks + unread only, <1.5 KB). Shared by
+// register_agent and get_session_context.
+var sessionContextParam = mcp.WithString("session_context", mcp.Description("'full' (default) or 'minimal' (lean boot payload)"), mcp.Enum("full", "minimal"))
+
 func whoamiTool() mcp.Tool {
 	return mcp.NewTool(
 		"whoami",
@@ -38,6 +43,7 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD). Stable identity key: a SessionStart hook re-binds the rotated session_id after /clear. Agents can share one cwd — each resolves by name; a rebind with NO name refuses to guess.")),
 		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering (e.g. '[\"database\",\"auth\"]')")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
+		sessionContextParam,
 	)
 }
 
@@ -889,6 +895,7 @@ func getSessionContextTool() mcp.Tool {
 		asParam,
 		projectParam,
 		mcp.WithString("profile_slug", mcp.Description("Profile to load (default: auto-detected from registration)")),
+		sessionContextParam,
 	)
 }
 

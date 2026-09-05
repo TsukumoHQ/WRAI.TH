@@ -23,7 +23,10 @@ func (h *Handlers) HandleGetSessionContext(ctx context.Context, req mcp.CallTool
 		}
 	}
 
-	sessionCtx := h.buildSessionContext(project, agent, profileSlugParam)
+	// session_context='minimal' (WRAITH R1) returns the lean boot shape; any other
+	// value (default 'full') returns the full budgeted shape.
+	minimalCtx := req.GetString("session_context", "full") == "minimal"
+	sessionCtx := h.buildSessionContext(project, agent, profileSlugParam, minimalCtx)
 	sessionCtx["agent"] = agent
 	sessionCtx["project"] = project
 
