@@ -46,6 +46,7 @@ func (r *Relay) StartTaskMaintenanceSweeper(done <-chan struct{}) {
 				r.sweepExpiredLeases()
 				r.sweepReferentialIntegrity()
 				r.sweepLimboAssignees()
+				r.sweepDanglingBoards()
 			}
 		}
 	}()
@@ -196,6 +197,49 @@ func (r *Relay) sweepLimboAssignees() {
 	}
 	if !res.DryRun {
 		r.digestLimboBlocks(res.Blocked)
+	}
+}
+
+// danglingBoardApply decides whether the dangling-board sweep WRITES or only
+// dry-runs, mirroring limboSweepApply exactly. Dry-run is the DEFAULT (safe
+// first deploy). Writes are enabled only by an explicit opt-in — the env
+// RELAY_DANGLING_BOARD_APPLY (1/true/yes) or, absent an env override, the DB
+// setting dangling_board_apply='1'. The env wins so an operator can force
+// dry-run or apply at boot without a DB write; a DB setting lets it be flipped
+// live once the first real runs have been audited.
+func (r *Relay) danglingBoardApply() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("RELAY_DANGLING_BOARD_APPLY"))) {
+	case "1", "true", "yes":
+		return true
+	case "0", "false", "no":
+		return false
+	}
+	return r.DB.GetSetting("dangling_board_apply") == "1"
+}
+
+// sweepDanglingBoards re-homes native tasks whose board_id points at a missing
+// or archived board onto their profile's product board (Q4 residual). Every
+// disposition is journaled with the `integrity:` prefix; no digest messages are
+// sent (unlike the limbo sweep) — a re-home is not something a dispatcher needs
+// pinged about. Dry-run by default; idempotent (a re-run after an apply pass
+// finds no candidates and journals only the summary, if anything).
+func (r *Relay) sweepDanglingBoards() {
+	res, err := r.DB.SweepDanglingBoards(r.danglingBoardApply())
+	if err != nil {
+		log.Printf("integrity: dangling-board sweep error: %v", err)
+		return
+	}
+	mode := "apply"
+	if res.DryRun {
+		mode = "dry-run"
+	}
+	for _, d := range res.Dispositions {
+		log.Printf("integrity: dangling-board action=%s mode=%s task=%s project=%s from=%s to=%s slug=%s",
+			d.Action, mode, d.Task, d.Project, d.FromBoard, d.ToBoard, d.Slug)
+	}
+	if len(res.Dispositions) > 0 {
+		log.Printf("integrity: dangling-board sweep (%s) — %d disposition(s) (scanned %d)",
+			mode, len(res.Dispositions), res.Scanned)
 	}
 }
 
