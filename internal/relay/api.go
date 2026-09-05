@@ -466,7 +466,11 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 	// Reject the whole request if any key is not writable (fail before applying).
 	for k := range body {
 		if !writableSettings[k] {
-			http.Error(w, fmt.Sprintf(`{"error":"setting %q is not writable"}`, k), http.StatusForbidden)
+			// json.Marshal so the (quoted) key is escaped — a raw fmt into a JSON
+			// literal produced invalid JSON, which the client's res.json() then
+			// swallowed, hiding the reason. Encoded, the message always parses.
+			eb, _ := json.Marshal(map[string]string{"error": fmt.Sprintf("setting %q is not writable", k)})
+			http.Error(w, string(eb), http.StatusForbidden)
 			return
 		}
 	}

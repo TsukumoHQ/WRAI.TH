@@ -15,6 +15,7 @@ import { initMessages } from './messages.js';
 import { initMemory } from './memory.js';
 import { initLinearStrip } from './linear.js';
 import { initFederation } from './federation.js';
+import { initSettings } from './settings.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => (
@@ -147,6 +148,7 @@ const PAGES = {
   stats: { init: (el) => initStats(el, ctx), instance: null },
   notifications: { init: (el) => initNotifications(el, ctx), instance: null },
   team: { init: (el) => initTeam(el, ctx), instance: null },
+  settings: { init: (el) => initSettings(el, ctx), instance: null },
 };
 let homeInstance = null;
 let linearStrip = null;
@@ -155,6 +157,7 @@ function parseHash() {
   const h = location.hash.replace(/^#\/?/, '');
   if (h === 'messages') return { view: 'global', project: null, page: 'messages' };
   if (h === 'federation') return { view: 'global', project: null, page: 'federation' };
+  if (h === 'settings') return { view: 'global', project: null, page: 'settings' };
   if (h.startsWith('p/')) {
     const rest = h.slice(2);
     const i = rest.indexOf('/');
@@ -470,9 +473,35 @@ function overviewPage(ctx) {
 }
 
 /* ============================================================= *
+ *  Config panel wiring — a global page like messages/federation, but its
+ *  container + home entry-point are injected here (settings.js owns only the
+ *  form) so the slice touches no static HTML.
+ * ============================================================= */
+function mountSettingsChrome() {
+  const view = $('view');
+  if (view && !document.querySelector('.page[data-page="settings"]')) {
+    const sec = document.createElement('section');
+    sec.className = 'page main page-settings';
+    sec.dataset.page = 'settings';
+    sec.hidden = true;
+    view.appendChild(sec);
+  }
+  // Home entry-point, alongside the other fleet-comms links.
+  const hero = document.querySelector('.home-hero-text');
+  if (hero && !hero.querySelector('.fleet-comms-link[href="#/settings"]')) {
+    const a = document.createElement('a');
+    a.className = 'fleet-comms-link';
+    a.href = '#/settings';
+    a.textContent = 'configuration — Linear connector & console settings →';
+    hero.appendChild(a);
+  }
+}
+
+/* ============================================================= *
  *  Boot
  * ============================================================= */
 (async function boot() {
+  mountSettingsChrome();
   await initHeader();
   await route();     // mounts the current view (home by default) + binds the stream
 })();
