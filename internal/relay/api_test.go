@@ -980,3 +980,68 @@ func TestArchiveBoardRESTNativeAndUnknown(t *testing.T) {
 		t.Fatalf("404 body must carry a non-empty error, got %v", nb)
 	}
 }
+
+// TestArchiveTaskRESTMissingReason (A1-iii): POST /api/tasks/{id}/archive with
+// no reason returns 400 and leaves the task active.
+func TestArchiveTaskRESTMissingReason(t *testing.T) {
+	r := testRelay(t)
+	task, err := r.DB.DispatchTask("p1", "worker", "cto", "t", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	w := doAPI(r, http.MethodPost, "/tasks/"+task.ID+"/archive?project=p1", `{"as":"cto"}`)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("want 400, got %d: %s", w.Code, w.Body.String())
+	}
+	if s, _ := decodeJSON(t, w)["error"].(string); s == "" {
+		t.Fatal("400 body must carry a non-empty error")
+	}
+	got, _ := r.DB.GetTask(task.ID, "p1")
+	if got == nil || got.ArchivedAt != nil {
+		t.Fatal("task must remain active after a 400")
+	}
+}
+
+// TestArchiveTaskRESTUnknown (A1-iii): archiving an unknown id returns 404.
+func TestArchiveTaskRESTUnknown(t *testing.T) {
+	r := testRelay(t)
+	w := doAPI(r, http.MethodPost, "/tasks/does-not-exist/archive?project=p1", `{"reason":"stale","as":"cto"}`)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d: %s", w.Code, w.Body.String())
+	}
+	if s, _ := decodeJSON(t, w)["error"].(string); s == "" {
+		t.Fatal("404 body must carry a non-empty error")
+	}
+}
+
+// TestArchiveTaskRESTSuccessThenConflict (A1-iii): the first archive returns
+// 200 and stamps archived_at; a second archive of the same task returns 409.
+func TestArchiveTaskRESTSuccessThenConflict(t *testing.T) {
+	r := testRelay(t)
+	task, err := r.DB.DispatchTask("p1", "worker", "cto", "t", "", "P2", nil, nil, db.TypedTicket{}, false, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+
+	w := doAPI(r, http.MethodPost, "/tasks/"+task.ID+"/archive?project=p1", `{"reason":"stale","as":"cto-tsukumo"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d: %s", w.Code, w.Body.String())
+	}
+	body := decodeJSON(t, w)
+	if body["archived"] != true || body["task_id"] != task.ID {
+		t.Fatalf("unexpected success body: %v", body)
+	}
+	got, _ := r.DB.GetTask(task.ID, "p1")
+	if got == nil || got.ArchivedAt == nil {
+		t.Fatal("archived_at must be stamped after 200")
+	}
+
+	w2 := doAPI(r, http.MethodPost, "/tasks/"+task.ID+"/archive?project=p1", `{"reason":"again","as":"cto"}`)
+	if w2.Code != http.StatusConflict {
+		t.Fatalf("want 409 on re-archive, got %d: %s", w2.Code, w2.Body.String())
+	}
+	if s, _ := decodeJSON(t, w2)["error"].(string); s == "" {
+		t.Fatal("409 body must carry a non-empty error")
+	}
+}

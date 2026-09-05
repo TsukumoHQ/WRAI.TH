@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"strconv"
@@ -146,6 +147,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiTaskComment(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/progress") && req.Method == http.MethodGet:
 		r.apiGetTaskProgress(w, req, path)
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/archive") && req.Method == http.MethodPost:
+		r.apiArchiveTaskById(w, req, strings.TrimSuffix(strings.TrimPrefix(path, "/tasks/"), "/archive"))
 	case path == "/audit" && req.Method == http.MethodGet:
 		r.apiGetAudit(w, req)
 	case strings.HasPrefix(path, "/tasks/") && req.Method == http.MethodPut:
@@ -2108,6 +2111,60 @@ func (r *Relay) apiArchiveBoard(w http.ResponseWriter, req *http.Request, id str
 		return
 	}
 	writeJSON(w, map[string]any{"archived": true, "board_id": id})
+}
+
+// apiArchiveTaskById handles POST /api/tasks/{id}/archive — a reversible,
+// audited per-task archive (REST-only; no MCP tool). Body: {"reason","as"}.
+// A non-empty reason is mandatory (400). Mirrors apiArchiveBoard for project
+// resolution. Because db.ArchiveTask returns (false, nil) for BOTH a missing
+// and an already-archived task, the 404-vs-409 split is decided here from a
+// prior GetTask read; a lost race on the CAS still surfaces as 409.
+func (r *Relay) apiArchiveTaskById(w http.ResponseWriter, req *http.Request, id string) {
+	project := projectFromRequest(req)
+	if id == "" {
+		jsonError(w, http.StatusBadRequest, "task id required")
+		return
+	}
+	var body struct {
+		Reason string `json:"reason"`
+		As     string `json:"as"`
+	}
+	if err := json.NewDecoder(req.Body).Decode(&body); err != nil && err != io.EOF {
+		jsonError(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if body.Reason == "" {
+		jsonError(w, http.StatusBadRequest, "reason required")
+		return
+	}
+	task, err := r.DB.GetTask(id, project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to look up task")
+		return
+	}
+	if task == nil {
+		jsonError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if task.ArchivedAt != nil {
+		jsonError(w, http.StatusConflict, "task already archived")
+		return
+	}
+	actor := body.As
+	if actor == "" {
+		actor = "user"
+	}
+	ok, err := r.DB.ArchiveTask(project, id, body.Reason, actor)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "failed to archive task")
+		return
+	}
+	if !ok {
+		// Lost the race between the GetTask read and the CAS — archived meanwhile.
+		jsonError(w, http.StatusConflict, "task already archived")
+		return
+	}
+	writeJSON(w, map[string]any{"archived": true, "task_id": id})
 }
 
 func (r *Relay) apiGetFileLocks(w http.ResponseWriter, req *http.Request) {
