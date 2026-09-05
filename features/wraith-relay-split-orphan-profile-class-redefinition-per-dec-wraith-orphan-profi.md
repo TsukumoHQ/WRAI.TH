@@ -40,17 +40,26 @@ NITS: none. Other integrity classes byte-for-byte untouched; zero schema change;
 ## 3. Files changed
 
 ```
-internal/db/referential_integrity.go      |  10 ++-
- internal/db/referential_integrity_test.go | 116 ++++++++++++++++++++++++++++++
- 2 files changed, 124 insertions(+), 2 deletions(-)
+...ass-redefinition-per-dec-wraith-orphan-profi.md |  56 ++++++++++
+ internal/db/referential_integrity.go               |  10 +-
+ internal/db/referential_integrity_test.go          | 116 +++++++++++++++++++++
+ 3 files changed, 180 insertions(+), 2 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-96eb1fa3-6f77-4f6c-8773-1fa716003316 @ `70cad0f0a`
+- 🟢 AC1: pool resolver verified: t-pool resolves via agent wb-agent; t-dead still flags; case-insensitive + project-scoped confirmed — evidence: referential_integrity.go:144 adds AND NOT EXISTS agents pool resolver (LOWER both sides, project-scoped) — test: TestOrphanProfilePoolResolver referential_integrity_test.go:501 + TestOrphanProfilePoolCaseInsensitive :529
+- 🟢 AC2: terminal exclusion verified: t-done/t-cancelled NOT flagged, t-open (in-progress) still flags — openCount=1 — evidence: referential_integrity.go:142 adds AND t.status NOT IN ('done','cancelled') — test: TestOrphanProfileTerminalExclusion referential_integrity_test.go:555
+- 🟢 AC3: heal path verified: scan 1 flags t-heal; seedAgent newcomer carrying slug; scan 2 resolves — openCount=0 AND resolved_at IS NOT NULL row count=1 (resolved, not deleted) — evidence: referential_integrity.go:140-144 new orphanSQL re-evaluated each scan via existing runReferentialScan heal path — test: TestOrphanProfileHealPath referential_integrity_test.go:582
+- 🟢 AC4: master fixture unmodified; AC4 hold verified: other class counts byte-for-byte unchanged; orphan_profile=1 matches new pool resolver (t-oprofile='no-such-profile' carried by no agent) — evidence: referential_integrity_test.go:217-233 want map untouched in diff (0 deleted lines); all 14 non-orphan_profile counts=1, orphan_profile=1 — test: TestReferentialScanDetectsOrphanClasses referential_integrity_test.go:163
+- 🟢 AC5: AC5 green: build/vet/test all green; 1 non-test source file (limit ≤2) — evidence: go build EXIT=0; go vet -tags fts5 EXIT=0; go test -tags fts5 ./... all pkgs ok; only internal/db/referential_integrity.go non-test file — test: go test -tags fts5 -count=1 ./... exit 0; 9 pkgs ok / 4 no-test
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-96eb1fa3-6f77-4f6c-8773-1fa716003316)
+
+**Approve-with-findings (follow-up):** build/vet/test green; 4 new tests + master fixture all pass; pool resolver + terminal exclusion match plan; 1 non-test source file; no bar weakening
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `96eb1fa3-6f77-4f6c-8773-1fa716003316`._
