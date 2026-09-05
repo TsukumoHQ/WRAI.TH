@@ -188,7 +188,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 
 	// Quota (same gate as send_message).
 	if q := r.DB.CheckQuotaError(project, from, "messages"); q != "" {
-		http.Error(w, `{"error":`+strconv.Quote(q)+`}`, http.StatusTooManyRequests)
+		jsonError(w, http.StatusTooManyRequests, q)
 		return
 	}
 	// Permission: when teams are configured, a direct send needs a path
@@ -196,7 +196,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 	if to != "*" && to != "user" && !strings.HasPrefix(to, "team:") {
 		if hasTeams, _ := r.DB.HasTeams(project); hasTeams {
 			if allowed, _ := r.DB.CanMessage(project, from, to); !allowed {
-				http.Error(w, `{"error":"not authorized to message '`+to+`' (no shared team / reports_to / notify channel)"}`, http.StatusForbidden)
+				jsonError(w, http.StatusForbidden, "not authorized to message '"+to+"' (no shared team / reports_to / notify channel)")
 				return
 			}
 		}

@@ -1035,7 +1035,7 @@ func (r *Relay) apiPostMemory(w http.ResponseWriter, req *http.Request) {
 	// until a caller adds one — consistent with "missing = rejected", not a gap.
 	if r.DB.ProjectRequiresMemoryDiscipline(body.Project) {
 		if verr := db.ValidateMemoryWrite(body.Project, body.Key, tagsJSON, body.Layer, "", time.Now().UTC()); verr != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, verr.Error()), http.StatusBadRequest)
+			jsonError(w, http.StatusBadRequest, verr.Error())
 			return
 		}
 	}
@@ -1551,17 +1551,17 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, tte.Error()), http.StatusBadRequest)
+			jsonError(w, http.StatusBadRequest, tte.Error())
 			return
 		}
 		var ite *db.InvalidTitleError
 		if errors.As(err, &ite) {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, ite.Error()), http.StatusBadRequest)
+			jsonError(w, http.StatusBadRequest, ite.Error())
 			return
 		}
 		var bre *db.BoardRequiredError
 		if errors.As(err, &bre) {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, bre.Error()), http.StatusBadRequest)
+			jsonError(w, http.StatusBadRequest, bre.Error())
 			return
 		}
 		apiError(w, http.StatusInternalServerError, "failed to dispatch task", err)

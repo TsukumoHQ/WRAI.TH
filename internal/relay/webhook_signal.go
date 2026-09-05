@@ -3,7 +3,6 @@ package relay
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -156,7 +155,7 @@ func (r *Relay) apiSignalWebhook(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		var tte *db.TypedTicketError
 		if errors.As(err, &tte) {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, tte.Error()), http.StatusUnprocessableEntity)
+			jsonError(w, http.StatusUnprocessableEntity, tte.Error())
 			return
 		}
 		// Transient failure: release the delivery-id reservation so an
