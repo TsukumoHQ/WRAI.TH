@@ -3,7 +3,6 @@ package db
 import (
 	"agent-relay/internal/models"
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -43,9 +42,9 @@ import (
 // anything moves.
 const (
 	blockLimboAfter = 7 * 24 * time.Hour
-	// limboReasonPrefix is both the reason we stamp and the idempotence marker: a
-	// task already blocked with this prefix is skipped, so re-running the sweep is
-	// a no-op (never a second block, never a churn of blocked_periods windows).
+	// limboReasonPrefix is the reason we stamp on a limbo block. Idempotence no
+	// longer rides on it: the sweep skips ANY already-blocked task (see the block
+	// guard), so re-running is a no-op regardless of who set the reason.
 	limboReasonPrefix = "limbo-sweep"
 )
 
@@ -126,9 +125,14 @@ func (d *DB) SweepLimboAssignees(now time.Time, apply bool) (*LimboSweepResult, 
 	dispCache := map[string]agentLiveness{}
 
 	for _, r := range candidates {
-		// Idempotence: already blocked by a prior limbo sweep → skip (no re-block,
-		// no blocked_periods churn).
-		if r.status == "blocked" && strings.HasPrefix(r.blockedReason, limboReasonPrefix) {
+		// Never touch an already-blocked task: it is out of limbo by definition (a
+		// held-by-a-ghost task is non-blocked), and re-blocking would overwrite the
+		// original blocked_reason — destroying the provenance of WHY it was blocked
+		// (e.g. a human-set reason). This subsumes the limbo-prefix idempotence
+		// check: a task blocked by a prior limbo sweep is skipped too, so re-running
+		// stays a no-op (no re-block, no blocked_periods churn). Skipped = no shadow
+		// line, no block, no audit row.
+		if r.status == "blocked" {
 			continue
 		}
 		// A still-live lease means the holder is not really gone (e.g. a sleeping
@@ -192,10 +196,15 @@ func (d *DB) SweepLimboAssignees(now time.Time, apply bool) (*LimboSweepResult, 
 }
 
 // limboAgeDays is the whole number of days between a task's last_activity_at and
-// now — the age the dry-run shadow line reports. A missing/unparseable timestamp
-// (never expected for a scanned candidate) or a future stamp yields 0.
+// now — the age the dry-run shadow line reports. Parsed with time.RFC3339, which
+// accepts BOTH fractional-second stamps (memoryTimeFmt's .000000Z) and plain
+// second-precision stamps (…T12:19:03Z); the zero-padded memoryTimeFmt layout
+// requires exactly 6 fractional digits and so silently mis-parsed no-frac stamps
+// to 0. A missing/unparseable timestamp (never expected for a scanned candidate)
+// or a future stamp still yields 0. memoryTimeFmt itself is unchanged (other
+// callers depend on it) — only this age display is widened.
 func limboAgeDays(now time.Time, lastActivityAt string) int {
-	ts, err := time.Parse(memoryTimeFmt, lastActivityAt)
+	ts, err := time.Parse(time.RFC3339, lastActivityAt)
 	if err != nil {
 		return 0
 	}

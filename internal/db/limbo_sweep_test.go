@@ -292,6 +292,98 @@ func TestLimboSweepDryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// seedAlreadyBlockedLimbo seeds one already-blocked candidate with a NON-limbo
+// reason (both clocks stale, dispatcher gone) plus a fresh limbo task in the same
+// pass, and returns the human reason set on the blocked row. Shared by the AC1
+// (apply) and AC2 (dry-run) skip tests.
+func seedAlreadyBlockedLimbo(t *testing.T, d *DB) (c *sql.DB, humanReason string) {
+	t.Helper()
+	c = d.conn
+	seedProject(t, c, "p1")
+	seedAgent(t, c, "p1", "dead", "inactive", "", "", 0) // assignee inactive; dispatcher ghostboss is gone
+	humanReason = "blocked by lead: waiting on upstream decision"
+	seedTask(t, c, "t-blk", "p1", "blocked", "ghostboss", "dead", "dead", "", "", "", false)
+	if _, err := c.Exec(`UPDATE tasks SET blocked_reason = ? WHERE id = 't-blk'`, humanReason); err != nil {
+		t.Fatalf("preset blocked_reason: %v", err)
+	}
+	setTaskActivity(t, c, "t-blk", limboTS(5, 10)) // both clocks past 7d → would-block if not skipped
+	setAgentSeen(t, c, "p1", "dead", limboTS(5, 10))
+	seedTask(t, c, "t-new", "p1", "in-progress", "ghostboss", "dead", "dead", "", "", "", false)
+	setTaskActivity(t, c, "t-new", limboTS(5, 10)) // fresh limbo, proves the skip is per-row
+	return c, humanReason
+}
+
+// AC1: in apply mode the sweep never touches a task already status='blocked' that
+// carries a NON-limbo reason — its original blocked_reason (provenance of WHY it
+// was blocked) is preserved, it produces zero audit rows, and it is never in
+// res.Blocked. A fresh limbo task in the same pass is still blocked.
+func TestLimboSweepSkipsAlreadyBlockedInApply(t *testing.T) {
+	d := testDB(t)
+	c, humanReason := seedAlreadyBlockedLimbo(t, d)
+
+	res, err := d.SweepLimboAssignees(limboNow, true)
+	if err != nil {
+		t.Fatalf("apply sweep: %v", err)
+	}
+	if len(res.Blocked) != 1 || res.Blocked[0].TaskID != "t-new" {
+		t.Fatalf("apply: want only t-new blocked (t-blk skipped), got %+v", res.Blocked)
+	}
+	st, reason, _ := limboTaskState(t, c, "t-blk")
+	if st != "blocked" || reason != humanReason {
+		t.Fatalf("apply: t-blk status=%q reason=%q, want blocked with reason unchanged (%q)", st, reason, humanReason)
+	}
+	if n := limboBlockedAuditCount(t, c); n != 1 { // exactly one, for t-new only
+		t.Fatalf("apply wrote %d audit row(s), want exactly 1 (t-new only; t-blk skipped)", n)
+	}
+}
+
+// AC2: in dry-run the already-blocked row emits NO shadow line — it is absent
+// from res.Blocked (the relay layer's shadow line is one-per-res.Blocked entry).
+func TestLimboSweepSkipsAlreadyBlockedInDryRun(t *testing.T) {
+	d := testDB(t)
+	c, humanReason := seedAlreadyBlockedLimbo(t, d)
+
+	res, err := d.SweepLimboAssignees(limboNow, false)
+	if err != nil {
+		t.Fatalf("dry-run sweep: %v", err)
+	}
+	for _, b := range res.Blocked {
+		if b.TaskID == "t-blk" {
+			t.Fatalf("dry-run: already-blocked t-blk in res.Blocked (would emit a shadow line): %+v", b)
+		}
+	}
+	if len(res.Blocked) != 1 || res.Blocked[0].TaskID != "t-new" {
+		t.Fatalf("dry-run: want only t-new, got %+v", res.Blocked)
+	}
+	if st, reason, _ := limboTaskState(t, c, "t-blk"); st != "blocked" || reason != humanReason {
+		t.Fatalf("dry-run mutated t-blk: status=%q reason=%q", st, reason)
+	}
+}
+
+// limboAgeDays must report the true whole-day age for BOTH a second-precision
+// (no fractional) timestamp and a fractional-second one; unparseable and future
+// stamps still yield 0. memoryTimeFmt's zero-padded .000000 layout silently
+// mis-parsed no-frac stamps to 0 before the RFC3339 switch.
+func TestLimboAgeDaysParsesNoFracAndFrac(t *testing.T) {
+	// 2026-07-23 + 44 days = 2026-09-05 (8 to end of July, +31 Aug, +5 Sep).
+	nowNoFrac := time.Date(2026, 9, 5, 12, 19, 3, 0, time.UTC)
+	if got := limboAgeDays(nowNoFrac, "2026-07-23T12:19:03Z"); got != 44 {
+		t.Fatalf("no-frac stamp: AgeDays=%d, want 44", got)
+	}
+	// fractional-second stamp (memoryTimeFmt): 2026-06-01 − 2026-05-10 = 22 days.
+	if got := limboAgeDays(limboNow, limboTS(5, 10)); got != 22 {
+		t.Fatalf("frac stamp: AgeDays=%d, want 22", got)
+	}
+	// unparseable → 0.
+	if got := limboAgeDays(nowNoFrac, "not-a-timestamp"); got != 0 {
+		t.Fatalf("unparseable stamp: AgeDays=%d, want 0", got)
+	}
+	// future stamp → 0.
+	if got := limboAgeDays(nowNoFrac, "2026-09-06T12:19:03Z"); got != 0 {
+		t.Fatalf("future stamp: AgeDays=%d, want 0", got)
+	}
+}
+
 // snapshotTasks serializes every task's (id,status,archived?) for equality diff.
 func snapshotTasks(t *testing.T, c *sql.DB) string {
 	t.Helper()
