@@ -173,12 +173,24 @@ func TestSummarizeTask_CarriesVerifyCmd(t *testing.T) {
 	s := summarizeTask(models.Task{
 		ID: "abc", Title: "t", Priority: "P2", Status: "pending",
 		VerifyCmd: &cmd,
-	})
+	}, false)
 	if s.VerifyCmd == nil || *s.VerifyCmd != cmd {
 		t.Fatalf("summarizeTask dropped verify_cmd, got %v, want %q", s.VerifyCmd, cmd)
 	}
+	// verify_cmd is KEPT even on the assigned_to_me (selfList=true) projection —
+	// it is a hard contract (DEC-niwa-goal-validate-1), not a self-redundant field.
+	self := summarizeTask(models.Task{
+		ID: "abc", Title: "t", Priority: "P2", Status: "pending",
+		ProfileSlug: "dev", VerifyCmd: &cmd,
+	}, true)
+	if self.VerifyCmd == nil || *self.VerifyCmd != cmd {
+		t.Fatalf("selfList projection dropped verify_cmd: %v", self.VerifyCmd)
+	}
+	if self.ProfileSlug != "" {
+		t.Fatalf("selfList projection kept profile_slug %q, want cleared", self.ProfileSlug)
+	}
 
-	absent := summarizeTask(models.Task{ID: "abc", Title: "t", Priority: "P2", Status: "pending"})
+	absent := summarizeTask(models.Task{ID: "abc", Title: "t", Priority: "P2", Status: "pending"}, false)
 	if absent.VerifyCmd != nil {
 		t.Fatalf("expected nil verify_cmd when absent, got %q", *absent.VerifyCmd)
 	}

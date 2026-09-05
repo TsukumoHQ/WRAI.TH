@@ -27,9 +27,10 @@ const taskDescPreview = 200
 const sessionUnreadBudget = 6000
 
 // msgContentPreview is the byte ceiling for a single unread message's content
-// preview in session_context. Mirrors the 300-char cap get_inbox already applies
-// (see handlers.go). Full bodies are fetched via get_inbox(full_content=true).
-const msgContentPreview = 300
+// preview in session_context. Lowered 300 -> 160 for WRAITH R2
+// (DEC-wraith-r2-field-trim-1): boot needs the gist, not the full 300-char cap
+// get_inbox applies. Full bodies are fetched via get_inbox(full_content=true).
+const msgContentPreview = 160
 
 // budgetHardMultiplier caps the absolute size of a projection at this multiple
 // of its soft byte budget. P0 messages/tasks and constraints-layer memories
@@ -192,19 +193,21 @@ func truncatePreview(s string, max int) (string, bool) {
 // session_context.unread_messages. The Content field is truncated to
 // msgContentPreview; the full body is reachable via get_inbox(full_content=true)
 // or get_thread(id). Heavy/structural fields (metadata, ttl) are dropped.
+//
+// WRAITH R2 (DEC-wraith-r2-field-trim-1) dropped created_at (positional recency
+// — projectMessages sorts P0-first then created_at DESC), reply_to (thread via
+// get_thread), delivery_id (ack_delivery resolves it from message_id), and the
+// content_truncated flag (full body is always one get_inbox away). The dropped
+// fields stay one call away; nothing here is a parsed contract.
 type MessageSummary struct {
-	ID               string  `json:"id"`
-	From             string  `json:"from"`
-	Subject          string  `json:"subject,omitempty"`
-	Type             string  `json:"type,omitempty"`
-	Priority         string  `json:"priority,omitempty"`
-	CreatedAt        string  `json:"created_at,omitempty"`
-	TaskID           *string `json:"task_id,omitempty"`
-	ConversationID   *string `json:"conversation_id,omitempty"`
-	ReplyTo          *string `json:"reply_to,omitempty"`
-	DeliveryID       *string `json:"delivery_id,omitempty"`
-	ContentPreview   string  `json:"content_preview,omitempty"`
-	ContentTruncated bool    `json:"content_truncated,omitempty"`
+	ID             string  `json:"id"`
+	From           string  `json:"from"`
+	Subject        string  `json:"subject,omitempty"`
+	Type           string  `json:"type,omitempty"`
+	Priority       string  `json:"priority,omitempty"`
+	TaskID         *string `json:"task_id,omitempty"`
+	ConversationID *string `json:"conversation_id,omitempty"`
+	ContentPreview string  `json:"content_preview,omitempty"`
 }
 
 // summarizeMessage converts a Message into a MessageSummary with a bounded
@@ -216,34 +219,27 @@ func summarizeMessage(m models.Message) MessageSummary {
 		Subject:        m.Subject,
 		Type:           m.Type,
 		Priority:       m.Priority,
-		CreatedAt:      m.CreatedAt,
 		TaskID:         m.TaskID,
 		ConversationID: m.ConversationID,
-		ReplyTo:        m.ReplyTo,
-		DeliveryID:     m.DeliveryID,
 	}
-	s.ContentPreview, s.ContentTruncated = truncatePreview(m.Content, msgContentPreview)
+	// Preview is still truncated at the cap; R2 dropped only the boolean flag.
+	s.ContentPreview, _ = truncatePreview(m.Content, msgContentPreview)
 	return s
 }
 
 // messageSummaryBytes estimates the serialized size of a MessageSummary.
 func messageSummaryBytes(s MessageSummary) int {
 	n := len(s.ID) + len(s.From) + len(s.Subject) + len(s.Type) +
-		len(s.Priority) + len(s.CreatedAt) + len(s.ContentPreview)
+		len(s.Priority) + len(s.ContentPreview)
 	if s.TaskID != nil {
 		n += len(*s.TaskID)
 	}
 	if s.ConversationID != nil {
 		n += len(*s.ConversationID)
 	}
-	if s.ReplyTo != nil {
-		n += len(*s.ReplyTo)
-	}
-	if s.DeliveryID != nil {
-		n += len(*s.DeliveryID)
-	}
-	// JSON structural overhead (quotes, commas, field names)
-	n += 180
+	// JSON structural overhead (quotes, commas, field names). Lowered 180 -> 120
+	// with the R2 field drop (fewer keys per row).
+	n += 120
 	return n
 }
 
@@ -303,23 +299,27 @@ func projectMessages(msgs []models.Message, maxBytes int) []MessageSummary {
 // TaskSummary is the projected form of models.Task injected into session_context.
 // Heavy fields (description, result, blocked_reason) are dropped or truncated;
 // the full task is reachable via get_task(id).
+//
+// WRAITH R2 (DEC-wraith-r2-field-trim-1) dropped board_id (no readers; via
+// get_task), dispatched_at (positional recency — projectTasks sorts P0-first
+// then dispatched_at DESC), and the desc_truncated flag. ProfileSlug/AssignedTo
+// are ASYMMETRIC: on the caller's own list (assigned_to_me) they equal the
+// booting agent and are cleared (summarizeTask selfList=true); on
+// dispatched_by_me they name the doer and are kept.
 type TaskSummary struct {
-	ID            string  `json:"id"`
-	Title         string  `json:"title"`
-	Priority      string  `json:"priority"`
-	Status        string  `json:"status"`
-	ProfileSlug   string  `json:"profile_slug,omitempty"`
-	AssignedTo    *string `json:"assigned_to,omitempty"`
-	DispatchedBy  string  `json:"dispatched_by,omitempty"`
-	BoardID       *string `json:"board_id,omitempty"`
-	DispatchedAt  string  `json:"dispatched_at,omitempty"`
-	DescPreview   string  `json:"desc_preview,omitempty"`
-	DescTruncated bool    `json:"desc_truncated,omitempty"`
+	ID           string  `json:"id"`
+	Title        string  `json:"title"`
+	Priority     string  `json:"priority"`
+	Status       string  `json:"status"`
+	ProfileSlug  string  `json:"profile_slug,omitempty"`
+	AssignedTo   *string `json:"assigned_to,omitempty"`
+	DispatchedBy string  `json:"dispatched_by,omitempty"`
+	DescPreview  string  `json:"desc_preview,omitempty"`
 	// VerifyCmd is the OPTIONAL niwa gate-reviewer validate command (task
 	// 6c1c5167 follow-up, DEC-niwa-goal-validate-1) — carried into
 	// session_context previews so a reviewer sees it without a separate
-	// get_task round-trip. Never required, unlike the always-truncated
-	// description above.
+	// get_task round-trip. Never required. KEEP is a hard contract; R2 does
+	// not touch it.
 	VerifyCmd *string `json:"verify_cmd,omitempty"`
 }
 
@@ -339,22 +339,26 @@ func priorityRank(p string) int {
 	return 4
 }
 
-// summarizeTask converts a Task into a TaskSummary with a bounded description preview.
-func summarizeTask(t models.Task) TaskSummary {
+// summarizeTask converts a Task into a TaskSummary with a bounded description
+// preview. selfList=true is the assigned_to_me projection: profile_slug and
+// assigned_to equal the booting agent, so they are cleared (WRAITH R2, Q3).
+// dispatched_by_me passes selfList=false and keeps both (they name the doer).
+func summarizeTask(t models.Task, selfList bool) TaskSummary {
 	s := TaskSummary{
 		ID:           t.ID,
 		Title:        t.Title,
 		Priority:     t.Priority,
 		Status:       t.Status,
-		ProfileSlug:  t.ProfileSlug,
-		AssignedTo:   t.AssignedTo,
 		DispatchedBy: t.DispatchedBy,
-		BoardID:      t.BoardID,
-		DispatchedAt: t.DispatchedAt,
 		VerifyCmd:    t.VerifyCmd,
 	}
+	if !selfList {
+		s.ProfileSlug = t.ProfileSlug
+		s.AssignedTo = t.AssignedTo
+	}
 	if t.Description != "" {
-		s.DescPreview, s.DescTruncated = truncatePreview(t.Description, taskDescPreview)
+		// Preview is still truncated at the cap; R2 dropped only the boolean flag.
+		s.DescPreview, _ = truncatePreview(t.Description, taskDescPreview)
 	}
 	return s
 }
@@ -362,18 +366,16 @@ func summarizeTask(t models.Task) TaskSummary {
 // taskSummaryBytes estimates the serialized size of a TaskSummary (for budget accounting).
 func taskSummaryBytes(s TaskSummary) int {
 	n := len(s.ID) + len(s.Title) + len(s.Priority) + len(s.Status) +
-		len(s.ProfileSlug) + len(s.DispatchedBy) + len(s.DispatchedAt) + len(s.DescPreview)
+		len(s.ProfileSlug) + len(s.DispatchedBy) + len(s.DescPreview)
 	if s.AssignedTo != nil {
 		n += len(*s.AssignedTo)
-	}
-	if s.BoardID != nil {
-		n += len(*s.BoardID)
 	}
 	if s.VerifyCmd != nil {
 		n += len(*s.VerifyCmd)
 	}
-	// JSON structural overhead (quotes, commas, field names)
-	n += 160
+	// JSON structural overhead (quotes, commas, field names). Lowered 160 -> 110
+	// with the R2 field drop (fewer keys per row).
+	n += 110
 	return n
 }
 
@@ -381,7 +383,12 @@ func taskSummaryBytes(s TaskSummary) int {
 // summarize each, then greedily select until maxBytes is reached.
 // P0 tasks always fit (they're surfaced even if the budget is blown — mirrors
 // applyBudget's P0-bypass rule in internal/relay/budget.go).
-func projectTasks(tasks []models.Task, maxBytes int) []TaskSummary {
+// selfList (variadic, WRAITH R2) marks the assigned_to_me projection so
+// summarizeTask clears the self-redundant profile_slug/assigned_to; omitted (the
+// existing callers) and dispatched_by_me keep both. Variadic so the pre-R2
+// three-arg callers keep compiling.
+func projectTasks(tasks []models.Task, maxBytes int, selfList ...bool) []TaskSummary {
+	self := len(selfList) > 0 && selfList[0]
 	if len(tasks) == 0 {
 		return []TaskSummary{}
 	}
@@ -410,7 +417,7 @@ func projectTasks(tasks []models.Task, maxBytes int) []TaskSummary {
 		hardCeil = maxBytes * budgetHardMultiplier
 	}
 	for _, t := range sorted {
-		s := summarizeTask(t)
+		s := summarizeTask(t, self)
 		b := taskSummaryBytes(s)
 		// Hard ceiling caps the bypass flood; the first (most-important) P0
 		// item always surfaces even under a tiny budget.

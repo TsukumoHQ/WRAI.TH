@@ -824,7 +824,9 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 		dispatchedByMe = []models.Task{}
 	}
 	result["pending_tasks"] = map[string]any{
-		"assigned_to_me":   projectTasks(assignedToMe, 8000),
+		// assigned_to_me: selfList=true drops the self-redundant
+		// profile_slug/assigned_to (WRAITH R2). dispatched_by_me keeps both.
+		"assigned_to_me":   projectTasks(assignedToMe, 8000, true),
 		"dispatched_by_me": projectTasks(dispatchedByMe, 3000),
 	}
 

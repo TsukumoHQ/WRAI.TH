@@ -15,10 +15,8 @@ func TestSummarizeTask_TruncatesLongDescription(t *testing.T) {
 	s := summarizeTask(models.Task{
 		ID: "abc", Title: "t", Priority: "P2", Status: "pending",
 		Description: longDesc,
-	})
-	if !s.DescTruncated {
-		t.Fatal("expected desc_truncated=true for 5KB description")
-	}
+	}, false)
+	// R2 dropped the desc_truncated flag; the preview is still capped.
 	if len(s.DescPreview) != taskDescPreview {
 		t.Fatalf("desc_preview len: got %d, want %d", len(s.DescPreview), taskDescPreview)
 	}
@@ -28,10 +26,7 @@ func TestSummarizeTask_ShortDescriptionKept(t *testing.T) {
 	s := summarizeTask(models.Task{
 		ID: "abc", Title: "t", Priority: "P2", Status: "pending",
 		Description: "short",
-	})
-	if s.DescTruncated {
-		t.Fatal("did not expect desc_truncated for short description")
-	}
+	}, false)
 	if s.DescPreview != "short" {
 		t.Fatalf("desc_preview: got %q", s.DescPreview)
 	}
@@ -97,9 +92,7 @@ func TestSummarizeMessage_TruncatesLongContent(t *testing.T) {
 		ID: "m1", From: "prometheus", Priority: "P1",
 		Content: strings.Repeat("digest ", 600), // ~4KB GlitchTip-style body
 	})
-	if !s.ContentTruncated {
-		t.Fatal("expected content_truncated=true for verbose alert body")
-	}
+	// R2 dropped the content_truncated flag; the preview is still capped.
 	if len(s.ContentPreview) != msgContentPreview {
 		t.Fatalf("content_preview len: got %d, want %d", len(s.ContentPreview), msgContentPreview)
 	}
@@ -107,9 +100,6 @@ func TestSummarizeMessage_TruncatesLongContent(t *testing.T) {
 
 func TestSummarizeMessage_ShortContentKept(t *testing.T) {
 	s := summarizeMessage(models.Message{ID: "m1", From: "a", Content: "ping"})
-	if s.ContentTruncated {
-		t.Fatal("did not expect content_truncated for short body")
-	}
 	if s.ContentPreview != "ping" {
 		t.Fatalf("content_preview: got %q", s.ContentPreview)
 	}
@@ -525,5 +515,103 @@ func TestProjectDecisions_OmittedReflectsByteTruncation(t *testing.T) {
 	}
 	if omitted <= countCapOmitted {
 		t.Fatalf("projected-omitted (%d) must exceed count-cap-omitted (%d)", omitted, countCapOmitted)
+	}
+}
+
+// marshaledKeys returns the JSON object key set of v.
+func marshaledKeys(t *testing.T, v any) map[string]bool {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	keys := make(map[string]bool, len(m))
+	for k := range m {
+		keys[k] = true
+	}
+	return keys
+}
+
+// TestMessageSummaryFieldSet_R2 is AC1: an unread-message summary carries NO
+// delivery_id, NO created_at (timestamp), NO content_truncated flag, NO reply_to
+// — even when the source Message has all of them — and content_preview is capped
+// at msgContentPreview (160). The dropped fields stay reachable via get_inbox /
+// get_thread (asserted in the escape-hatch test).
+func TestMessageSummaryFieldSet_R2(t *testing.T) {
+	did, rt, tid := "deliv-123", "reply-abc", "task-xyz"
+	s := summarizeMessage(models.Message{
+		ID: "m1", From: "wraith-cto", Subject: "subj", Type: "notification",
+		Priority: "P2", CreatedAt: "2026-09-05T22:00:00.000000Z",
+		Content:    strings.Repeat("body ", 100), // > 160, must truncate
+		DeliveryID: &did, ReplyTo: &rt, TaskID: &tid,
+	})
+	keys := marshaledKeys(t, s)
+
+	for _, dropped := range []string{"delivery_id", "created_at", "content_truncated", "reply_to"} {
+		if keys[dropped] {
+			t.Errorf("message summary still carries dropped field %q", dropped)
+		}
+	}
+	for _, kept := range []string{"id", "from", "subject", "type", "priority", "content_preview", "task_id"} {
+		if !keys[kept] {
+			t.Errorf("message summary missing expected field %q", kept)
+		}
+	}
+	if len(s.ContentPreview) > msgContentPreview {
+		t.Errorf("content_preview %d B exceeds cap %d", len(s.ContentPreview), msgContentPreview)
+	}
+}
+
+// TestTaskSummaryAsymmetricFieldSet_R2 is AC2: assigned_to_me task summaries
+// (selfList=true) drop profile_slug/assigned_to/board_id/dispatched_at and the
+// desc_truncated flag; dispatched_by_me summaries (selfList=false) KEEP
+// profile_slug + assigned_to; BOTH keep verify_cmd; desc_preview stays ≤200.
+func TestTaskSummaryAsymmetricFieldSet_R2(t *testing.T) {
+	at, bid, vc := "wraith-backend", "board-1", "go test ./..."
+	src := models.Task{
+		ID: "t1", Title: "title", Priority: "P2", Status: "accepted",
+		ProfileSlug: "wraith-backend", AssignedTo: &at, DispatchedBy: "wraith-cto",
+		BoardID: &bid, DispatchedAt: "2026-09-05T22:00:00.000000Z",
+		Description: strings.Repeat("d", 500), VerifyCmd: &vc,
+	}
+
+	// assigned_to_me (selfList=true).
+	self := projectTasks([]models.Task{src}, 8000, true)
+	if len(self) != 1 {
+		t.Fatalf("assigned_to_me: want 1 row, got %d", len(self))
+	}
+	selfKeys := marshaledKeys(t, self[0])
+	for _, dropped := range []string{"profile_slug", "assigned_to", "board_id", "dispatched_at", "desc_truncated"} {
+		if selfKeys[dropped] {
+			t.Errorf("assigned_to_me summary still carries dropped field %q", dropped)
+		}
+	}
+	if !selfKeys["verify_cmd"] {
+		t.Error("assigned_to_me summary dropped verify_cmd (hard contract)")
+	}
+	if len(self[0].DescPreview) > taskDescPreview {
+		t.Errorf("desc_preview %d B exceeds cap %d", len(self[0].DescPreview), taskDescPreview)
+	}
+
+	// dispatched_by_me (selfList omitted → false).
+	disp := projectTasks([]models.Task{src}, 8000)
+	if len(disp) != 1 {
+		t.Fatalf("dispatched_by_me: want 1 row, got %d", len(disp))
+	}
+	dispKeys := marshaledKeys(t, disp[0])
+	for _, kept := range []string{"profile_slug", "assigned_to", "verify_cmd"} {
+		if !dispKeys[kept] {
+			t.Errorf("dispatched_by_me summary dropped %q — must keep on the doer list", kept)
+		}
+	}
+	// board_id/dispatched_at/*_truncated are dropped from BOTH lists (struct-level).
+	for _, dropped := range []string{"board_id", "dispatched_at", "desc_truncated"} {
+		if dispKeys[dropped] {
+			t.Errorf("dispatched_by_me summary still carries struct-dropped field %q", dropped)
+		}
 	}
 }

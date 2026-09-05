@@ -1749,3 +1749,76 @@ func TestClampLimit(t *testing.T) {
 		}
 	}
 }
+
+// TestSessionContextByteTargets_R2 is AC3: after the R2 field trim the FULL boot
+// payload is ≤6800 B and the MINIMAL payload ≤2700 B on the SAME R1 fixture
+// (down from R1's 7477/3365). Asserts the marshaled JSON byte length — the size
+// the client actually pays.
+func TestSessionContextByteTargets_R2(t *testing.T) {
+	h, project, agent := seedBootFixture(t)
+	profile := strptr("wraith-backend")
+
+	full := h.buildSessionContext(project, agent, profile)
+	fb, err := json.Marshal(full)
+	if err != nil {
+		t.Fatalf("marshal full: %v", err)
+	}
+	t.Logf("R2 full boot payload: %d bytes (R1 was 7477)", len(fb))
+	if len(fb) > 6800 {
+		t.Errorf("full boot payload %d B exceeds R2 target 6800 B", len(fb))
+	}
+
+	minimal := h.buildSessionContext(project, agent, profile, true)
+	mb, err := json.Marshal(minimal)
+	if err != nil {
+		t.Fatalf("marshal minimal: %v", err)
+	}
+	t.Logf("R2 minimal boot payload: %d bytes (R1 was 3365)", len(mb))
+	if len(mb) > 2700 {
+		t.Errorf("minimal boot payload %d B exceeds R2 target 2700 B", len(mb))
+	}
+}
+
+// TestEscapeHatchesCarryDroppedFields_R2 is AC4: the fields the R2 boot summary
+// drops stay reachable through their full-object handlers — get_inbox
+// (full_content) still returns created_at + the untruncated body, and get_task
+// still returns dispatched_at. Proves the trim moved the bytes off the boot path
+// without deleting the data.
+func TestEscapeHatchesCarryDroppedFields_R2(t *testing.T) {
+	h, project, agent := seedBootFixture(t)
+	ctx := context.Background()
+
+	okJSON := func(res *mcp.CallToolResult, err error) map[string]any {
+		t.Helper()
+		if err != nil {
+			t.Fatalf("handler error: %v", err)
+		}
+		return parseJSON(t, res)
+	}
+
+	inbox := okJSON(h.HandleGetInbox(ctx, call(map[string]any{
+		"project": project, "as": agent, "full_content": true, "format": "json",
+	})))
+	msgs, ok := inbox["messages"].([]any)
+	if !ok || len(msgs) == 0 {
+		t.Fatalf("get_inbox returned no messages: %T", inbox["messages"])
+	}
+	row := msgs[0].(map[string]any)
+	if _, ok := row["created_at"]; !ok {
+		t.Error("get_inbox(full_content) dropped created_at — escape hatch broken")
+	}
+	if c, _ := row["content"].(string); c == "" {
+		t.Error("get_inbox(full_content) returned empty content")
+	}
+
+	assigned, _, _ := h.db.GetAgentTasks(project, agent)
+	if len(assigned) == 0 {
+		t.Fatal("fixture has no assigned tasks")
+	}
+	task := okJSON(h.HandleGetTask(ctx, call(map[string]any{
+		"project": project, "task_id": assigned[0].ID,
+	})))
+	if da, _ := task["dispatched_at"].(string); da == "" {
+		t.Error("get_task dropped dispatched_at — escape hatch broken")
+	}
+}
