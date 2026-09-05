@@ -72,6 +72,8 @@ export const api = {
   setAgentAvatar: (project, name, url) =>
     sendJSON('PUT', '/api/agents/avatar', { project, name, url }),
   dispatchTask: (body) => sendJSON('POST', '/api/tasks', body),
+  deleteTask: (id, project) =>
+    sendJSON('DELETE', `/api/tasks/${encodeURIComponent(id)}?${q({ project })}`),
   // notifications
   notificationRules: (project) =>
     getJSON(`/api/notification-rules?${q({ project })}`),

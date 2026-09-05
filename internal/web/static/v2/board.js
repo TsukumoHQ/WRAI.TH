@@ -538,6 +538,12 @@ export function initBoard(root, ctx) {
           </div>
           <input class="cmd-input force-reason" placeholder="reason (optional)" aria-label="Reason for forcing status" />
         </div>
+        <div class="cmd-block">
+          <div class="cmd-h">danger</div>
+          <div class="cmd-row">
+            <button class="cmd-btn danger delete-btn" type="button">delete task</button>
+          </div>
+        </div>
         <div class="cmd-msg" aria-live="polite"></div>
       </div>`;
   }
@@ -559,6 +565,17 @@ export function initBoard(root, ctx) {
       const status = node.querySelector('.force-status').value;
       const reason = node.querySelector('.force-reason').value.trim() || undefined;
       if (status && status !== t.status) refresh(() => ctx.api.transition(t.id, { project, status, reason, force: true }));
+    });
+    node.querySelector('.delete-btn')?.addEventListener('click', async () => {
+      // Confirmation gates the network call: a cancelled confirm returns here
+      // before any fetch, so no request is ever sent.
+      if (!window.confirm(`Delete task “${t.title || t.id}”? This cannot be undone.`)) return;
+      try {
+        await ctx.api.deleteTask(t.id, project);
+        ctx.closeSheet();
+        // Drop the card locally instead of a full reload.
+        reconcile(() => { tasks = tasks.filter((x) => x.id !== t.id); byId.delete(t.id); indexTasks(); });
+      } catch (e) { fail(e); }
     });
   }
 
