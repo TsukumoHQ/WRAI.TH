@@ -101,7 +101,7 @@ func TestV2ConfigPanel(t *testing.T) {
 			t.Fatalf("want 403, got %d", w.Code)
 		}
 		var body map[string]any
-		if err := json.Unmarshal([]byte(w.Body.String()), &body); err != nil {
+		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 			t.Fatalf("403 body is not JSON: %v (%s)", err, w.Body.String())
 		}
 		serverMsg, _ := body["error"].(string)
