@@ -70,6 +70,30 @@ func TestDeleteMemory_ExecutiveArchivesDeadAgentMemory(t *testing.T) {
 	}
 }
 
+// TestDeleteMemory_MixedCaseTargetResolves guards the round-1 finding: a
+// caller-supplied `agent` target in non-canonical case must still resolve to the
+// lowercase-stored agent_name row. Before the fold the authz walk (which folds
+// case) would pass while the UPDATE matched nothing — a silent no-op archive.
+func TestDeleteMemory_MixedCaseTargetResolves(t *testing.T) {
+	h := testHandlers(t)
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "chief", "role": "exec", "is_executive": true}))
+	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "ghost", "role": "dev"}))
+	seedAgentMemory(t, h, "p1", "ghost", "ghost-note")
+	if err := h.db.DeactivateAgent("p1", "ghost"); err != nil {
+		t.Fatalf("deactivate ghost: %v", err)
+	}
+
+	res, _ := h.HandleDeleteMemory(ctx, call(map[string]any{
+		"project": "p1", "as": "chief", "key": "ghost-note", "scope": "agent", "agent": "GHOST",
+	}))
+	if res.IsError {
+		t.Fatalf("mixed-case target should resolve and archive: %s", expectError(t, res))
+	}
+	if _, author, status := tombstone(t, h, "p1", "ghost", "ghost-note"); status != "archived" || author != "ghost" {
+		t.Errorf("mixed-case target did not archive the ghost row: author %q status %q", author, status)
+	}
+}
+
 // TestDeleteMemory_NonExecCannotTargetLiveAgent is AC2: a non-executive caller
 // aiming the `agent` param at another LIVE agent's memory is refused with a
 // message naming both the caller and the target, and the memory is untouched.

@@ -339,6 +339,13 @@ func (h *Handlers) HandleDeleteMemory(ctx context.Context, req mcp.CallToolReque
 	if targetAuthor == "" {
 		targetAuthor = agent
 	}
+	// Agent names are stored lowercase (register folds them), and the agent-scope
+	// UPDATE matches agent_name exactly. Fold the caller-supplied target to the
+	// canonical form so a mixed-case `agent` param (e.g. "Frontend-Lead") still
+	// resolves to the row it names instead of silently matching nothing — the
+	// authz walk already folds case, so an unfolded store target would let the
+	// permission check pass yet archive nothing.
+	targetAuthor = strings.ToLower(targetAuthor)
 	if !strings.EqualFold(targetAuthor, agent) {
 		// Cross-author delete. Only agent scope carries an agent_name dimension;
 		// on project/global the `agent` param would silently do nothing, so refuse
