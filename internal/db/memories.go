@@ -481,6 +481,17 @@ func (d *DB) DeleteMemoryAs(project, actingAgent, targetAuthor, key, scope strin
 	}
 	n, _ := res.RowsAffected()
 	if n == 0 {
+		// A targeted cross-author delete (the admin/janitor arm: an explicit
+		// `agent` target distinct from the caller, agent scope) that matches no
+		// row means the operator aimed at the WRONG author — the live incident
+		// where assumed authors differed (frontend-lead-resume was anonymous,
+		// DEV-checkpoint was dev) and a no-op would leave the operator believing
+		// the purge done. Fail loudly naming BOTH the key AND the target author
+		// (founder failure-is-loud). The self-delete path (targetAuthor ==
+		// actingAgent, incl. no `agent` param) keeps the plain message unchanged.
+		if scope == "agent" && !strings.EqualFold(targetAuthor, actingAgent) {
+			return fmt.Errorf("memory not found: no agent-scope memory %q authored by %q (scope=agent)", key, targetAuthor)
+		}
 		return fmt.Errorf("memory not found: %s (scope=%s)", key, scope)
 	}
 	return nil
