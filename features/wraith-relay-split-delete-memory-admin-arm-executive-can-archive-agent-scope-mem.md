@@ -41,12 +41,12 @@ Invariants: single-writer intact, no schema/migration, no agentColumns/scanAgent
 ## 3. Files changed
 
 ```
-...in-arm-executive-can-archive-agent-scope-mem.md | 118 ++++++++++++++++
+...in-arm-executive-can-archive-agent-scope-mem.md |  72 ++++++++++
  internal/db/memories.go                            |  21 ++-
  internal/relay/delete_memory_admin_test.go         | 150 +++++++++++++++++++++
  internal/relay/handlers_memory.go                  |  66 ++++++++-
  internal/relay/tools.go                            |   1 +
- 5 files changed, 347 insertions(+), 9 deletions(-)
+ 5 files changed, 301 insertions(+), 9 deletions(-)
 ```
 
 ## 4. QA Log
@@ -63,10 +63,19 @@ Invariants: single-writer intact, no schema/migration, no agentColumns/scanAgent
 - 🔴 AC3: [partial] AC literally says archived post-merge — actual archival of the 5 keys is operational follow-up not in this diff; plan approves this deferral. Mechanism verified, but the literal AC state is not. Reviewer should note for the next round that the post-merge purge still needs to be confirmed done. — evidence: diff adds the mechanism (targetAuthorIsDead helper + handler gate) but does NOT archive the 5 specific keys (frontend-lead-resume, CKPT-frontend-lead-boot, DEC-dev-shutdown-checkpoint, CKPT-dev-3-shutdown, DEV-checkpoint) — test: TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor internal/relay/delete_memory_admin_test.go:125 verifies the mechanism (non-exec can purge dead author + unregistered author)
 - 🟢 AC4: param is wired through schema and exercised behaviorally — evidence: internal/relay/tools.go:393 adds mcp.WithString(agent, ...) to deleteMemoryTool — test: TestToolSchemaBudget internal/relay/toolsize_test.go:29 passes with the new param; 3 AC tests exercise the param reaching the handler end-to-end
 
+### Round 3 — ✅ APPROVED by review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df @ `a7ff8754f`
+- 🟢 AC1: executive archives dead-agent agent-scope memory; tombstone records both sides end-to-end — evidence: handlers_memory.go:330-396 adds `agent` target param + admin gate; db/memories.go:454-487 splits DeleteMemoryAs(actingAgent, targetAuthor) — actingAgent→archived_by, targetAuthor→agent_name dimension — test: TestDeleteMemory_ExecutiveArchivesDeadAgentMemory internal/relay/delete_memory_admin_test.go:44 — PASSED; asserts archived_by=chief, agent_name=ghost, status=archived via real DB row
+- 🟢 AC2: non-exec vs LIVE target refused loud naming both; state preserved — evidence: handlers_memory.go:363-367 emits permissionError(CodeForbidden, ...) with caller(%s) and target(%s); memory untouched asserted — test: TestDeleteMemory_NonExecCannotTargetLiveAgent internal/relay/delete_memory_admin_test.go:100 — PASSED; msg contains both peer+victim, victim-note NOT archived
+- 🟢 AC3: dead-author path works for non-exec janitor across both dead-author flavours; AC was amended to mechanism-only per dispatcher note, test verifies exactly that — evidence: handlers_memory.go:391-397 targetAuthorIsDead treats GetAgent nil AND status inactive/deleted as dead; gate at :363 ORs callerIsExec with targetAuthorIsDead — test: TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor internal/relay/delete_memory_admin_test.go:125 — PASSED; covers BOTH inactive-registered (departed) and never-registered (anonymous) authors, archived_by=janitor, agent_name preserved
+- 🟢 AC4: param is in schema and reaches the handler; no silent drop — evidence: internal/relay/tools.go:393 mcp.WithString("agent", ...) added to deleteMemoryTool; registered via toolset.go:171 — test: TestToolSchemaBudget internal/relay/toolsize_test.go:29 — PASSED; iterates all registry tools so a missing/malformed param would marshal-fail. 3 AC tests above also exercise the param reaching the handler end-to-end
+
 ## 5. Timeline
 
 - round 1 → **reject** (review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df)
 - round 2 → **reject** (review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df)
+- round 3 → **approve** (review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df)
+
+**Approve-with-findings (follow-up):** go test -tags fts5: 818 passed, 12 pkgs, exit 0; 4 AC tests + 3 pre-existing tests green; round-1 case-fold ratchet intact at handlers_memory.go:348,361; agentColumns/scanAgent untouched. Per-AC: AC1/AC2/AC3/AC4 all green.
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `9e1ab06b-cc3f-4862-bc8f-66623d0f15df`._
