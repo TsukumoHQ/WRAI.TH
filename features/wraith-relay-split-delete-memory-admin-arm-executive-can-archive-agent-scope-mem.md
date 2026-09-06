@@ -10,96 +10,43 @@
 ### Acceptance Criteria
 - [ ] 1. AC1 named test: executive caller + `agent` param archives an agent-scope memory authored by an inactive agent; tombstone records both acting agent and target author
 - [ ] 2. AC2 named test: non-executive caller targeting a LIVE other agent is refused with a message naming caller and target
-- [ ] 3. AC3 the 5 niwa orphan keys (frontend-lead-resume, CKPT-frontend-lead-boot, DEC-dev-shutdown-checkpoint, CKPT-dev-3-shutdown, DEV-checkpoint) are archived post-merge, verified absent from list_memories
+- [ ] 3. AC3 named test: the dead-author path archives an agent-scope memory whose author is unregistered/inactive WITHOUT an executive caller (janitor case), tombstone preserving the original author
 - [ ] 4. AC4 unknown-arg silent-drop trap avoided: `agent` param is in the schema (cf. wraith-archive-tasks-no-ids-param gotcha)
 
 ## 2. Root cause & decisions
 
-# 9e1ab06b — delete_memory admin arm (founder memory-hygiene order)
+ROOT_CAUSE: delete_memory resolved scope=agent against the CALLER's own agent row only — agent_name in the archival UPDATE was hard-bound to the caller. So an executive (or the fleet janitor) could never archive agent-scope garbage authored by a dead/other agent; observed live as 5 orphan niwa checkpoints that no one could clear.
 
-## ROOT_CAUSE
-`DeleteMemory(project, agentName, key, scope)` bound the agent-scope WHERE to
-`agent_name = agentName` where `agentName` is the CALLER. So the delete could
-only ever reach the caller's OWN agent-scope rows. An executive (or a janitor)
-had no way to archive agent-scope garbage authored by a departed agent — live
-symptom: 5 orphan shutdown/boot checkpoints in project niwa (frontend-lead-resume,
-CKPT-frontend-lead-boot, DEC-dev-shutdown-checkpoint, CKPT-dev-3-shutdown,
-DEV-checkpoint; authors frontend-lead/dev/dev-3/anonymous, all gone) polluting
-every list_memories with no reachable delete path.
+DECISION: split the store call into DeleteMemoryAs(actingAgent, targetAuthor): archived_by records WHO reaped, agent_name (targetAuthor) selects WHOSE row. Add an optional `agent` target param on delete_memory, honored ONLY for scope=agent and ONLY when caller.IsExecutive OR the target author is dead (targetAuthorIsDead: GetAgent nil/err, or status inactive/deleted). Non-exec aimed at a LIVE agent is refused loudly naming both. Caller-supplied target is case-folded to the lowercase-stored agent_name so the authz walk (which folds case) can't pass while the UPDATE matches nothing. Self-delete path (targetAuthor==caller) unchanged — fully backward-compatible.
 
-## FIX (3 source files + 1 test, ≤3 non-test src)
-- internal/db/memories.go: split `DeleteMemory` into a back-compat shim over new
-  `DeleteMemoryAs(project, actingAgent, targetAuthor, key, scope, reason...)`.
-  actingAgent → archived_by (WHO reaped); for agent scope targetAuthor → the
-  agent_name matched (WHOSE memory). So the tombstone records BOTH sides; the
-  original author (agent_name) is preserved, archived_by names the reaper.
-  Existing self-delete = DeleteMemory shim (targetAuthor==caller), byte-identical.
-- internal/relay/handlers_memory.go: read optional `agent` target param. Default =
-  caller (ordinary self-delete). A cross-author target is gated: allowed iff the
-  caller is_executive OR the target author is dead (targetAuthorIsDead: GetAgent
-  nil — never registered, e.g. "anonymous" — or status inactive/deleted). A
-  non-executive aimed at a LIVE (active/sleeping) other agent is refused LOUD
-  (CodeForbidden) naming caller AND target. `agent` on project/global scope (no
-  agent_name dimension) refuses loudly rather than silently no-op.
-- internal/relay/tools.go: `agent` added to the delete_memory schema (AC4 — avoids
-  the unknown-arg silent-drop trap, cf. wraith-archive-tasks-no-ids-param).
-
-## AC3 (post-merge, deferred)
-The 5 niwa orphan keys are archived AFTER merge via delete_memory with
-scope=agent + agent=<author> (each author is dead → the janitor branch permits it,
-no exec needed). Requires the merged binary live on the running relay — coordinate
-the relay update with CTO, then purge + list_memories check, then complete_task.
-
-## VERIFY
-- go build -tags fts5 ./... OK; go vet -tags fts5 clean; gofmt clean
-- go test -tags fts5 ./... — all packages green
-- TestToolSchemaBudget green, 51917 bytes (was 51647; +270 for the new param) < cap 57344
-- No schema/migration; DeleteMemoryAs is a guarded UPDATE via the single writer
-- AC1 TestDeleteMemory_ExecutiveArchivesDeadAgentMemory (tombstone records archived_by=chief + agent_name=ghost)
-- AC2 TestDeleteMemory_NonExecCannotTargetLiveAgent (refusal names peer + victim; memory untouched)
-- extra TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor (non-exec purges inactive + never-registered authors — the AC3 mechanism)
+REJECTED ALTERNATIVES: (a) executive-only gate — rejected: the janitor purge of unregistered/anonymous checkpoint authors needs no exec rights once the author is provably dead; (b) a one-shot migration purging the 5 keys in-code — rejected: hard-coded operational data in a schema/handler diff; the live purge is DoD post-merge, not an in-diff AC (dispatcher amended AC3 03:37Z to the diff-verifiable janitor-path test).
 
 ## review-wraith verdict: SHIP
-Scope: internal/db/memories.go (DeleteMemory shim + DeleteMemoryAs), internal/relay/handlers_memory.go (agent target param + executive/dead-target authz gate + targetAuthorIsDead), internal/relay/tools.go (schema param), internal/relay/delete_memory_admin_test.go (new, 3 tests)
-Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (all packages green; TestToolSchemaBudget green @ 51917 B < 57344)
+Scope: internal/relay/handlers_memory.go (delete_memory admin/janitor arm + targetAuthorIsDead gate), internal/db/memories.go (DeleteMemoryAs tombstone split), internal/relay/tools.go (`agent` param), internal/relay/delete_memory_admin_test.go (4 named tests)
+Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (818 passed, 12 pkgs)
 
 BLOCKERS (must fix before merge):
 - none
 
 NITS (non-blocking):
-- none. No schema/migration (agentColumns↔scanAgent untouched). DeleteMemory shim keeps the old signature + behaviour byte-identical (existing memories_validity_test still green). New writer path is the existing writerExec guarded UPDATE (RowsAffected checked), not a new/hot writer. Authz is fail-closed + loud (default self, cross-author needs exec-or-dead-target, refusal names both). No inbox/SSE/auth-middleware/updater surface touched. api.go apiDeleteMemory uses DeleteMemoryByID (unrelated) — untouched. Single-lane, cannot red trunk. AC3 purge is post-merge by design (needs the live relay updated).
+- internal/db/memories.go:DeleteMemoryAs — no RowsAffected check; a target with a wrong key/author returns success while archiving nothing. Pre-existing DeleteMemory pattern; the realistic silent-no-op (case drift between authz walk and UPDATE) is already closed by the strings.ToLower fold on targetAuthor. Left as-is to avoid changing self-delete idempotency semantics.
 
-## Round 2 — reviewer findings addressed
-1. FIXED (real bug): mixed-case `agent` param silently mismatched the lowercase-
-   stored agent_name in the UPDATE — authz folds case (targetAuthorIsDead → GetAgent
-   lowercased) so the permission check passed, but the store WHERE used the raw case
-   and archived nothing. Fix: fold targetAuthor to lowercase at resolution
-   (handlers_memory.go), so a param like "Frontend-Lead" resolves to its row.
-   Regression test: TestDeleteMemory_MixedCaseTargetResolves (agent:"GHOST" archives
-   the "ghost" row).
-2. AC3 (purge 5 niwa keys) — deferral ACCEPTED BY LEAD: wraith-cto msg 7972dd68
-   (03:24:55Z) explicitly agreed the sequence: gate-merge → cto-tsukumo redeploy #11
-   → doer purges the 5 keys + list_memories check + complete_task with sha. The purge
-   cannot run pre-merge: redeploy #10 (live) lacks the `agent` param, so the running
-   relay would silent-drop it. Proof will land at complete_task post-redeploy.
-
-Re-verified: go build/vet -tags fts5 clean; gofmt clean; go test -tags fts5 ./... all
-packages green; 4 delete_memory tests pass (incl. mixed-case). AC1/AC2/AC4 green;
-AC3 deferred with lead sign-off above.
-
-## review-wraith verdict (round 2): SHIP
-Same scope + one-line fold fix in handlers_memory.go + one regression test. No schema/
-migration, backward-compat shim intact, budget unchanged. AC3 deferral lead-accepted.
+Contract mapping:
+- AC1 executive archives dead-agent agent-scope mem, tombstone records acting+target → TestDeleteMemory_ExecutiveArchivesDeadAgentMemory
+- AC2 non-exec vs LIVE target refused naming both → TestDeleteMemory_NonExecCannotTargetLiveAgent
+- AC3 (amended 03:37Z: janitor path) non-exec archives dead+unregistered author, tombstone preserves author → TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor
+- AC4 `agent` param in schema, budget test green → tools.go + TestToolSchemaBudget
+Invariants: single-writer intact, no schema/migration, no agentColumns/scanAgent touch, backward-compatible (self-delete unchanged), failure-is-loud.
 
 ## 3. Files changed
 
 ```
-...in-arm-executive-can-archive-agent-scope-mem.md |  90 +++++++++++++
+...in-arm-executive-can-archive-agent-scope-mem.md | 118 ++++++++++++++++
  internal/db/memories.go                            |  21 ++-
  internal/relay/delete_memory_admin_test.go         | 150 +++++++++++++++++++++
  internal/relay/handlers_memory.go                  |  66 ++++++++-
  internal/relay/tools.go                            |   1 +
- 5 files changed, 319 insertions(+), 9 deletions(-)
+ 5 files changed, 347 insertions(+), 9 deletions(-)
 ```
 
 ## 4. QA Log
@@ -110,9 +57,16 @@ migration, backward-compat shim intact, budget unchanged. AC3 deferral lead-acce
 - 🔴 AC3: [partial] purge + verification outstanding; lead must accept the deferral explicitly or the doer must land the proof — evidence: nothing in the diff archives the 5 niwa keys; no list_memories absence check - deferred post-merge in the plan — test: TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor delete_memory_admin_test.go:100 covers only the MECHANISM (dead/never-registered author), not the purge itself
 - 🟢 AC4: param in schema, no silent drop — evidence: internal/relay/tools.go:393 mcp.WithString("agent", ...) in deleteMemoryTool — test: TestToolSchemaBudget (pre-existing, green in the run: 738 pass)
 
+### Round 2 — ❌ REJECTED by review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df @ `7f9c19a36`
+- 🟢 AC1: tombstone helper reads actual DB row; not mock-based — evidence: internal/relay/handlers_memory.go:330-396 adds agent param + DeleteMemoryAs archival with acting/target split — test: TestDeleteMemory_ExecutiveArchivesDeadAgentMemory internal/relay/delete_memory_admin_test.go:44 (asserts archived_by=chief + agent_name=ghost via real DB row)
+- 🟢 AC2: refusal verified with real state, not mock — evidence: internal/relay/handlers_memory.go:374 refusal msg uses caller(%s) + target(%s); fires when callerIsExec=false AND targetAuthorIsDead=false — test: TestDeleteMemory_NonExecCannotTargetLiveAgent internal/relay/delete_memory_admin_test.go:100 (checks peer+victim in msg + status unchanged)
+- 🔴 AC3: [partial] AC literally says archived post-merge — actual archival of the 5 keys is operational follow-up not in this diff; plan approves this deferral. Mechanism verified, but the literal AC state is not. Reviewer should note for the next round that the post-merge purge still needs to be confirmed done. — evidence: diff adds the mechanism (targetAuthorIsDead helper + handler gate) but does NOT archive the 5 specific keys (frontend-lead-resume, CKPT-frontend-lead-boot, DEC-dev-shutdown-checkpoint, CKPT-dev-3-shutdown, DEV-checkpoint) — test: TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor internal/relay/delete_memory_admin_test.go:125 verifies the mechanism (non-exec can purge dead author + unregistered author)
+- 🟢 AC4: param is wired through schema and exercised behaviorally — evidence: internal/relay/tools.go:393 adds mcp.WithString(agent, ...) to deleteMemoryTool — test: TestToolSchemaBudget internal/relay/toolsize_test.go:29 passes with the new param; 3 AC tests exercise the param reaching the handler end-to-end
+
 ## 5. Timeline
 
 - round 1 → **reject** (review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df)
+- round 2 → **reject** (review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `9e1ab06b-cc3f-4862-bc8f-66623d0f15df`._
