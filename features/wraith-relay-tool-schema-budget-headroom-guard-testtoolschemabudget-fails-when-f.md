@@ -1,0 +1,62 @@
+# [wraith/relay] tool-schema budget HEADROOM guard: TestToolSchemaBudget fails when free margin under cap drops below 2 KiB
+
+## Team : wraith-backend (tsukumo)
+## Branch : fix/schema-headroom-guard (from main)
+## Relay task : 521700ea-2d6f-4506-8535-e30cea9926cd
+## Status : 🔵 SUBMITTED
+
+## 1. Product Brief
+
+### Acceptance Criteria
+- [ ] 1. AC1 named test: TestToolSchemaBudget fails when the serialized registry total exceeds toolSchemaBudgetBytes - 2048; revert-check = temporarily set toolSchemaHeadroomBytes to a value that makes today's ~52.4 KB total exceed the line and the test goes red naming remaining bytes; restore and it is green
+- [ ] 2. AC2 in-diff: failure message and the t.Logf verdict line both cite total bytes, cap, and remaining margin bytes (gate reviewer quotes the margin from the test log)
+- [ ] 3. AC3 regression guard: existing hard-cap assertion (total > 57344) and per-tool 2300-byte assertion stay byte-identical; toolSchemaBudgetBytes value unchanged in this PR
+- [ ] 4. AC4 scope: diff touches internal/relay/toolsize_test.go (+ at most one helper file); no tool descriptions edited
+
+## 2. Root cause & decisions
+
+# [wraith/relay] tool-schema budget headroom guard
+
+Task: 521700ea-2d6f-4506-8535-e30cea9926cd
+
+ROOT_CAUSE: TestToolSchemaBudget only fired at the hard cap (toolSchemaBudgetBytes=57344). The cap alone catches a regression only after all the margin is already spent — pre-O1 (PR #170) the free margin was 125 B, so the very next unrelated tool or param-description addition would have failed the entire MCP tool listing for every connected agent, with no earlier warning. The margin was never itself asserted.
+
+DECISION: Add a headroom gate. `toolSchemaHeadroomBytes = 2048` alongside the cap; after the existing hard-cap check, `t.Errorf` when `total > toolSchemaBudgetBytes - toolSchemaHeadroomBytes`, naming total/cap/remaining bytes and the fix (trim descriptions or raise the cap deliberately in the same PR). The `t.Logf` verdict line now cites `margin <N> bytes` so the gate reviewer can quote it. A PR that eats the margin is now caught while >=2 KiB remains, so the next unrelated addition can never be the one that breaks tool listing fleet-wide.
+
+Scope: single file, `internal/relay/toolsize_test.go`. No tool descriptions edited. `toolSchemaBudgetBytes` unchanged. Hard-cap assertion and per-tool 2300-byte assertion byte-identical.
+
+Verification: `go test -tags fts5 ./...` green. Current: 76 tools, 51917 bytes, margin 5427 bytes (> 2048 headroom, green). Revert-check: setting headroom to 8192 turns the test red with a message naming 5427 remaining bytes; restored to 2048 and green.
+
+Rejected alternatives:
+- Percent-based margin (e.g. fail below 10% free): less legible than a fixed byte figure the reviewer can read straight off the log; a byte count maps directly to "one fat description away".
+- Shrinking the cap to 54 KiB instead of a separate headroom const: conflates the hard limit with the warning line and forces a cap edit every time real surface lands. The comment explicitly forbids shrinking headroom to pass.
+
+Doctrine: never shrink headroom to pass; raise the cap deliberately in the same PR when a genuinely new surface lands.
+
+## review-wraith verdict: SHIP
+Scope: internal/relay/toolsize_test.go (test-only) + .niwa-decision.md
+Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (agent-relay/internal/relay 15.2s green; full ./... green)
+
+BLOCKERS (must fix before merge):
+- none
+
+NITS (non-blocking):
+- none. Test-only change: no production code, no schema/DB/migration, no writer, no handler/messaging/auth, no updater. Sections 2–9 not applicable. Hard-cap + per-tool 2300-byte assertions and toolSchemaBudgetBytes value byte-identical; scope confined to the budget test. Revert-check confirmed red-on-regression (headroom 8192 → red naming 5427 remaining bytes) then restored to 2048 (green, margin 5427).
+
+## 3. Files changed
+
+```
+.niwa-decision.md               | 27 +++++++++++++++++++++++++++
+ internal/relay/toolsize_test.go | 14 +++++++++++++-
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+```
+
+## 4. QA Log
+
+_(no review round yet)_
+
+## 5. Timeline
+
+
+---
+_Auto-assembled by the niwa scribe from the Q&A gate. Task `521700ea-2d6f-4506-8535-e30cea9926cd`._
