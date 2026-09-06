@@ -922,7 +922,23 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		if existing == nil {
 			return toolResultError(fmt.Sprintf("task not found: %s", taskID)), nil
 		}
-		if agent != existing.DispatchedBy {
+		// A self-dispatched task (dispatcher == assignee) would sail the doer
+		// straight through the dispatcher check below and let it rewrite its own
+		// contract — self-grading. That is the exact hole DEC-wraith-self-grading-
+		// guard-1 closes (finding bf920f6c: a self-dispatched doer legally cut his
+		// own acceptance_criteria 5→2, then the relay REFUSED his lead's restore
+		// because the doer WAS the dispatcher). On a self-dispatched task the
+		// contract fields therefore need a sign-off from ABOVE the doer — an
+		// executive, or an agent in the doer's reports_to lead chain — never the
+		// doer alone.
+		selfDispatched := existing.AssignedTo != nil && strings.EqualFold(existing.DispatchedBy, *existing.AssignedTo)
+		if selfDispatched {
+			if !h.callerIsContractSigner(project, agent, existing) {
+				return permissionError(CodeForbidden, fmt.Sprintf(
+					"goal/acceptance_criteria/dod/verify_cmd on a self-dispatched task can't be rewritten by the doer who dispatched it to itself (%s) — that is self-grading. It needs sign-off from above you: an executive, or an agent in your reports_to lead chain (DEC-wraith-self-grading-guard-1)",
+					agent)), nil
+			}
+		} else if agent != existing.DispatchedBy {
 			return permissionError(CodeForbidden, fmt.Sprintf(
 				"goal/acceptance_criteria/dod/verify_cmd can only be updated by this task's dispatcher (%s), not the assignee (%s) — re-dispatch instead of re-scoping your own contract",
 				existing.DispatchedBy, agent)), nil
@@ -1070,11 +1086,24 @@ func (h *Handlers) callerMayReassign(project, caller string, task *models.Task) 
 	if strings.EqualFold(caller, task.DispatchedBy) {
 		return true
 	}
+	return h.callerIsContractSigner(project, caller, task)
+}
+
+// callerIsContractSigner reports whether caller is a legitimate sign-off
+// authority ABOVE the doer of this task: an executive, or an agent in the doer's
+// reports_to lead chain (an ancestor lead). The doer itself is never a signer —
+// that is the point on a self-dispatched task, where the doer is also the
+// dispatcher (DEC-wraith-self-grading-guard-1). Unlike callerMayReassign it
+// carries NO dispatcher shortcut, so a self-dispatched doer cannot use it to
+// clear its own contract. Agent names are stored lowercase, so comparisons fold
+// case. Bounded by a seen-set against a cyclic reports_to chain.
+func (h *Handlers) callerIsContractSigner(project, caller string, task *models.Task) bool {
+	if caller == "" {
+		return false
+	}
 	if ag, _ := h.db.GetAgent(project, strings.ToLower(caller)); ag != nil && ag.IsExecutive {
 		return true
 	}
-	// Walk reports_to up from the doer; the caller is authorised if it is a lead
-	// (ancestor) of the doer. Bounded by a seen-set against a cyclic chain.
 	cur := strings.ToLower(taskHolder(task))
 	if cur == "" && task.AssignedTo != nil {
 		cur = strings.ToLower(*task.AssignedTo)
