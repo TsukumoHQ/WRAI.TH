@@ -26,7 +26,7 @@ DECISION: Add a narrow executive arm at the `agent == nil` seam in `guardIdentit
 
 Scope: `internal/relay/toolset.go` + one new test file `internal/relay/project_lifecycle_exec_test.go`.
 
-Verification: `go build -tags fts5 ./...` OK, `go vet -tags fts5 ./internal/relay` OK, `gofmt -l` clean, `go test -tags fts5 ./...` green.
+Verification: `go build -tags fts5 ./...` OK, `go vet -tags fts5 ./internal/relay` OK, `gofmt -l` clean, `go test -tags fts5 ./...` green (rebased onto current main, full suite green).
 - AC1: TestLifecycleArm_RemoteExecutiveArchives — exec in 'home' archives 'target-b' (unregistered there), audit row names actor+target+home. TestLifecycleArm_RemoteExecutiveArchivesDefault — target may be 'default'.
 - AC1 revert-check: neutering the `projectLifecycleTools` branch (`if false && …`) turns TestLifecycleArm_RemoteExecutiveArchives red with the exact "is not registered in project" refusal; restored → green.
 - AC2: TestLifecycleArm_NonExecutiveRefused — non-exec refused with unchanged text, no audit row.
@@ -46,7 +46,7 @@ Security note (for the reviewer): the arm skips the best-effort session-binding 
 
 ## review-wraith verdict: SHIP-WITH-NITS
 Scope: internal/relay/toolset.go (guardIdentity seam + two helpers) + internal/relay/project_lifecycle_exec_test.go (new)
-Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (full ./... green; internal/relay 9.9s)
+Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (full ./... green after rebase onto current main)
 
 BLOCKERS (must fix before merge):
 - none
@@ -60,18 +60,26 @@ Invariants checked: single-writer intact (only the existing best-effort RecordAu
 ## 3. Files changed
 
 ```
-.niwa-decision.md                             |  40 ++++++
- internal/relay/project_lifecycle_exec_test.go | 180 ++++++++++++++++++++++++++
- internal/relay/toolset.go                     |  52 ++++++++
- 3 files changed, 272 insertions(+)
+...tive-arm-archive-unarchive-delete-project-by.md |  77 +++++++++
+ internal/relay/project_lifecycle_exec_test.go      | 180 +++++++++++++++++++++
+ internal/relay/toolset.go                          |  52 ++++++
+ 3 files changed, 309 insertions(+)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-05936947-cfad-4509-9860-527d35157a03 @ `562342a89`
+- 🟢 AC1: AC1 audit row inspected via lifecycleAdminAudit helper, asserts actor=chief, project=target-b, reason contains home — evidence: internal/relay/toolset.go:445-455 adds projectLifecycleTools arm; testLogsTestLifecycleArm_RemoteExecutiveArchivesDefault PASS in 0.02s; revert-check: neutering `if projectLifecycleTools` to `if false && projectLifecycleTools` in /tmp copy turns the test red with exact `agent "chief" is not registered in project "target-b" — call register_agent first.` — test: TestLifecycleArm_RemoteExecutiveArchives + TestLifecycleArm_RemoteExecutiveArchivesDefault internal/relay/project_lifecycle_exec_test.go:38-89
+- 🟢 AC2: non-executive (worker) refused exactly as before, no arm audit, no archive side-effect — evidence: internal/relay/toolset.go:456 unchanged refusal text `agent %q is not registered in project %q — call register_agent first.`; expectNotRegistered helper asserts containment; archive NOT called (IsProjectArchived false) and zero arm audit rows — test: TestLifecycleArm_NonExecutiveRefused internal/relay/project_lifecycle_exec_test.go:91-105
+- 🟢 AC3: regression guard green; registered-caller path byte-identical (arm never fires) — evidence: TestLifecycleArm_RegisteredCallerUnchanged: caller registered in target takes agent!=nil path, archives successfully, zero arm audit rows; existing TestArchiveTaskRESTSuccessThenConflict + TestArchivedProjectRefusesRegisterDispatchSendClaim + TestArchiveBoard* + TestArchiveTasks all PASS pre-existing on main and still PASS in branch — test: TestLifecycleArm_RegisteredCallerUnchanged internal/relay/project_lifecycle_exec_test.go:108-124 + existing TestArchiveTaskREST* / TestArchivedProject* / TestArchiveBoard* / TestArchiveTasks internal/relay
+- 🟢 AC4: unarchive+delete take same arm; delete handler still enforces archived-first — evidence: TestLifecycleArm_UnarchiveAndDelete verifies all three: remote exec unarchives target-u (was archived), deletes archived target-d (purges), refuses delete on non-archived target-active with exact `archive_project it first` text — test: TestLifecycleArm_UnarchiveAndDelete internal/relay/project_lifecycle_exec_test.go:127-178
+- 🟢 AC5: scope contained; refusal paths byte-identical — evidence: git diff origin/main..fix/project-lifecycle-exec-arm --name-only: only internal/relay/toolset.go + internal/relay/project_lifecycle_exec_test.go (plus .niwa-decision.md + features/*.md scribe artifacts, non-code); grep confirms anonymousRefusedError at line 36 and refuseIfArchived at line 113/418 unchanged vs origin/main; TestRegisterRefusesAnonymousAndDefault PASS + all TestArchivedProject* PASS — test: TestRegisterRefusesAnonymousAndDefault + TestArchivedProject* internal/relay
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-05936947-cfad-4509-9860-527d35157a03)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./... 841 ok; TestLifecycleArm 5/5 ok; revert-check (arm neutered in /tmp copy) makes TestLifecycleArm_RemoteExecutiveArchives fail with exact 'is not registered in project' refusal; TestRegisterRefusesAnonymousAndDefault + archived-project suite green; scope toolset.go + 1 test file; anonymousRefusedError+refuseIfArchived untouched
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `05936947-cfad-4509-9860-527d35157a03`._
