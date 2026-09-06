@@ -1,3 +1,20 @@
+# [wraith/relay] tool-schema budget HEADROOM guard: TestToolSchemaBudget fails when free margin under cap drops below 2 KiB
+
+## Team : wraith-backend (tsukumo)
+## Branch : fix/schema-headroom-guard (from main)
+## Relay task : 521700ea-2d6f-4506-8535-e30cea9926cd
+## Status : 🔵 SUBMITTED
+
+## 1. Product Brief
+
+### Acceptance Criteria
+- [ ] 1. AC1 named test: TestToolSchemaBudget fails when the serialized registry total exceeds toolSchemaBudgetBytes - 2048; revert-check = temporarily set toolSchemaHeadroomBytes to a value that makes today's ~52.4 KB total exceed the line and the test goes red naming remaining bytes; restore and it is green
+- [ ] 2. AC2 in-diff: failure message and the t.Logf verdict line both cite total bytes, cap, and remaining margin bytes (gate reviewer quotes the margin from the test log)
+- [ ] 3. AC3 regression guard: existing hard-cap assertion (total > 57344) and per-tool 2300-byte assertion stay byte-identical; toolSchemaBudgetBytes value unchanged in this PR
+- [ ] 4. AC4 scope: diff touches internal/relay/toolsize_test.go (+ at most one helper file); no tool descriptions edited
+
+## 2. Root cause & decisions
+
 # [wraith/relay] tool-schema budget headroom guard
 
 Task: 521700ea-2d6f-4506-8535-e30cea9926cd
@@ -25,3 +42,21 @@ BLOCKERS (must fix before merge):
 
 NITS (non-blocking):
 - none. Test-only change: no production code, no schema/DB/migration, no writer, no handler/messaging/auth, no updater. Sections 2–9 not applicable. Hard-cap + per-tool 2300-byte assertions and toolSchemaBudgetBytes value byte-identical; scope confined to the budget test. Revert-check confirmed red-on-regression (headroom 8192 → red naming 5427 remaining bytes) then restored to 2048 (green, margin 5427).
+
+## 3. Files changed
+
+```
+.niwa-decision.md               | 27 +++++++++++++++++++++++++++
+ internal/relay/toolsize_test.go | 14 +++++++++++++-
+ 2 files changed, 40 insertions(+), 1 deletion(-)
+```
+
+## 4. QA Log
+
+_(no review round yet)_
+
+## 5. Timeline
+
+
+---
+_Auto-assembled by the niwa scribe from the Q&A gate. Task `521700ea-2d6f-4506-8535-e30cea9926cd`._
