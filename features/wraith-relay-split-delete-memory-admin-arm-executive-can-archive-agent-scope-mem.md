@@ -69,22 +69,50 @@ BLOCKERS (must fix before merge):
 NITS (non-blocking):
 - none. No schema/migration (agentColumns↔scanAgent untouched). DeleteMemory shim keeps the old signature + behaviour byte-identical (existing memories_validity_test still green). New writer path is the existing writerExec guarded UPDATE (RowsAffected checked), not a new/hot writer. Authz is fail-closed + loud (default self, cross-author needs exec-or-dead-target, refusal names both). No inbox/SSE/auth-middleware/updater surface touched. api.go apiDeleteMemory uses DeleteMemoryByID (unrelated) — untouched. Single-lane, cannot red trunk. AC3 purge is post-merge by design (needs the live relay updated).
 
+## Round 2 — reviewer findings addressed
+1. FIXED (real bug): mixed-case `agent` param silently mismatched the lowercase-
+   stored agent_name in the UPDATE — authz folds case (targetAuthorIsDead → GetAgent
+   lowercased) so the permission check passed, but the store WHERE used the raw case
+   and archived nothing. Fix: fold targetAuthor to lowercase at resolution
+   (handlers_memory.go), so a param like "Frontend-Lead" resolves to its row.
+   Regression test: TestDeleteMemory_MixedCaseTargetResolves (agent:"GHOST" archives
+   the "ghost" row).
+2. AC3 (purge 5 niwa keys) — deferral ACCEPTED BY LEAD: wraith-cto msg 7972dd68
+   (03:24:55Z) explicitly agreed the sequence: gate-merge → cto-tsukumo redeploy #11
+   → doer purges the 5 keys + list_memories check + complete_task with sha. The purge
+   cannot run pre-merge: redeploy #10 (live) lacks the `agent` param, so the running
+   relay would silent-drop it. Proof will land at complete_task post-redeploy.
+
+Re-verified: go build/vet -tags fts5 clean; gofmt clean; go test -tags fts5 ./... all
+packages green; 4 delete_memory tests pass (incl. mixed-case). AC1/AC2/AC4 green;
+AC3 deferred with lead sign-off above.
+
+## review-wraith verdict (round 2): SHIP
+Same scope + one-line fold fix in handlers_memory.go + one regression test. No schema/
+migration, backward-compat shim intact, budget unchanged. AC3 deferral lead-accepted.
+
 ## 3. Files changed
 
 ```
-internal/db/memories.go                    |  21 ++++-
- internal/relay/delete_memory_admin_test.go | 126 +++++++++++++++++++++++++++++
- internal/relay/handlers_memory.go          |  59 ++++++++++++--
- internal/relay/tools.go                    |   1 +
- 4 files changed, 198 insertions(+), 9 deletions(-)
+...in-arm-executive-can-archive-agent-scope-mem.md |  90 +++++++++++++
+ internal/db/memories.go                            |  21 ++-
+ internal/relay/delete_memory_admin_test.go         | 150 +++++++++++++++++++++
+ internal/relay/handlers_memory.go                  |  66 ++++++++-
+ internal/relay/tools.go                            |   1 +
+ 5 files changed, 319 insertions(+), 9 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ❌ REJECTED by review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df @ `cb1376078`
+- 🟢 AC1: tombstone records both sides — evidence: handlers_memory.go:337-360 + db/memories.go:454-487 (archived_by=actingAgent, agent_name=targetAuthor); ran the test — test: TestDeleteMemory_ExecutiveArchivesDeadAgentMemory internal/relay/delete_memory_admin_test.go:41 - passes; reverting DeleteMemoryAs makes the UPDATE match agent_name=chief -> 'memory not found'
+- 🟢 AC2: fail-closed loud refusal — evidence: handlers_memory.go:352-358 CodeForbidden naming caller+target; memory untouched asserted — test: TestDeleteMemory_NonExecCannotTargetLiveAgent internal/relay/delete_memory_admin_test.go:74 - passes
+- 🔴 AC3: [partial] purge + verification outstanding; lead must accept the deferral explicitly or the doer must land the proof — evidence: nothing in the diff archives the 5 niwa keys; no list_memories absence check - deferred post-merge in the plan — test: TestDeleteMemory_JanitorArchivesDeadAndUnregisteredAuthor delete_memory_admin_test.go:100 covers only the MECHANISM (dead/never-registered author), not the purge itself
+- 🟢 AC4: param in schema, no silent drop — evidence: internal/relay/tools.go:393 mcp.WithString("agent", ...) in deleteMemoryTool — test: TestToolSchemaBudget (pre-existing, green in the run: 738 pass)
 
 ## 5. Timeline
 
+- round 1 → **reject** (review-9e1ab06b-cc3f-4862-bc8f-66623d0f15df)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `9e1ab06b-cc3f-4862-bc8f-66623d0f15df`._
