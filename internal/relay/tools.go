@@ -3,12 +3,12 @@ package relay
 import "github.com/mark3labs/mcp-go/mcp"
 
 // asParam is added to every tool that uses agent identity.
-var asParam = mcp.WithString("as", mcp.Description("Act as this agent (overrides the identity from the connection URL)."))
+var asParam = mcp.WithString("as", mcp.Description("Acting agent name."))
 
 // projectParam is added to every tool that needs project scoping.
 // It allows overriding the default ?project= from the URL,
 // so agents can switch projects without changing the MCP connection.
-var projectParam = mcp.WithString("project", mcp.Description("Project namespace (overrides the connection URL default)."))
+var projectParam = mcp.WithString("project", mcp.Description("Project namespace."))
 
 // formatParam is the shared output-format selector for list/get tools that can
 // render either a compact markdown table (default, ~half the tokens) or JSON.
