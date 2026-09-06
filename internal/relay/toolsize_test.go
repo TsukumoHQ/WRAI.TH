@@ -22,6 +22,14 @@ import (
 // so the cap moves deliberately in-PR.
 const toolSchemaBudgetBytes = 57344
 
+// Headroom below the hard cap. The cap alone only fails after the margin is
+// already spent — before O1 (PR #170) the margin was 125 B, one param
+// description away from the whole tool list failing for every agent. Failing
+// while >=2 KiB remains means the PR that eats the margin is caught, not the
+// next unrelated tool/param addition. Raise the cap deliberately in the same
+// PR when a genuinely new surface lands; never shrink headroom to pass.
+const toolSchemaHeadroomBytes = 2048
+
 // Discovery mode replaces the full list with two tools; their combined
 // schema must stay tiny or the mode loses its point.
 const discoveryPairBudgetBytes = 2500
@@ -39,9 +47,13 @@ func TestToolSchemaBudget(t *testing.T) {
 			t.Errorf("tool %s schema is %d bytes (max 2300) — trim its descriptions", rt.Tool.Name, len(b))
 		}
 	}
-	t.Logf("tool schemas: %d tools, %d bytes (~%d tokens)", len(h.toolRegistry()), total, total/4)
+	margin := toolSchemaBudgetBytes - total
+	t.Logf("tool schemas: %d tools, %d bytes (~%d tokens), margin %d bytes", len(h.toolRegistry()), total, total/4, margin)
 	if total > toolSchemaBudgetBytes {
 		t.Errorf("total tool schema size %d bytes exceeds budget %d — trim descriptions", total, toolSchemaBudgetBytes)
+	}
+	if total > toolSchemaBudgetBytes-toolSchemaHeadroomBytes {
+		t.Errorf("total tool schema size %d bytes leaves %d bytes under cap %d — below the %d-byte headroom; trim descriptions or raise the cap deliberately in this PR", total, margin, toolSchemaBudgetBytes, toolSchemaHeadroomBytes)
 	}
 }
 
