@@ -235,10 +235,19 @@ func (d *DB) RemoveTeamMember(teamID, agentName string) error {
 	return nil
 }
 
+// GetTeamMembers returns a team's active members, excluding any whose agent row
+// has been soft-deleted (status='deleted'). The deleted agent's team_members row
+// is left in place (DeleteAgent keeps it, audit trail intact) — the NOT EXISTS
+// guard filters it out of the roster without touching it. A member with no
+// matching agent row at all is kept: the guard removes only positively-deleted
+// members, never a bare/unregistered one.
 func (d *DB) GetTeamMembers(teamID string) ([]models.TeamMember, error) {
 	rows, err := d.ro().Query(
 		`SELECT team_id, agent_name, project, role, joined_at, left_at
-		 FROM team_members WHERE team_id = ? AND left_at IS NULL ORDER BY role, agent_name`, teamID,
+		 FROM team_members WHERE team_id = ? AND left_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM agents a
+		     WHERE a.name = team_members.agent_name AND a.project = team_members.project AND a.status = 'deleted')
+		 ORDER BY role, agent_name`, teamID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get team members: %w", err)
@@ -256,10 +265,14 @@ func (d *DB) GetTeamMembers(teamID string) ([]models.TeamMember, error) {
 	return members, rows.Err()
 }
 
-// GetTeamMemberNames returns active member names for a team.
+// GetTeamMemberNames returns active member names for a team, excluding soft-deleted
+// agents. This feeds team-broadcast delivery, so a deleted agent stops receiving
+// team messages — consistent with delete_agent's "no more messages" contract.
 func (d *DB) GetTeamMemberNames(teamID string) ([]string, error) {
 	rows, err := d.ro().Query(
-		`SELECT agent_name FROM team_members WHERE team_id = ? AND left_at IS NULL`, teamID,
+		`SELECT agent_name FROM team_members WHERE team_id = ? AND left_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM agents a
+		     WHERE a.name = team_members.agent_name AND a.project = team_members.project AND a.status = 'deleted')`, teamID,
 	)
 	if err != nil {
 		return nil, err
@@ -284,6 +297,8 @@ func (d *DB) GetAgentTeams(project, agentName string) ([]models.Team, error) {
 		 FROM teams t
 		 JOIN team_members tm ON t.id = tm.team_id
 		 WHERE tm.agent_name = ? AND tm.project = ? AND tm.left_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM agents a
+		     WHERE a.name = tm.agent_name AND a.project = tm.project AND a.status = 'deleted')
 		 ORDER BY t.name`,
 		agentName, project,
 	)
@@ -537,6 +552,8 @@ func (d *DB) GetAllTeamMemberships() ([]TeamMembershipInfo, error) {
 		 FROM team_members tm
 		 JOIN teams t ON tm.team_id = t.id
 		 WHERE tm.left_at IS NULL
+		   AND NOT EXISTS (SELECT 1 FROM agents a
+		     WHERE a.name = tm.agent_name AND a.project = tm.project AND a.status = 'deleted')
 		 ORDER BY tm.agent_name, t.name`,
 	)
 	if err != nil {
