@@ -1,3 +1,21 @@
+# [wraith/relay] project-lifecycle executive arm: archive/unarchive/delete_project by an executive registered elsewhere — unblocks archiving the retired 'default' project
+
+## Team : wraith-backend (tsukumo)
+## Branch : fix/project-lifecycle-exec-arm (from main)
+## Relay task : 05936947-cfad-4509-9860-527d35157a03
+## Status : 🔵 SUBMITTED
+
+## 1. Product Brief
+
+### Acceptance Criteria
+- [ ] 1. AC1 named test: an is_executive agent registered only in project A calls archive_project project=B (no registration in B, B may be 'default') -> result archived:true, and an audit_log row Action='project.lifecycle.admin' names actor + target project + home project; revert-check: removing the executive arm makes the test fail with the 'is not registered in project' refusal
+- [ ] 2. AC2 named test: a NON-executive agent registered only in A calling archive_project project=B is refused with the existing 'is not registered in project' text — refusal text unchanged
+- [ ] 3. AC3 named test: caller registered in the target project archives as today (regression guard, path unchanged); existing archived_project_test.go + projects_archive_test.go stay green
+- [ ] 4. AC4 named test: unarchive_project and delete_project take the same arm (delete_project on an archived target by a remote executive succeeds; on a non-archived target still refuses 'archive_project it first')
+- [ ] 5. AC5 scope: diff touches internal/relay/toolset.go + one test file only; register_agent anonymous/default refusal and refuseIfArchived untouched
+
+## 2. Root cause & decisions
+
 # [wraith/relay] project-lifecycle executive arm
 
 Task: 05936947-cfad-4509-9860-527d35157a03
@@ -38,3 +56,22 @@ NITS (non-blocking):
 - callerIsActiveExecutive is O(projects-of-caller) read-pool lookups; lifecycle tools are rare admin ops so this is not a hot path. No caching added on purpose (staleness would be worse than a few RO reads).
 
 Invariants checked: single-writer intact (only the existing best-effort RecordAudit writer path is used; lookups are read-pool). agentColumns/scanAgent untouched. No schema/migration. refuseIfArchived + anonymousRefusedError byte-identical. No new MCP tool; registry unchanged. Existing archived_project_test.go green.
+
+## 3. Files changed
+
+```
+.niwa-decision.md                             |  40 ++++++
+ internal/relay/project_lifecycle_exec_test.go | 180 ++++++++++++++++++++++++++
+ internal/relay/toolset.go                     |  52 ++++++++
+ 3 files changed, 272 insertions(+)
+```
+
+## 4. QA Log
+
+_(no review round yet)_
+
+## 5. Timeline
+
+
+---
+_Auto-assembled by the niwa scribe from the Q&A gate. Task `05936947-cfad-4509-9860-527d35157a03`._
