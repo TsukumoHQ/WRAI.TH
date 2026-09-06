@@ -892,6 +892,51 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
+	// Typed-field validation (silent-drop fix, task 88510cb5). GetString silently
+	// falls back to "" when an arg is present but the wrong JSON type, so a
+	// mistyped value used to be DROPPED with a 200 + bumped last_activity_at and
+	// no error (live repro 3ad80aae: acceptance_criteria as a native array kept
+	// the old ACs and dropped the progress_note in the same call). Refuse every
+	// string field that is present with a non-string value — atomically, BEFORE
+	// any write, naming the field and the expected type. acceptance_criteria
+	// additionally accepts a native array of strings, coerced to its canonical
+	// JSON-string form, for parity with batch_dispatch_tasks' ergonomics.
+	args := req.GetArguments()
+	for _, f := range []string{"title", "description", "priority", "board_id", "assigned_to", "profile_slug", "progress_note", "goal", "dod", "verify_cmd"} {
+		if raw, given := args[f]; given {
+			if _, ok := raw.(string); !ok {
+				return validationError(CodeInvalidArgument, fmt.Sprintf(
+					"%s must be a string (got %#v)", f, raw)), nil
+			}
+		}
+	}
+	var acOverride *string
+	if raw, given := args["acceptance_criteria"]; given {
+		switch v := raw.(type) {
+		case string:
+			// A JSON-string value keeps the existing JSON-array validation below.
+		case []any:
+			items := make([]string, 0, len(v))
+			for i, el := range v {
+				s, ok := el.(string)
+				if !ok {
+					return validationError(CodeInvalidArgument, fmt.Sprintf(
+						"acceptance_criteria[%d] must be a string (got %#v) — the array is neither coerced nor dropped", i, el)), nil
+				}
+				items = append(items, s)
+			}
+			canon, mErr := json.Marshal(items)
+			if mErr != nil {
+				return validationError(CodeInvalidArgument, fmt.Sprintf("acceptance_criteria could not be encoded: %v", mErr)), nil
+			}
+			s := string(canon)
+			acOverride = &s
+		default:
+			return validationError(CodeInvalidArgument, fmt.Sprintf(
+				"acceptance_criteria must be a JSON string or an array of strings (got %#v)", raw)), nil
+		}
+	}
+
 	assignedTo := optionalString(strings.TrimSpace(req.GetString("assigned_to", "")))
 	profileSlug := optionalString(strings.TrimSpace(req.GetString("profile_slug", "")))
 
@@ -901,7 +946,10 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	boardID := optionalString(req.GetString("board_id", ""))
 	progressNote := req.GetString("progress_note", "")
 	goal := optionalString(req.GetString("goal", ""))
-	acceptanceCriteria := optionalString(req.GetString("acceptance_criteria", ""))
+	acceptanceCriteria := acOverride
+	if acceptanceCriteria == nil {
+		acceptanceCriteria = optionalString(req.GetString("acceptance_criteria", ""))
+	}
 	dod := optionalString(req.GetString("dod", ""))
 	verifyCmd := optionalString(req.GetString("verify_cmd", ""))
 
