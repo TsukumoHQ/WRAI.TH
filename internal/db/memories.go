@@ -437,6 +437,21 @@ func (d *DB) ListBootMemories(project, agentName string, limit int) ([]models.Me
 // surface the tombstone rather than an unexplained empty result. An optional
 // reason overrides the default "deleted".
 func (d *DB) DeleteMemory(project, agentName, key, scope string, reason ...string) error {
+	return d.DeleteMemoryAs(project, agentName, agentName, key, scope, reason...)
+}
+
+// DeleteMemoryAs archives a memory while recording BOTH sides of the tombstone:
+// actingAgent becomes archived_by (WHO ran the delete), and for agent scope
+// targetAuthor selects WHOSE memory is archived (the agent_name dimension). When
+// targetAuthor == actingAgent this is the ordinary self-delete (the DeleteMemory
+// shim). A distinct targetAuthor is the admin arm — an executive, or the janitor
+// clearing a dead agent's leftovers, archiving another author's agent-scope
+// memory — so the row's agent_name (the original author) stays intact while
+// archived_by names who reaped it. Authorization for a cross-author target is the
+// caller's (handler's) responsibility; this store call only wires the provenance.
+// For project/global scope there is no agent_name dimension, so targetAuthor is
+// irrelevant and only archived_by (actingAgent) is recorded.
+func (d *DB) DeleteMemoryAs(project, actingAgent, targetAuthor, key, scope string, reason ...string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	why := "deleted"
 	if len(reason) > 0 && reason[0] != "" {
@@ -449,13 +464,13 @@ func (d *DB) DeleteMemory(project, agentName, key, scope string, reason ...strin
 	switch scope {
 	case "agent":
 		query = `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE key = ? AND scope = 'agent' AND project = ? AND agent_name = ? AND archived_at IS NULL`
-		args = []any{now, agentName, why, key, project, agentName}
+		args = []any{now, actingAgent, why, key, project, targetAuthor}
 	case "project":
 		query = `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE key = ? AND scope = 'project' AND project = ? AND archived_at IS NULL`
-		args = []any{now, agentName, why, key, project}
+		args = []any{now, actingAgent, why, key, project}
 	case "global":
 		query = `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE key = ? AND scope = 'global' AND archived_at IS NULL`
-		args = []any{now, agentName, why, key}
+		args = []any{now, actingAgent, why, key}
 	default:
 		return fmt.Errorf("invalid scope: %s", scope)
 	}

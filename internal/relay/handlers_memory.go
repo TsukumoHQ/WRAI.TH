@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -329,17 +330,63 @@ func (h *Handlers) HandleDeleteMemory(ctx context.Context, req mcp.CallToolReque
 	scope := req.GetString("scope", "project")
 	reason := req.GetString("reason", "")
 
-	if err := h.db.DeleteMemory(project, agent, key, scope, reason); err != nil {
+	// `agent` is the OPTIONAL target author (agent scope only): the admin arm that
+	// lets an executive — or anyone clearing a dead agent's leftovers — archive
+	// another author's agent-scope memory (a self-delete resolves agent_name to
+	// the caller, which cannot reach a departed agent's rows). Default: the caller
+	// itself, i.e. the ordinary self-delete.
+	targetAuthor := strings.TrimSpace(req.GetString("agent", ""))
+	if targetAuthor == "" {
+		targetAuthor = agent
+	}
+	if !strings.EqualFold(targetAuthor, agent) {
+		// Cross-author delete. Only agent scope carries an agent_name dimension;
+		// on project/global the `agent` param would silently do nothing, so refuse
+		// loudly rather than pretend.
+		if scope != "agent" {
+			return toolResultError(fmt.Sprintf(
+				"the `agent` target (%s) only applies to scope=agent — %s memories have no per-author dimension", targetAuthor, scope)), nil
+		}
+		// Gate: permitted iff the caller is an executive, OR the target author is
+		// no longer a live agent (inactive/deactivated/deleted, or never registered
+		// — e.g. an anonymous author). A non-executive aimed at another LIVE agent
+		// is refused loudly, naming both (founder silent-failure theme).
+		caller, _ := h.db.GetAgent(project, strings.ToLower(agent))
+		callerIsExec := caller != nil && caller.IsExecutive
+		if !callerIsExec && !targetAuthorIsDead(h, project, targetAuthor) {
+			return permissionError(CodeForbidden, fmt.Sprintf(
+				"delete_memory: %s cannot archive the agent-scope memory of the LIVE agent %s — only an executive may target another active agent's memory (the target must be inactive/deactivated otherwise)",
+				agent, targetAuthor)), nil
+		}
+	}
+
+	if err := h.db.DeleteMemoryAs(project, agent, targetAuthor, key, scope, reason); err != nil {
 		return toolResultError(fmt.Sprintf("failed to delete memory: %v", err)), nil
 	}
 
 	return h.resultJSONTracked(project, agent, "delete_memory", map[string]any{
-		"deleted":  true,
-		"key":      key,
-		"scope":    scope,
-		"archived": true,
-		"note":     "soft-deleted: archived with a tombstone (who/when/why), not removed. Recall still surfaces it flagged.",
+		"deleted":       true,
+		"key":           key,
+		"scope":         scope,
+		"target_author": targetAuthor,
+		"archived_by":   agent,
+		"archived":      true,
+		"note":          "soft-deleted: archived with a tombstone (who/when/why + target author), not removed. Recall still surfaces it flagged.",
 	})
+}
+
+// targetAuthorIsDead reports whether the named author is no longer a live agent,
+// so its leftover agent-scope memories are fair game for any caller to reap. Dead
+// = never registered in this project (GetAgent nil — e.g. an "anonymous" author),
+// or deactivated/removed (status inactive/deleted). An active or merely sleeping
+// agent is LIVE and its memory needs executive sign-off to touch. Names fold case
+// (agents are stored lowercase).
+func targetAuthorIsDead(h *Handlers, project, author string) bool {
+	ag, err := h.db.GetAgent(project, strings.ToLower(author))
+	if err != nil || ag == nil {
+		return true
+	}
+	return ag.Status == "inactive" || ag.Status == "deleted"
 }
 
 func (h *Handlers) HandleResolveConflict(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

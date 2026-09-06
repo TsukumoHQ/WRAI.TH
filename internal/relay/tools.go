@@ -390,6 +390,7 @@ func deleteMemoryTool() mcp.Tool {
 			mcp.Enum("agent", "project", "global"),
 		),
 		mcp.WithString("reason", mcp.Description("Tombstone 'why' (with who/when). Default 'deleted'.")),
+		mcp.WithString("agent", mcp.Description("Target author for an agent-scope memory you did not write (admin arm): archive another agent's leftover. Allowed only if you are an executive, or the target is an inactive/departed agent. Defaults to you (a normal self-delete).")),
 	)
 }
 
