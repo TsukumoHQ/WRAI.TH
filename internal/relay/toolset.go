@@ -218,7 +218,46 @@ func (h *Handlers) toolRegistry() []registeredTool {
 			tools[i].Handler = h.guardIdentity(tools[i].Tool.Name, tools[i].Handler)
 		}
 	}
+	// Routing-param type guard (task 2540e596, sibling of 88510cb5). Wrapped
+	// OUTERMOST — before guardIdentity and every handler — so it runs before any
+	// project/agent/task resolution: a present-but-non-string as/project/task_id
+	// is refused, never GetString-coerced to "" and silently routed to the DEFAULT
+	// identity/project (or an empty task lookup). Applied to EVERY tool: project
+	// steers a read's namespace and `as` its inbox identity just as they steer a
+	// write's. call_tool/discover_tools are registered separately (relay.New) and
+	// carry no routing params at their top level; call_tool's INNER dispatch runs
+	// through these same wrapped handlers, so nested calls are covered.
+	for i := range tools {
+		tools[i].Handler = guardRoutingParamTypes(tools[i].Handler)
+	}
 	return tools
+}
+
+// routingParamKeys steer a call's identity, project namespace, and task target.
+// GetString silently folds a present-but-non-string value (an array, a number, a
+// JSON null) to "", which for these three would resolve the call to the DEFAULT
+// identity/project or an empty task lookup — a silent misroute, a worse failure
+// than the dropped-field family fixed in 88510cb5 because the call would then
+// EXECUTE under the wrong identity or in the wrong project namespace.
+var routingParamKeys = []string{"as", "project", "task_id"}
+
+// guardRoutingParamTypes refuses a present-but-non-string as/project/task_id with
+// INVALID_ARGUMENT naming the param, BEFORE the wrapped handler runs any
+// resolution or write. An ABSENT param is untouched (given == false), so
+// context/registration default-resolution is byte-identical to before.
+func guardRoutingParamTypes(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		args := req.GetArguments()
+		for _, k := range routingParamKeys {
+			if raw, given := args[k]; given {
+				if _, ok := raw.(string); !ok {
+					return validationError(CodeInvalidArgument, fmt.Sprintf(
+						"%s must be a string (got %#v) — it steers identity/project/task routing and is never coerced to a default", k, raw)), nil
+				}
+			}
+		}
+		return next(ctx, req)
+	}
 }
 
 // livenessGatedTools carry the T2 sender-liveness gate: a non-service sender
