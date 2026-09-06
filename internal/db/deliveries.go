@@ -353,13 +353,52 @@ func (d *DB) DeliveryIDsForAgent(project, agent string, messageIDs []string) (ma
 
 // AcknowledgeDeliveryByMessage finds a delivery by message_id + agent and acknowledges it.
 // Used for backward compat with mark_read.
+// MessageNotFoundError is returned by AcknowledgeDeliveryByMessage when the
+// given message_id resolves to NEITHER an open delivery for the agent NOR any
+// message row in the caller's project — so ack_delivery can refuse loudly
+// instead of echoing a bogus success. The silent-success bug: acking a
+// nonexistent id used to return {acknowledged_message_id: <bogus>} while the
+// real unread message stayed unread, so the caller believed the inbox drained.
+type MessageNotFoundError struct{ MessageID string }
+
+func (e *MessageNotFoundError) Error() string {
+	return fmt.Sprintf("no message or delivery found for message_id %q in this project", e.MessageID)
+}
+
 func (d *DB) AcknowledgeDeliveryByMessage(messageID, agentName, project string) error {
 	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
-	_, err := d.writerExec(
+	res, err := d.writerExec(
 		"UPDATE deliveries SET state = 'acknowledged', acknowledged_at = ? WHERE message_id = ? AND to_agent = ? AND project = ? AND state IN ('queued', 'surfaced')",
 		now, messageID, agentName, project,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// An UPDATE that matched an open delivery acks it — the valid path, unchanged.
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		return nil
+	}
+	// Zero rows acked: the UPDATE affects nothing both for a bogus id AND for a
+	// real message whose delivery is already acknowledged. Distinguish them so the
+	// idempotent re-ack of a real id stays a success while an id that resolves
+	// NOTHING in this project (bogus, or a message that only exists in another
+	// project) refuses loudly. Project-scoped by construction, so a cross-project
+	// id is treated as not-found here.
+	var exists bool
+	if err := d.ro().QueryRow(
+		`SELECT EXISTS(
+			SELECT 1 FROM deliveries WHERE message_id = ? AND to_agent = ? AND project = ?
+			UNION ALL
+			SELECT 1 FROM messages   WHERE id = ? AND project = ?
+		)`,
+		messageID, agentName, project, messageID, project,
+	).Scan(&exists); err != nil {
+		return err
+	}
+	if !exists {
+		return &MessageNotFoundError{MessageID: messageID}
+	}
+	return nil
 }
 
 // AcknowledgeConversationDeliveries acks every still-open delivery to an agent

@@ -5,6 +5,7 @@ import (
 	"agent-relay/internal/models"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -505,6 +506,13 @@ func (h *Handlers) HandleAckDelivery(ctx context.Context, req mcp.CallToolReques
 			agent := resolveAgent(ctx, req)
 			project := h.resolveProject(ctx, req)
 			if err := h.db.AcknowledgeDeliveryByMessage(msgID, agent, project); err != nil {
+				// Refuse loudly on an id that resolves nothing in this project,
+				// instead of the old silent-success echo that left the real
+				// unread message unread while the caller believed it was drained.
+				var nf *db.MessageNotFoundError
+				if errors.As(err, &nf) {
+					return validationError(CodeNotFound, fmt.Sprintf("ack_delivery: no message or delivery found for message_id %q in project %q", msgID, project)), nil
+				}
 				return toolResultError(fmt.Sprintf("failed to acknowledge delivery by message: %v", err)), nil
 			}
 			return h.resultJSONTracked(project, agent, "ack_delivery", map[string]any{"acknowledged_message_id": msgID})
