@@ -60,6 +60,42 @@ var archivedRefusedTools = map[string]bool{
 	"claim_task":     true,
 }
 
+// projectLifecycleTools act ON a TARGET project the caller need not be
+// registered in (archive / unarchive / delete). guardIdentity's default rule —
+// the caller must be registered in the resolved (== target) project — makes a
+// retired catch-all like 'default' unarchivable forever, because registration
+// there is refused by design (anonymousRefusedError). These three take the
+// executive arm instead: an active executive registered ANYWHERE may run them,
+// audited. create_project is absent (it is the bootstrap tool, never wrapped).
+var projectLifecycleTools = map[string]bool{
+	"archive_project":   true,
+	"unarchive_project": true,
+	"delete_project":    true,
+}
+
+// callerIsActiveExecutive reports whether `from` holds an ACTIVE, is_executive
+// registration in ANY project, returning that home project. Cross-project
+// lookup by name reuses ProjectsOfAgent + GetAgent — no new query, no wide-table
+// column touched. Used only to grant the project-lifecycle arm to an executive
+// acting on a project they are not registered in; every other caller falls
+// through to guardIdentity's unchanged refusal.
+func (h *Handlers) callerIsActiveExecutive(from string) (string, bool) {
+	projects, err := h.db.ProjectsOfAgent(from)
+	if err != nil {
+		return "", false
+	}
+	for _, p := range projects {
+		a, err := h.db.GetAgent(p, from)
+		if err != nil || a == nil {
+			continue
+		}
+		if a.Status == "active" && a.IsExecutive {
+			return p, true
+		}
+	}
+	return "", false
+}
+
 // archivedProjectError is the TYPED refusal for a write into an archived
 // project. Permission-category, non-retryable: it stays archived until an
 // operator unarchives it, so the client must PARK, not hot-loop.
@@ -401,6 +437,22 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 			}
 		}
 		if agent == nil {
+			// Project-lifecycle executive arm: archive/unarchive/delete_project act
+			// on a target project the caller need not live in, so an active executive
+			// registered elsewhere is allowed (audited). Every other unregistered
+			// caller — including a non-executive — falls through to the unchanged
+			// refusal below.
+			if projectLifecycleTools[toolName] {
+				if home, ok := h.callerIsActiveExecutive(from); ok {
+					_ = h.db.RecordAudit(models.AuditEntry{
+						Action:  "project.lifecycle.admin",
+						Actor:   from,
+						Project: project,
+						Reason:  "executive arm from project " + home,
+					})
+					return next(ctx, req)
+				}
+			}
 			return toolResultError(fmt.Sprintf("agent %q is not registered in project %q — call register_agent first.", from, project)), nil
 		}
 		// Identity binding (best-effort, fail-open): if this MCP connection's
