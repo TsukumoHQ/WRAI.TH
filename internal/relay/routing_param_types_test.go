@@ -115,6 +115,15 @@ func TestRoutingParams_AbsentAndValidUnchanged(t *testing.T) {
 // AC4: task_id present as a non-string on a task tool refuses naming 'task_id'
 // instead of degrading into a NOT_FOUND / empty-id lookup (GetString would coerce
 // it to "" and the handler would report task_id required or not found).
+//
+// The task handlers already short-circuit an EMPTY task_id ("task_id is
+// required"), so asserting only INVALID_ARGUMENT + names-task_id would pass on
+// pre-fix code and pin nothing (round-1 reviewer finding). The distinguishing
+// assertion is the GUARD's own message, "must be a string": pre-fix a coerced ""
+// yields "task_id is required" (the misleading required-error for a value that
+// WAS supplied, just wrong-typed); only guardRoutingParamTypes reports the type.
+// Removing task_id from routingParamKeys therefore fails THIS test — it pins the
+// new code path, not the pre-existing empty-check.
 func TestRoutingParams_TaskIDNonStringRefused(t *testing.T) {
 	h := testHandlers(t)
 	_, _ = h.HandleRegisterAgent(ctx, call(map[string]any{"project": "p1", "name": "dev-a", "role": "dev"}))
@@ -134,5 +143,10 @@ func TestRoutingParams_TaskIDNonStringRefused(t *testing.T) {
 	}
 	if strings.Contains(msg, CodeNotFound) {
 		t.Errorf("a non-string task_id must refuse before the lookup, not report %s: %s", CodeNotFound, msg)
+	}
+	// Pins the guard specifically: the type-refusal message, not the handler's
+	// pre-existing "task_id is required" empty-check (which a coerced "" would hit).
+	if !strings.Contains(msg, "must be a string") {
+		t.Errorf("refusal must be the routing-param type guard (\"must be a string\"), not the pre-existing empty-check, got: %s", msg)
 	}
 }
