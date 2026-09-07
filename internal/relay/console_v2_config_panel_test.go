@@ -1,8 +1,6 @@
 package relay
 
 import (
-	"encoding/json"
-	"net/http"
 	"regexp"
 	"strings"
 	"testing"
@@ -10,7 +8,16 @@ import (
 	"agent-relay/internal/web"
 )
 
-func readCfgAsset(t *testing.T, name string) string {
+// TestV2ConfigPanel* — the S5/T2c contract: the v2 settings panel renders the
+// WHOLE relay configuration surface from the frozen GET /api/settings metadata
+// (T2a: settings_spec.go). The panel is metadata-driven, so its editable set is
+// derived here from the REAL server spec (settingSpecs / writableKeys()), never
+// from writableSettings (ruling A5). The JS-only behaviour (this repo ships no JS
+// runtime under `go test`) is pinned at the source level; everything that can be
+// is exercised against the live handlers (httptest), including the A6 error
+// strings. Each test maps to exactly one acceptance criterion (AC1..AC5).
+
+func readPanelAsset(t *testing.T, name string) string {
 	t.Helper()
 	b, err := web.StaticFiles.ReadFile(name)
 	if err != nil {
@@ -19,234 +26,315 @@ func readCfgAsset(t *testing.T, name string) string {
 	return string(b)
 }
 
-// fieldKeyRe extracts the `key: '<k>'` literals from the FIELDS table in
-// settings.js. Only the FIELDS entries use that quoted form; runtime uses of the
-// key (data-key="${f.key}") carry no colon-then-single-quote, so this matches the
-// declared field set exactly.
-var fieldKeyRe = regexp.MustCompile(`\bkey:\s*'([^']+)'`)
+// labelsBlock returns the body of the `const LABELS = { ... };` object in
+// settings.js (used to parse the declared label keys).
+func labelsBlock(t *testing.T, js string) string {
+	t.Helper()
+	const marker = "const LABELS = {"
+	i := strings.Index(js, marker)
+	if i < 0 {
+		t.Fatal("settings.js has no `const LABELS = {` map")
+	}
+	rest := js[i+len(marker):]
+	end := strings.Index(rest, "\n};")
+	if end < 0 {
+		t.Fatal("settings.js LABELS map is not closed with `\\n};`")
+	}
+	return rest[:end]
+}
 
-// TestV2ConfigPanel is the S5 (task 8f4e3172) contract, round 2: the v2 console
-// exposes the writable NON-federation settings through the existing server-side
-// allowlist (writableSettings, api.go), with no backend change. Where a claim is
-// a server round-trip it is exercised behaviorally against the real handlers
-// (httptest); the irreducible DOM layer (rendered error banner, reload) is
-// asserted at the source level — this repo ships no JS runtime for `go test`, and
-// the manual serve-local verification is recorded in the PR body (AC6).
-func TestV2ConfigPanel(t *testing.T) {
-	cfg := readCfgAsset(t, "static/v2/settings.js")
+// topLevelKeyRe matches an object entry whose value is a nested object, i.e. a
+// top-level LABELS key `  sun_type: {`. The nested `label:`/`help:` pairs use a
+// string value (`: '`), so they never match this.
+var topLevelKeyRe = regexp.MustCompile(`(?m)^\s*([A-Za-z_][A-Za-z0-9_]*):\s*\{`)
 
-	// AC1 — cross-boundary set equality: the FIELDS keys the panel exposes are
-	// EXACTLY the server allowlist minus federation_peers (federation has its own
-	// page). Parsed from the JS, compared to the Go allowlist — not strings.Contains.
-	t.Run("FieldsMatchWritableAllowlist", func(t *testing.T) {
-		want := map[string]bool{}
-		for k := range writableSettings {
-			want[k] = true
+// AC1 — the panel is metadata-driven: it renders sections from the response
+// `groups` array (no hardcoded FIELDS list), and its LABELS map is a subset of
+// the real spec keys with every EDITABLE writable key labelled. Editable set =
+// writableKeys() minus federation_peers (federation is a RO summary; ruling A5).
+func TestV2ConfigPanelLabelsSubsetOfSpec(t *testing.T) {
+	js := readPanelAsset(t, "static/v2/settings.js")
+
+	// No hardcoded writable key list: the old `key: '<k>'` FIELDS literals are gone.
+	if regexp.MustCompile(`\bkey:\s*'`).MatchString(js) {
+		t.Error("settings.js still contains a hardcoded `key: '...'` FIELDS literal")
+	}
+	// Sections come from the server groups order.
+	if !strings.Contains(js, "s.groups.map(") {
+		t.Error("settings.js does not render sections from the response groups array (s.groups.map)")
+	}
+
+	// Real spec key set and the editable-writable set, derived from the spec.
+	specKeys := map[string]bool{}
+	for _, s := range settingSpecs {
+		specKeys[s.Key] = true
+	}
+	want := writableKeys() // 24 writable keys (map[string]bool)
+	delete(want, "federation_peers")
+
+	labels := map[string]bool{}
+	for _, m := range topLevelKeyRe.FindAllStringSubmatch(labelsBlock(t, js), -1) {
+		labels[m[1]] = true
+	}
+	if len(labels) == 0 {
+		t.Fatal("parsed zero LABELS keys from settings.js")
+	}
+
+	// Every LABELS key must be a real spec key (subset).
+	for k := range labels {
+		if !specKeys[k] {
+			t.Errorf("LABELS key %q is not in the server spec", k)
 		}
-		delete(want, setFederationPeers) // owned by the federation page, not this panel
-
-		got := map[string]bool{}
-		for _, m := range fieldKeyRe.FindAllStringSubmatch(cfg, -1) {
-			got[m[1]] = true
+	}
+	// Every EDITABLE writable key must have a label (all editable rows are named).
+	for k := range want {
+		if !labels[k] {
+			t.Errorf("editable writable key %q has no LABELS entry", k)
 		}
+	}
+}
 
-		for k := range want {
-			if !got[k] {
-				t.Errorf("settings.js FIELDS is missing writable key %q", k)
+// sourceBadgeBlock returns the body of the `const SOURCE_BADGE = { ... };` map.
+func sourceBadgeBlock(t *testing.T, js string) string {
+	t.Helper()
+	const marker = "const SOURCE_BADGE = {"
+	i := strings.Index(js, marker)
+	if i < 0 {
+		t.Fatal("settings.js has no `const SOURCE_BADGE = {` map")
+	}
+	rest := js[i+len(marker):]
+	end := strings.Index(rest, "\n};")
+	if end < 0 {
+		t.Fatal("settings.js SOURCE_BADGE map is not closed")
+	}
+	return rest[:end]
+}
+
+// AC2 — the source badge map has exactly the four texts env / setting / default /
+// compile-time (code), and the lock condition covers both writable=false and
+// source=env.
+func TestV2ConfigPanelSourceBadgesAndLock(t *testing.T) {
+	js := readPanelAsset(t, "static/v2/settings.js")
+	block := sourceBadgeBlock(t, js)
+
+	entryRe := regexp.MustCompile(`(?m)^\s*[A-Za-z_]+:\s*'([^']*)'`)
+	got := entryRe.FindAllStringSubmatch(block, -1)
+	if len(got) != 4 {
+		t.Fatalf("SOURCE_BADGE must have exactly 4 entries, got %d", len(got))
+	}
+	want := map[string]bool{"env": true, "setting": true, "default": true, "compile-time (code)": true}
+	for _, m := range got {
+		if !want[m[1]] {
+			t.Errorf("unexpected SOURCE_BADGE text %q", m[1])
+		}
+		delete(want, m[1])
+	}
+	for k := range want {
+		t.Errorf("SOURCE_BADGE missing required text %q", k)
+	}
+
+	// The lock condition is exactly writable=false OR source=env.
+	if !strings.Contains(js, "!st.writable || st.source === 'env'") {
+		t.Error("lock condition must cover both writable=false and source=env")
+	}
+}
+
+// AC3 — a 400 validation error carries {error:"invalid value: <key>", key, detail}
+// and applies nothing; an unknown key is 403 {error:"not writable: <key>", key}
+// (ruling A6, live handler). The panel renders the 400 detail inline next to the
+// offending key (data-err-key) and the 403 path still surfaces via api.js.
+func TestV2ConfigPanelInlineValidationError(t *testing.T) {
+	r := testRelay(t)
+
+	// 400: a duration below its minimum. message_retention min is 24h.
+	w := doAPI(r, "PUT", "/settings", `{"message_retention":"1h"}`)
+	if w.Code != 400 {
+		t.Fatalf("invalid value PUT: want 400, got %d: %s", w.Code, w.Body.String())
+	}
+	b := decodeJSON(t, w)
+	if b["error"] != "invalid value: message_retention" {
+		t.Errorf("400 error string (A6): got %q", b["error"])
+	}
+	if b["key"] != "message_retention" {
+		t.Errorf("400 must name the key: got %q", b["key"])
+	}
+	if d, _ := b["detail"].(string); strings.TrimSpace(d) == "" {
+		t.Error("400 must carry a non-empty detail")
+	}
+	if got := r.DB.GetSetting("message_retention"); got != "" {
+		t.Errorf("nothing may be applied on a 400: message_retention=%q", got)
+	}
+
+	// 403: an unknown key, whole-request refused, nothing applied.
+	w = doAPI(r, "PUT", "/settings", `{"evil_key":"x"}`)
+	if w.Code != 403 {
+		t.Fatalf("unknown key PUT: want 403, got %d: %s", w.Code, w.Body.String())
+	}
+	b = decodeJSON(t, w)
+	if b["error"] != "not writable: evil_key" {
+		t.Errorf("403 error string (A6): got %q", b["error"])
+	}
+	if b["key"] != "evil_key" {
+		t.Errorf("403 must name the key: got %q", b["key"])
+	}
+	if got := r.DB.GetSetting("evil_key"); got != "" {
+		t.Errorf("unknown key was written: %q", got)
+	}
+
+	// The panel places the 400 detail into the slot for its key, without a
+	// re-render (form state preserved), and the 403 path uses api.js.
+	js := readPanelAsset(t, "static/v2/settings.js")
+	if !strings.Contains(js, `data-err-key="`) || !strings.Contains(js, `.cfg-err[data-err-key="`) {
+		t.Error("settings.js does not target an inline error slot by key")
+	}
+	if !strings.Contains(js, "e.status === 400") || !strings.Contains(js, "showFieldError(e.key") {
+		t.Error("settings.js does not render the 400 detail next to the offending key")
+	}
+	apiJS := readPanelAsset(t, "static/v2/api.js")
+	if !strings.Contains(apiJS, "j.detail || j.error") {
+		t.Error("api.js no longer lifts the server error via j.detail || j.error")
+	}
+}
+
+var secretInputRe = regexp.MustCompile(`<input[^>]*data-type="secret"[^>]*>`)
+
+// AC4 — a secret renders a set/unset pill and a never-prefilled replace input;
+// the clear action sends JSON null; an empty replace input is omitted from the
+// PUT; no shipped asset logs or embeds a secret; and the live GET never returns a
+// secret value (masked, `set` only).
+func TestV2ConfigPanelSecretSetUnsetClear(t *testing.T) {
+	js := readPanelAsset(t, "static/v2/settings.js")
+
+	// set/unset pill.
+	if !strings.Contains(js, "cfg-pill-") || !strings.Contains(js, "st.set ? 'set' : 'unset'") {
+		t.Error("settings.js does not render a secret set/unset pill")
+	}
+	// The replace input must NOT carry a value= attribute (never prefilled).
+	sin := secretInputRe.FindString(js)
+	if sin == "" {
+		t.Fatal("settings.js has no secret replace input")
+	}
+	if strings.Contains(sin, "value=") {
+		t.Errorf("secret replace input must not be prefilled with a value=: %q", sin)
+	}
+	// Clear sends an explicit JSON null; empty replace omits the key from the PUT.
+	if !strings.Contains(js, "putSettings({ [key]: null })") {
+		t.Error("the clear action does not send JSON null")
+	}
+	if !strings.Contains(js, "if (raw) body[st.key] = raw;") {
+		t.Error("an empty secret replace is not omitted from the PUT body")
+	}
+	// No asset logs, and no secret value is embedded anywhere.
+	for _, name := range []string{"static/v2/settings.js", "static/v2/api.js", "static/v2/v2.css"} {
+		if strings.Contains(readPanelAsset(t, name), "console.log") {
+			t.Errorf("asset %s contains console.log (a logged value can leak a secret)", name)
+		}
+	}
+
+	// Live: a stored secret is never returned by GET; only `set` signals presence.
+	r := testRelay(t)
+	const secret = "lin_supersecret_ABCD"
+	r.DB.SetSetting("linear_api_key", secret)
+	g := doAPI(r, "GET", "/settings", "")
+	if g.Code != 200 {
+		t.Fatalf("GET /settings: want 200, got %d", g.Code)
+	}
+	if strings.Contains(g.Body.String(), secret) {
+		t.Fatal("GET /settings leaked a secret value")
+	}
+	st := findSetting(t, decodeJSON(t, g), "linear_api_key")
+	if st["secret"] != true {
+		t.Errorf("linear_api_key metadata not marked secret: %v", st["secret"])
+	}
+	if v, _ := st["value"].(string); v != "" {
+		t.Errorf("secret value must be empty in metadata, got %q", v)
+	}
+	if st["set"] != true {
+		t.Errorf("secret `set` must reflect the stored value: %v", st["set"])
+	}
+}
+
+// findSetting returns the settings[] entry with the given key from a GET body.
+func findSetting(t *testing.T, resp map[string]any, key string) map[string]any {
+	t.Helper()
+	arr, _ := resp["settings"].([]any)
+	if arr == nil {
+		t.Fatal("GET /settings has no settings array")
+	}
+	for _, e := range arr {
+		m, _ := e.(map[string]any)
+		if m != nil && m["key"] == key {
+			return m
+		}
+	}
+	t.Fatalf("settings[] has no entry for key %q", key)
+	return nil
+}
+
+// AC5 (smoke) — federation is a read-only summary linking to its own page (no
+// inline editor); Timing rows render note text when present; no new v2 id/class
+// leaks into any v1 asset; and the live GET returns the frozen shape (groups in
+// the fixed order + full-metadata settings entries).
+func TestV2ConfigPanelFederationSummaryAndScope(t *testing.T) {
+	js := readPanelAsset(t, "static/v2/settings.js")
+
+	// RO summary + link to the federation editor page, and no inline editor input
+	// in the federation branch.
+	if !strings.Contains(js, "cfg-fed-summary") || !strings.Contains(js, `href="#/federation"`) {
+		t.Error("federation group is not a RO summary with a link to the federation page")
+	}
+	fedStart := strings.Index(js, "function federationHTML(")
+	fedEnd := strings.Index(js, "function groupHTML(")
+	if fedStart < 0 || fedEnd < 0 || fedEnd <= fedStart {
+		t.Fatal("cannot isolate federationHTML() in settings.js")
+	}
+	if strings.Contains(js[fedStart:fedEnd], "data-type=") {
+		t.Error("federation summary must not render an inline editor input")
+	}
+
+	// Rows render their note when non-empty (e.g. the Timing writerTimeout note).
+	if !strings.Contains(js, "st.note") || !strings.Contains(js, "cfg-note-row") {
+		t.Error("rows do not render note text when present")
+	}
+
+	// Scope: none of the new v2 panel classes/attrs leak into any v1 asset.
+	leaks := []string{"cfg-badge", "cfg-fed-summary", "cfg-secret-wrap", "cfg-pill", "data-err-key"}
+	for _, name := range []string{"static/index.html", "static/style.css", "static/js/main.js"} {
+		a := readPanelAsset(t, name)
+		for _, leak := range leaks {
+			if strings.Contains(a, leak) {
+				t.Errorf("v1 asset %s leaked a v2 panel token %q", name, leak)
 			}
 		}
-		for k := range got {
-			if !want[k] {
-				t.Errorf("settings.js FIELDS exposes non-writable / out-of-scope key %q", k)
-			}
-		}
-		if len(got) != len(want) {
-			t.Errorf("FIELDS key count %d != allowlist-minus-federation %d", len(got), len(want))
-		}
-	})
+	}
 
-	// AC2 — save through the allowlist: an allowlist key round-trips and persists;
-	// a key OUTSIDE the allowlist is refused (403) and nothing is written. Live
-	// handlers, same pattern as TestApiPutSetting_Allowlist / TestAPISettings.
-	t.Run("SaveThroughAllowlistNonAllowlistRejected", func(t *testing.T) {
-		r := testRelay(t)
-
-		// Non-allowlist key → 403, nothing persisted.
-		w := doAPI(r, "PUT", "/settings", `{"evil_key":"x"}`)
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("non-allowlist PUT: want 403, got %d: %s", w.Code, w.Body.String())
+	// Live frozen shape: groups in the fixed order, and every settings entry
+	// carries all 12 metadata fields.
+	r := testRelay(t)
+	g := doAPI(r, "GET", "/settings", "")
+	if g.Code != 200 {
+		t.Fatalf("GET /settings: want 200, got %d", g.Code)
+	}
+	resp := decodeJSON(t, g)
+	groups, _ := resp["groups"].([]any)
+	wantGroups := []string{"console", "linear", "federation", "server", "operational", "timing"}
+	if len(groups) != len(wantGroups) {
+		t.Fatalf("groups: want %v, got %v", wantGroups, groups)
+	}
+	for i, gname := range wantGroups {
+		if groups[i] != gname {
+			t.Errorf("groups[%d]: want %q, got %v", i, gname, groups[i])
 		}
-		if got := r.DB.GetSetting("evil_key"); got != "" {
-			t.Fatalf("non-allowlist key was written: %q", got)
+	}
+	settings, _ := resp["settings"].([]any)
+	if len(settings) == 0 {
+		t.Fatal("GET /settings returned no settings entries")
+	}
+	fields := []string{"key", "group", "kind", "value", "set", "source", "writable", "secret", "env_name", "bounds", "default", "note"}
+	first, _ := settings[0].(map[string]any)
+	for _, f := range fields {
+		if _, ok := first[f]; !ok {
+			t.Errorf("settings entry missing field %q: %v", f, first)
 		}
-
-		// Allowlist key → 200 and persisted (the reload contract reads it back).
-		if w := doAPI(r, "PUT", "/settings", `{"sun_type":"3"}`); w.Code != http.StatusOK {
-			t.Fatalf("allowlist PUT: want 200, got %d: %s", w.Code, w.Body.String())
-		}
-		if got := r.DB.GetSetting("sun_type"); got != "3" {
-			t.Fatalf("allowlist key not persisted: sun_type=%q", got)
-		}
-	})
-
-	// AC3 — a server-side rejection is SURFACED, not swallowed: the error string
-	// the server emits reaches the rendered banner. Behaviorally the server emits
-	// the message (below); the wrapper (api.js) lifts j.error into the thrown
-	// Error, and settings.js renders ${e.message} — so the exact server string is
-	// what the user sees. api.js:15-18, settings.js catch→render cited in the PR.
-	t.Run("ServerErrorSurfaced", func(t *testing.T) {
-		r := testRelay(t)
-		w := doAPI(r, "PUT", "/settings", `{"evil_key":"x"}`)
-		if w.Code != http.StatusForbidden {
-			t.Fatalf("want 403, got %d", w.Code)
-		}
-		var body map[string]any
-		if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-			t.Fatalf("403 body is not JSON: %v (%s)", err, w.Body.String())
-		}
-		serverMsg, _ := body["error"].(string)
-		if !strings.Contains(serverMsg, "not writable") || !strings.Contains(serverMsg, "evil_key") {
-			t.Errorf("server error message not descriptive (must name the refused key): %q", serverMsg)
-		}
-
-		// The wrapper lifts the server's error field, and the panel renders it.
-		apiJS := readCfgAsset(t, "static/v2/api.js")
-		if !strings.Contains(apiJS, "j.detail || j.error") {
-			t.Error("api.js does not lift the server error body into the thrown Error")
-		}
-		for _, want := range []string{"save failed:", "${e.message}"} {
-			if !strings.Contains(cfg, want) {
-				t.Errorf("settings.js does not render the surfaced error (%q missing)", want)
-			}
-		}
-	})
-
-	// AC4 — reload reflects persisted values, and the secret is returned MASKED
-	// (never in plaintext). GET-PUT-GET on the panel's keys; the write-only pair
-	// (linear_routing/linear_project_map) is not echoed by GET by design, so its
-	// persistence is checked at the store.
-	t.Run("ReloadReflectsPersistedSecretMasked", func(t *testing.T) {
-		r := testRelay(t)
-
-		// GET-PUT-GET over ALL 8 panel keys (the full FIELDS set), not a subset:
-		// sun_type + the 6 GET-echoed Linear keys + the 2 write-only Linear keys.
-		const secret = "lin_supersecret_ABCD"
-		put := `{"sun_type":"7","linear_enabled":"1","linear_team_key":"SYN",` +
-			`"linear_project":"growth","linear_reconcile_interval":"5m",` +
-			`"linear_api_key":"` + secret + `","linear_routing":"{\"p\":\"a\"}",` +
-			`"linear_project_map":"{\"p\":\"proj\"}"}`
-		if w := doAPI(r, "PUT", "/settings", put); w.Code != http.StatusOK {
-			t.Fatalf("PUT: want 200, got %d: %s", w.Code, w.Body.String())
-		}
-
-		// Write-only keys persist at the store (GET never exposes them).
-		if got := r.DB.GetSetting("linear_routing"); got == "" {
-			t.Error("linear_routing (write-only) not persisted")
-		}
-		if got := r.DB.GetSetting("linear_project_map"); got == "" {
-			t.Error("linear_project_map (write-only) not persisted")
-		}
-
-		// Reload: GET must reflect the persisted values and mask the secret.
-		w := doAPI(r, "GET", "/settings", "")
-		if w.Code != http.StatusOK {
-			t.Fatalf("GET: want 200, got %d", w.Code)
-		}
-		raw := w.Body.String()
-		if strings.Contains(raw, secret) {
-			t.Fatal("GET /settings leaked the linear_api_key in plaintext")
-		}
-		var s map[string]any
-		if err := json.Unmarshal([]byte(raw), &s); err != nil {
-			t.Fatalf("GET body not JSON: %v", err)
-		}
-		if s["sun_type"] != "7" {
-			t.Errorf("reload did not reflect sun_type: got %v", s["sun_type"])
-		}
-		lin, _ := s["linear"].(map[string]any)
-		if lin == nil {
-			t.Fatal("GET body has no linear block")
-		}
-		if lin["team_key"] != "SYN" {
-			t.Errorf("reload did not reflect linear team_key: got %v", lin["team_key"])
-		}
-		if lin["project"] != "growth" {
-			t.Errorf("reload did not reflect linear project: got %v", lin["project"])
-		}
-		// The backend normalizes the duration on read (time.Duration round-trip),
-		// so "5m" comes back canonicalized as "5m0s" — assert the persisted value.
-		if lin["interval"] != "5m0s" {
-			t.Errorf("reload did not reflect linear interval: got %v", lin["interval"])
-		}
-		if lin["enabled"] != true {
-			t.Errorf("reload did not reflect linear enabled: got %v", lin["enabled"])
-		}
-		masked, _ := lin["api_key_masked"].(string)
-		if masked == "" || !strings.HasSuffix(masked, "ABCD") || masked == secret {
-			t.Errorf("api key not returned masked: got %q", masked)
-		}
-
-		// The panel never logs (a logged secret is a leak).
-		if strings.Contains(cfg, "console.log") {
-			t.Error("settings.js logs — a secret must never be logged")
-		}
-	})
-
-	// AC5 — v1 is untouched and build is green: none of the config-panel ids leak
-	// into any v1 asset (static/ outside v2/). Build-green is implied by this file
-	// compiling and running.
-	t.Run("V1ZeroDiffBuildGreen", func(t *testing.T) {
-		v1Assets := []string{"static/index.html", "static/style.css", "static/js/main.js"}
-		for _, name := range v1Assets {
-			a := readCfgAsset(t, name)
-			for _, leak := range []string{"cfg-wrap", "initSettings", "cfg-save"} {
-				if strings.Contains(a, leak) {
-					t.Errorf("v1 asset %s leaked a v2 config-panel id %q", name, leak)
-				}
-			}
-		}
-		v2 := readCfgAsset(t, "static/v2/v2.js")
-		for _, want := range []string{"initSettings", "settings"} {
-			if !strings.Contains(v2, want) {
-				t.Errorf("v2.js does not register the settings route (%q missing)", want)
-			}
-		}
-	})
-
-	// AC6 (surface) — the secret is a masked field and the panel never logs, so a
-	// token cannot leak to the console. The DOM behavior itself has no JS runtime
-	// under `go test` (verified in serve local, PR body); this pins the source
-	// guarantees the manual pass rides on.
-	t.Run("SecretMaskedNeverLogged", func(t *testing.T) {
-		for _, want := range []string{`data-type="secret"`, `type="password"`, "api_key_masked"} {
-			if !strings.Contains(cfg, want) {
-				t.Errorf("settings.js missing masked-secret marker %q", want)
-			}
-		}
-		if strings.Contains(cfg, "console.log") {
-			t.Error("settings.js logs — a secret must never be logged")
-		}
-	})
-
-	// AC (r4 data-loss guard) — a FAILED load (s === null) must not let a Save
-	// wipe the stored config with blanks/'0'. Source-pinned (no JS runtime under
-	// `go test`; manual serve-local failed-load pass recorded in the PR body):
-	// on null state the panel disables every input, replaces Save with a Retry
-	// button, and wire() binds no save handler (early-return on !s), so collect()
-	// and the PUT are unreachable.
-	t.Run("FailedLoadDisablesSaveNoWipe", func(t *testing.T) {
-		// Inputs disabled when there is no snapshot.
-		if !strings.Contains(cfg, "!s || (f.linear && linearLocked())") {
-			t.Error("fieldHTML does not disable inputs on a failed load (s === null)")
-		}
-		// Save is swapped for a Retry button (no Save present in the null branch).
-		if !strings.Contains(cfg, "cfgRetry") {
-			t.Error("render does not offer a Retry-load button on a failed load")
-		}
-		// wire() returns early on !s, so no save handler exists to wipe config.
-		guard := regexp.MustCompile(`if\s*\(!s\)\s*\{`)
-		if !guard.MatchString(cfg) {
-			t.Error("wire() does not early-return on a failed load (!s) — a Save could wipe config")
-		}
-	})
+	}
 }
