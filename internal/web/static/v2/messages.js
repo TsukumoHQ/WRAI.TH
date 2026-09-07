@@ -13,7 +13,9 @@ export function initMessages(root, ctx) {
   const sendBtn = root.querySelector('#msgSend');
   const scopeWrap = root.querySelector('#msgScope');
 
-  const ME = 'user';
+  const ME = 'human';
+  // Operator identity: acts as "human"; still recognise legacy "user" traffic as self.
+  const isMe = (who) => who === ME || who === 'user';
   const ALL = '__all__';
   const BROADCAST = '__broadcast__';
   const SKIP = new Set(['', '*', 'system']);
@@ -70,7 +72,7 @@ export function initMessages(root, ctx) {
     const last = new Map();
     for (const m of msgs) {
       for (const who of [m.from, m.to]) {
-        if (SKIP.has(who) || who === ME) continue;
+        if (SKIP.has(who) || isMe(who)) continue;
         const t = Date.parse(m.created_at) || 0;
         if (!last.has(who) || t > last.get(who)) last.set(who, t);
       }
@@ -121,7 +123,7 @@ export function initMessages(root, ctx) {
     for (const a of list) {
       const th = threadFor(a);
       const lastMsg = th[0];
-      const preview = lastMsg ? `${lastMsg.from === ME ? 'you: ' : ''}${(lastMsg.content || '').slice(0, 40)}` : '';
+      const preview = lastMsg ? `${isMe(lastMsg.from) ? 'you: ' : ''}${(lastMsg.content || '').slice(0, 40)}` : '';
       items.push(railRow(a, a, preview, a, lastMsg, th.length));
     }
     railList.innerHTML = items.join('') || '<div class="empty">No agents in traffic</div>';
@@ -187,7 +189,7 @@ export function initMessages(root, ctx) {
   }
 
   function bubble(m) {
-    const mine = m.from === ME;
+    const mine = isMe(m.from);
     const pr = (m.priority || '').toUpperCase();
     const prChip = (pr === 'P0' || pr === 'P1') ? `<span class="msg-pr ${pr.toLowerCase()}">${pr}</span>` : '';
     const tag = (scopeMode === 'all' && m.project) ? `<span class="msg-proj-tag">${esc(m.project)}</span>` : '';

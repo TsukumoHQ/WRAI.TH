@@ -19,6 +19,10 @@ function agentKey(project, name) {
   return `${project}:${name}`;
 }
 
+// Single operator identity: the console acts as "human" on every write, and the
+// operator inbox shows agent traffic addressed to "human" as well as legacy "user".
+const OPERATOR = "human";
+
 // DOM elements
 const canvas = document.getElementById("relay-canvas");
 const statusDot = document.getElementById("status-dot");
@@ -851,8 +855,8 @@ const _celebratedTasks = new Set();
 function checkForUserMessages(msgs) {
   for (const msg of msgs) {
     if (shownUserMsgs.has(msg.id)) continue;
-    // Show if explicitly to "user" or if type is user_question
-    const isForUser = (msg.to === "user") || (msg.type === "user_question");
+    // Show if addressed to the operator ("user" legacy or "human") or a user_question
+    const isForUser = (msg.to === "user") || (msg.to === "human") || (msg.type === "user_question");
     if (!isForUser) continue;
     shownUserMsgs.add(msg.id);
     showUserCard(msg);
@@ -1070,7 +1074,7 @@ function showUserTaskCard(task) {
     const btn = e.target;
     btn.disabled = true;
     btn.textContent = "...";
-    const result = await client.transitionTask(task.id, "in-progress", task.project || "default", "user");
+    const result = await client.transitionTask(task.id, "in-progress", task.project || "default", OPERATOR);
     if (result) {
       btn.textContent = "Working";
       btn.style.background = "rgba(0,230,118,0.2)";
@@ -1085,7 +1089,7 @@ function showUserTaskCard(task) {
     const btn = e.target;
     btn.disabled = true;
     btn.textContent = "...";
-    const result = await client.transitionTask(task.id, "done", task.project || "default", "user");
+    const result = await client.transitionTask(task.id, "done", task.project || "default", OPERATOR);
     if (result) {
       card.style.opacity = "0";
       card.style.transition = "opacity 0.3s ease";
@@ -1100,7 +1104,7 @@ function showUserTaskCard(task) {
     const btn = e.target;
     btn.disabled = true;
     btn.textContent = "...";
-    const result = await client.cancelTask(task.id, task.project || "default", "user");
+    const result = await client.cancelTask(task.id, task.project || "default", OPERATOR);
     if (result) {
       card.style.opacity = "0";
       card.style.transition = "opacity 0.3s ease";
@@ -2863,7 +2867,7 @@ kanbanBoard.onCycleChange = async () => {
 // Native-mode mutations (no-ops wired in linear/read-only mode by the board UI).
 kanbanBoard.onTransition = async (taskId, newStatus, agentName) => {
   const project = focusedProject || "default";
-  const result = await client.transitionTask(taskId, newStatus, project, agentName || "user");
+  const result = await client.transitionTask(taskId, newStatus, project, agentName || OPERATOR);
   if (result) {
     kanbanBoard.upsertTask(result);
     updateAgentTaskLabels();
