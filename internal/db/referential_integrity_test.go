@@ -527,16 +527,75 @@ func TestOrphanProfilePoolResolver(t *testing.T) {
 	}
 }
 
-// TestOrphanProfilePoolCaseInsensitive: the pool resolver matches on LOWER() both
-// sides, so a case difference between the task slug and the agent's profile_slug
-// still resolves.
-func TestOrphanProfilePoolCaseInsensitive(t *testing.T) {
+// TestRefChecksDropLowerEquality (B2 AC1): the orphan-resolution clauses use plain
+// equality on agents.name / profiles.slug / agents.profile_slug (indexed point
+// lookups), so no `LOWER(<ref-col>) = LOWER(...)` remains in refChecks(); the
+// defensive `LOWER(x) NOT IN (<sentinels>)` guards are cheap and stay.
+func TestRefChecksDropLowerEquality(t *testing.T) {
+	// Ban only the agent/profile-SIDE wrappers — those existed solely in the
+	// resolution equality, now plain point lookups. The task/message-side
+	// `LOWER(t.xxx)`/`LOWER(m.xxx)` legitimately survive inside the kept
+	// `... NOT IN (sentinels)` guards, so they are NOT banned here.
+	for _, rc := range refChecks() {
+		for _, banned := range []string{"LOWER(a.name)", "LOWER(b.name)", "LOWER(p.slug)", "LOWER(a.profile_slug)"} {
+			if strings.Contains(rc.orphanSQL, banned) {
+				t.Errorf("class %s: %s must be dropped for a plain-equality point lookup:\n%s", rc.class, banned, rc.orphanSQL)
+			}
+		}
+	}
+	// The sentinel guard must survive somewhere (it is the reason LOWER stays cheap).
+	sentinelKept := false
+	for _, rc := range refChecks() {
+		if strings.Contains(rc.orphanSQL, ") NOT IN (") {
+			sentinelKept = true
+			break
+		}
+	}
+	if !sentinelKept {
+		t.Error("the LOWER(x) NOT IN (sentinels) guard must be kept")
+	}
+}
+
+// TestReferentialScanFixturesByteIdentical (B2 AC2): dropping the per-row LOWER()
+// wrappers must not change what the scan flags — the fixture DB is lowercase, so
+// plain equality resolves exactly what case-insensitive equality did. Asserts the
+// pool resolver still resolves an in-project lowercase slug and still flags a
+// fully-dead one (the pre-drop contract, unchanged).
+func TestReferentialScanFixturesByteIdentical(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
 	seedProject(t, c, "p1")
-	seedAgent(t, c, "p1", "wb-agent", "active", "Wraith-Backend", "", 0) // mixed case
-	seedTask(t, c, "t-ci", "p1", "pending", "linear", "", "", "wraith-backend", "", "", false)
-	// An agent in a DIFFERENT project carrying the slug must NOT resolve it.
+	seedAgent(t, c, "p1", "wb-agent", "active", "wraith-backend", "", 0)
+	seedTask(t, c, "t-pool", "p1", "pending", "linear", "", "", "wraith-backend", "", "", false)
+	seedTask(t, c, "t-dead", "p1", "pending", "linear", "", "", "no-such-slug", "", "", false)
+
+	if _, err := d.RunReferentialScan(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if quarantineRowExists(t, c, "orphan_profile", "t-pool") {
+		t.Error("lowercase slug carried by an in-project agent must resolve via the pool (plain equality)")
+	}
+	if !quarantineRowExists(t, c, "orphan_profile", "t-dead") {
+		t.Error("fully-dead slug must still flag after the LOWER drop")
+	}
+	if got := d.checkCaseInvariant(); got != 0 {
+		t.Errorf("case-invariant check on lowercase fixtures: got %d violations, want 0", got)
+	}
+}
+
+// TestCaseInvariantCheckDetectsMixedCase (B2 AC3): checkCaseInvariant reports 0 on
+// a lowercase-canonical DB (with cross-project scoping intact) and n=1 when a
+// mixed-case row is inserted directly via SQL (bypassing the B1 write-path
+// normalization). Revert-check: this asserts on checkCaseInvariant's return, so
+// removing the guard breaks the build/test — the mixed-case row cannot go
+// unreported.
+func TestCaseInvariantCheckDetectsMixedCase(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedAgent(t, c, "p1", "wb-agent", "active", "wraith-backend", "", 0)
+	seedTask(t, c, "t-ok", "p1", "pending", "linear", "", "", "wraith-backend", "", "", false)
+	// Cross-project agent carrying the slug must NOT resolve it (project-scoped).
 	seedProject(t, c, "p2")
 	seedAgent(t, c, "p2", "other", "active", "cross-slug", "", 0)
 	seedTask(t, c, "t-xproj", "p1", "pending", "linear", "", "", "cross-slug", "", "", false)
@@ -544,11 +603,44 @@ func TestOrphanProfilePoolCaseInsensitive(t *testing.T) {
 	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if quarantineRowExists(t, c, "orphan_profile", "t-ci") {
-		t.Error("pool resolver must be case-insensitive (LOWER on both sides)")
+	if quarantineRowExists(t, c, "orphan_profile", "t-ok") {
+		t.Error("lowercase in-project slug must resolve via the pool")
 	}
 	if !quarantineRowExists(t, c, "orphan_profile", "t-xproj") {
 		t.Error("an agent carrying the slug in another project must not resolve it (project-scoped)")
+	}
+	if got := d.checkCaseInvariant(); got != 0 {
+		t.Errorf("clean lowercase DB: got %d violations, want 0", got)
+	}
+
+	// Inject a mixed-case name directly (a write path that skipped normalization).
+	if _, err := c.Exec(`UPDATE agents SET name = 'WB-Agent' WHERE id = 'ag-wb-agent'`); err != nil {
+		t.Fatalf("inject mixed-case: %v", err)
+	}
+	if got := d.checkCaseInvariant(); got != 1 {
+		t.Errorf("after mixed-case inject: got %d violations, want 1", got)
+	}
+}
+
+// TestScanLogsCaseInvariantViolationOnce (B2 AC4): a mixed-case stored value makes
+// the scan log `integrity: case-invariant violated` exactly once and still
+// completes without error — the guard is log-only, it never blocks the scan.
+func TestScanLogsCaseInvariantViolationOnce(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedAgent(t, c, "p1", "wb-agent", "active", "wraith-backend", "", 0)
+	if _, err := c.Exec(`UPDATE agents SET name = 'WB-Agent' WHERE id = 'ag-wb-agent'`); err != nil {
+		t.Fatalf("inject mixed-case: %v", err)
+	}
+
+	out := captureLog(t, func() {
+		if _, err := d.RunReferentialScan(); err != nil {
+			t.Fatalf("scan must complete despite a case-invariant violation: %v", err)
+		}
+	})
+	if n := strings.Count(out, "integrity: case-invariant violated"); n != 1 {
+		t.Errorf("case-invariant violation log: got %d lines, want exactly 1\n%s", n, out)
 	}
 }
 
