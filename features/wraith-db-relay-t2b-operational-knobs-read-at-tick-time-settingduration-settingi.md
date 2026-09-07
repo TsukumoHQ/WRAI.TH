@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/t2b-tick-reads (from main)
 ## Relay task : 1c3324e2-fa0b-4de3-8c2f-df859557031f
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -49,18 +49,25 @@ NITS (non-blocking):
 ## 3. Files changed
 
 ```
-internal/db/projects.go        |  67 ++++++++
- internal/relay/cleanup.go      | 320 ++++++++++++++++++++++--------------
- internal/relay/cleanup_test.go | 359 +++++++++++++++++++++++++++++++++++++++++
- 3 files changed, 622 insertions(+), 124 deletions(-)
+...s-read-at-tick-time-settingduration-settingi.md |  66 ++++
+ internal/db/projects.go                            |  67 ++++
+ internal/relay/cleanup.go                          | 320 +++++++++++-------
+ internal/relay/cleanup_test.go                     | 359 +++++++++++++++++++++
+ 4 files changed, 688 insertions(+), 124 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-1c3324e2-fa0b-4de3-8c2f-df859557031f @ `771c510fb`
+- 🟢 AC1: Test pin every contract clause including the warn-dedup via captureLog — evidence: internal/db/projects.go:154-211 adds SettingDuration/SettingInt + warnSettingOnce with sync.Map dedupe — test: TestSettingAccessorsClampDefaultWarnOnce internal/relay/cleanup_test.go:42 (unset→def, in-range→stored, both-side clamp, unparsable→def, 3 reads = 1 WARN)
+- 🟢 AC2: Direct tick driver + observed row count delta on the same DB; second sql.Open handle for backdating is closed before tick — evidence: internal/relay/cleanup.go:194-299 extracts runCleanupTick(database,*cleanupState); internal/relay/cleanup_test.go:115-163 inserts+backdates expired_at 3d ago, ticks 1 (default 7d) keeps, SetSetting(48h), tick 2 purges with no StartCleanup — test: TestTickRereadsMessageRetentionNoRestart internal/relay/cleanup_test.go:115
+- 🟢 AC3: All 4 precedence branches exercised — evidence: internal/relay/cleanup.go:102-107 tickBackupKeep + 135-141 tickReviewerTTL: env wins if envBackupKeep/envReviewerTTL ok else SettingInt — test: TestTickEnvTwinsBeatStoredBackupReviewer internal/relay/cleanup_test.go:173 (env=5 → 5, env=stored=9, env=invalid → stored=9, no env no stored → const)
+- 🟢 AC4: Behavioral assertion on both raw row count + rollup daily count, single key coupling verified — evidence: internal/relay/cleanup.go:231-250 tokenDays drives BOTH RollupTokenUsage(tokenDays) and PurgeOldTokenUsage(tokenDays*24h) — test: TestTickTokenUsageRetentionDaysDrivesPurgeAndRollup internal/relay/cleanup_test.go:224 (default=5d kept+rolled; stored=3 → 5d row purged and excluded from rollup)
+- 🟢 AC5: Hard gate: 479 passed in internal/relay; scope drift is .md-only (scribe provenance), see notice above — evidence: internal/relay/cleanup.go consts match settingSpecs defaults (settings_spec.go:98-108 use dur(...) which equals d.String() the same encoding the test builds via dur(constValue)) — test: TestTickEmptySettingsMatchConstsAndSpecDefaults internal/relay/cleanup_test.go:286 (11 consts + spec default == dur(const) for every Operational key in settingSpecs)
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-1c3324e2-fa0b-4de3-8c2f-df859557031f)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `1c3324e2-fa0b-4de3-8c2f-df859557031f`._
