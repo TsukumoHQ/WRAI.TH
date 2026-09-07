@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -166,11 +167,47 @@ func (d *DB) ro() *sql.DB {
 // 15s wait.
 var writerTimeout = 15 * time.Second
 
-// writerExec runs Exec on the writer connection bounded by writerTimeout.
+// writerSlowWait is the threshold above which a single-writer op is logged as a
+// `writer wait:` line. Writer starvation was invisible before this: a scan or
+// flush that held the sole writer connection (SetMaxOpenConns(1)) just made every
+// other write silently wait out its timeout — the 91 `context deadline exceeded`
+// lines of 2026-09-02 had no attributable cause in the log. Observability only:
+// nothing about writerTimeout, the pool, or any SQL changes. A var, not a const,
+// so tests shrink it (same trick as writerTimeout in wedge_test.go).
+var writerSlowWait = 2 * time.Second
+
+// writerQueryPrefix renders the first 48 chars of a query with internal
+// whitespace collapsed, so a writer-wait line is one grep-able line.
+func writerQueryPrefix(query string) string {
+	q := strings.Join(strings.Fields(query), " ")
+	if len(q) > 48 {
+		q = q[:48]
+	}
+	return q
+}
+
+// shortFuncName strips the package path from a runtime function name
+// ("agent-relay/internal/db.(*DB).SweepDanglingBoards" -> "SweepDanglingBoards").
+func shortFuncName(full string) string {
+	if i := strings.LastIndex(full, "."); i >= 0 {
+		return full[i+1:]
+	}
+	return full
+}
+
+// writerExec runs Exec on the writer connection bounded by writerTimeout. It logs
+// one `writer wait:` line — on the success path AND the error/deadline path — when
+// the call, including the wait to acquire the single writer connection from the
+// pool, takes at least writerSlowWait. The returned result/error are unchanged.
 func (d *DB) writerExec(query string, args ...interface{}) (sql.Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
 	defer cancel()
-	return d.conn.ExecContext(ctx, query, args...)
+	start := time.Now()
+	res, err := d.conn.ExecContext(ctx, query, args...)
+	if waited := time.Since(start); waited >= writerSlowWait {
+		log.Printf("writer wait: %s waited=%s", writerQueryPrefix(query), waited.Round(time.Millisecond))
+	}
+	return res, err
 }
 
 // writerTx wraps *sql.Tx to release the ctx bounding its lifetime as soon as
@@ -229,8 +266,18 @@ func (t *writerTx) release() {
 // budgets means the body is never reused after a background rollback.
 func (d *DB) beginWriterTx() (*writerTx, error) {
 	acqCtx, acqCancel := context.WithTimeout(context.Background(), writerTimeout)
+	start := time.Now()
 	conn, err := d.conn.Conn(acqCtx)
 	acqCancel()
+	if waited := time.Since(start); waited >= writerSlowWait {
+		caller := "?"
+		if pc, _, _, ok := runtime.Caller(1); ok {
+			if fn := runtime.FuncForPC(pc); fn != nil {
+				caller = shortFuncName(fn.Name())
+			}
+		}
+		log.Printf("writer wait: begin-tx caller=%s waited=%s", caller, waited.Round(time.Millisecond))
+	}
 	if err != nil {
 		return nil, err
 	}

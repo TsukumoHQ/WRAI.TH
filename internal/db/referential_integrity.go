@@ -571,6 +571,8 @@ func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 // slow scan under fleet load can no longer starve send_message/claim_task/
 // complete_task/flush/expire into writerTimeout (task 1ac2ce6e). Idempotent.
 func (d *DB) RunReferentialScan() (map[string]int, error) {
+	scanStart := time.Now()
+
 	// Read phase — reader pool, own ctx (referentialScanTimeout). Holds no writer.
 	rctx, rcancel := context.WithTimeout(context.Background(), referentialScanTimeout)
 	deltas, err := readRefDeltas(rctx, d.ro())
@@ -612,6 +614,14 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 	}
 	for _, l := range heal {
 		log.Print(l)
+	}
+
+	// Writer-starvation diagnostic (task 2d5fb3c2): a scan slower than
+	// writerSlowWait is what used to hold the writer long enough to starve other
+	// writes — surface its duration so the cause is attributable. Silent when fast
+	// (the common clean-DB near-no-op).
+	if took := time.Since(scanStart); took >= writerSlowWait {
+		log.Printf("integrity scan: took %s (%d classes)", took.Round(time.Millisecond), len(deltas))
 	}
 	return counts, nil
 }
