@@ -131,8 +131,16 @@ func startServer() {
 	// teams when a stray launchd relay came up on the same database).
 	if dbPath, perr := db.DBPath(); perr == nil {
 		if release, lerr := acquireServeLock(dbPath + ".lock"); lerr != nil {
-			slog.Error("another agent-relay is already serving this DB — refusing to start a second writer (it corrupts the DB); stop the other instance first",
-				"db", dbPath, "err", lerr)
+			if errors.Is(lerr, errLockHeld) {
+				slog.Error("another agent-relay is already serving this DB — refusing to start a second writer (it corrupts the DB); stop the other instance first",
+					"db", dbPath, "err", lerr)
+				os.Exit(1)
+			}
+			// Environment problem (missing dir, permissions) — say what it
+			// actually is; a phantom "second writer" here sent fresh installs
+			// hunting for a relay that never existed.
+			slog.Error("cannot take the serve lock — startup aborted",
+				"lock", dbPath+".lock", "err", lerr)
 			os.Exit(1)
 		} else {
 			defer release()
