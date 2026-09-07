@@ -314,3 +314,40 @@ func TestNoWritableSettingsIdentifierInSource(t *testing.T) {
 		}
 	}
 }
+
+// TestGetNormalisesStoredDurationValue (T2d-c AC1): after PUT message_retention=48h,
+// GET /api/settings echoes the value in Go time.Duration.String() form (48h0m0s),
+// not the raw stored string, on the source=setting path.
+func TestGetNormalisesStoredDurationValue(t *testing.T) {
+	r := testRelay(t)
+	if w := doAPI(r, http.MethodPut, "/settings", `{"message_retention":"48h"}`); w.Code != http.StatusOK {
+		t.Fatalf("PUT message_retention=48h: status %d\nbody: %s", w.Code, w.Body.String())
+	}
+	e, ok := getSettingEntry(t, decodeJSON(t, doAPI(r, http.MethodGet, "/settings", "")), "message_retention")
+	if !ok {
+		t.Fatal("message_retention entry missing")
+	}
+	if e["value"] != "48h0m0s" || e["source"] != "setting" {
+		t.Errorf("message_retention = {value:%v source:%v}, want {48h0m0s, setting}", e["value"], e["source"])
+	}
+}
+
+// TestGetEchoesUnparseableStoredDurationRaw (T2d-c AC2): a stored duration that
+// does not parse (hand-SQL garbage written straight to the DB, bypassing PUT
+// validation) is echoed raw with source=setting and GET still returns 200 — no
+// panic, no 500.
+func TestGetEchoesUnparseableStoredDurationRaw(t *testing.T) {
+	r := testRelay(t)
+	r.DB.SetSetting("message_retention", "garbage")
+	w := doAPI(r, http.MethodGet, "/settings", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("GET with garbage stored duration: status %d, want 200 (no 500)\nbody: %s", w.Code, w.Body.String())
+	}
+	e, ok := getSettingEntry(t, decodeJSON(t, w), "message_retention")
+	if !ok {
+		t.Fatal("message_retention entry missing")
+	}
+	if e["value"] != "garbage" || e["source"] != "setting" {
+		t.Errorf("garbage stored = {value:%v source:%v}, want {garbage, setting}", e["value"], e["source"])
+	}
+}

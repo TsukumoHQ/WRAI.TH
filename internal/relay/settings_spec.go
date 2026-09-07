@@ -189,12 +189,32 @@ func (r *Relay) resolveSetting(s settingSpec) (value string, set bool, source st
 		if s.Secret {
 			return "", true, "setting"
 		}
-		return dv, true, "setting"
+		return normalizeStoredValue(s, dv), true, "setting"
 	}
 	if s.Secret {
 		return "", false, "default"
 	}
 	return s.Default, false, "default"
+}
+
+// normalizeStoredValue canonicalises a raw stored value for the GET
+// /api/settings source=setting path so a duration echoes Go's
+// time.Duration.String() form (48h -> 48h0m0s) and an int its decimal form,
+// matching the env/default branches (frozen contract 6f73f179 A1). A value that
+// fails to parse (hand-SQL garbage) is returned unchanged so GET never 500s.
+// Storage format and PUT validation are untouched.
+func normalizeStoredValue(s settingSpec, raw string) string {
+	switch s.Kind {
+	case kindDuration:
+		if d, err := time.ParseDuration(raw); err == nil {
+			return d.String()
+		}
+	case kindInt:
+		if n, err := strconv.Atoi(raw); err == nil {
+			return strconv.Itoa(n)
+		}
+	}
+	return raw
 }
 
 // validateValue checks a single non-null value against its spec's kind + bounds.
