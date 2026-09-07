@@ -55,14 +55,24 @@ auth/middleware, MCP registry, ingest/SSE/tokens, updater/release. Out of scope 
 
 ## 3. Files changed
 
-_(no diff available yet)_
+```
+...blesettings-legacy-9-key-panel-allowlist-spe.md | 68 ++++++++++++++++++++
+ internal/relay/api.go                              |  7 +--
+ internal/relay/settings_spec.go                    | 18 +-----
+ internal/relay/settings_spec_test.go               | 72 ++++++++++++----------
+ 4 files changed, 112 insertions(+), 53 deletions(-)
+```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ❌ REJECTED by review-e3d26498-49a2-46a9-8db5-8a6b22531720 @ `c92f22c73`
+- 🔴 AC1: AC1 partial: size==24 check passes, evil_key not asserted in this test (asserted elsewhere :302-303), but no legacy-key PUT verification; precondition still keys on writableSettings which AC1 says must vanish — evidence: internal/relay/settings_spec_test.go:36 TestSettingsSpecAllowlistDerived checks writableKeys()==24 but lacks legacy-key PUT; test still asserts against writableSettings (lines 71-83, 104-105) which AC1 says must be re-expressed against writableKeys() only — test: TestSettingsSpecAllowlistDerived internal/relay/settings_spec_test.go:36 — incomplete: missing PUT of legacy key (e.g. sun_type) to confirm 200 apply via apiPutSetting
+- 🔴 AC2: Implementation commit missing; AC2 identifier scan returns 5 hits in non-_test.go files — evidence: grep -n writableSettings internal/relay/*.go | non-_test.go matches: settings_spec.go:14,144,150 and api.go:462,464 = 5 occurrences; TestNoWritableSettingsIdentifierInSource does not exist in settings_spec_test.go — test: NONE — AC2-named TestNoWritableSettingsIdentifierInSource absent from diff
+- 🔴 AC3: [partial] Tests green by accident — old code with writableSettings still present, not the contract-required new state — evidence: go test -tags fts5 ./internal/relay/... = 476 PASS; but AC3 scope: git diff main..wraith-backend-2/t2d-a shows ONLY features/wraith-relay-t2d-a-...md, zero changes to internal/relay/settings_spec.go|settings_spec_test.go|api.go — test: TestV2ConfigPanel + TestSettingsSpec* still green (cached) because implementation never landed
 
 ## 5. Timeline
 
+- round 1 → **reject** (review-e3d26498-49a2-46a9-8db5-8a6b22531720)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `e3d26498-49a2-46a9-8db5-8a6b22531720`._
