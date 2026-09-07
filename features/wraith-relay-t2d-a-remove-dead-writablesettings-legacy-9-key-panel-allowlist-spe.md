@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/t2d-a (from main)
 ## Relay task : e3d26498-49a2-46a9-8db5-8a6b22531720
-## Status : 🔵 IN REVIEW
+## Status : 🔵 SUBMITTED
 
 ## 1. Product Brief
 
@@ -56,11 +56,11 @@ auth/middleware, MCP registry, ingest/SSE/tokens, updater/release. Out of scope 
 ## 3. Files changed
 
 ```
-...blesettings-legacy-9-key-panel-allowlist-spe.md | 78 ++++++++++++++++++++++
+...blesettings-legacy-9-key-panel-allowlist-spe.md | 84 ++++++++++++++++++++++
  internal/relay/api.go                              |  7 +-
  internal/relay/settings_spec.go                    | 18 +----
- internal/relay/settings_spec_test.go               | 72 +++++++++++---------
- 4 files changed, 122 insertions(+), 53 deletions(-)
+ internal/relay/settings_spec_test.go               | 72 ++++++++++---------
+ 4 files changed, 128 insertions(+), 53 deletions(-)
 ```
 
 ## 4. QA Log
@@ -79,6 +79,8 @@ auth/middleware, MCP registry, ingest/SSE/tokens, updater/release. Out of scope 
 
 - round 1 → **reject** (review-e3d26498-49a2-46a9-8db5-8a6b22531720)
 - round 2 → **approve** (review-e3d26498-49a2-46a9-8db5-8a6b22531720)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./internal/relay/... 477 passed; AC1 TestSettingsSpecAllowlistDerived asserts 24 keys (9+15) + evil_key absent + sun_type + message_retention PUTs both 200 via apiPutSetting; AC2 TestNoWritableSettingsIdentifierInSource scans non-_test.go files via os.ReadDir/ReadFile zero occurrences; AC3 scope 3 files (api.go, settings_spec.go, settings_spec_test.go) TestV2ConfigPanel* 5/5 + TestSettingsSpec 7/7 green
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `e3d26498-49a2-46a9-8db5-8a6b22531720`._
