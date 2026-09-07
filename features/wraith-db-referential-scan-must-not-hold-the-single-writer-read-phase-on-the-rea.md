@@ -63,17 +63,28 @@ NITS: two test-only package vars (refScanReadHook/refScanBetweenHook) live in th
 ## 3. Files changed
 
 ```
-internal/db/referential_integrity.go      | 426 ++++++++++++++++++++++--------
- internal/db/referential_integrity_test.go | 312 +++++++++++++++++++++-
- 2 files changed, 620 insertions(+), 118 deletions(-)
+...hold-the-single-writer-read-phase-on-the-rea.md |  79 ++++
+ internal/db/referential_integrity.go               | 426 ++++++++++++++++-----
+ internal/db/referential_integrity_test.go          | 312 ++++++++++++++-
+ 3 files changed, 699 insertions(+), 118 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-1ac2ce6e-40b6-41d8-a2ab-d282a14e267d @ `85a8406f0`
+- 🟢 AC1: readParked hook parks the read phase; concurrent writerExec completes within 100ms — scan does not hold the writer during reads; revert path (read on tx inside d.conn) provably blocked per the HoldGuard control — evidence: internal/db/referential_integrity.go: RunReferentialScan calls readRefDeltas(rctx, d.ro()) — read on reader pool, apply via d.beginWriterTx — test: TestReadPhaseDoesNotHoldWriter (referential_integrity_test.go:625); control TestReadPhaseHoldGuard (test.go:674) confirms 100ms bound is meaningful
+- 🟢 AC2: all 16 classes covered; pool-key OR-clause behavior preserved (orphan_profile resolves via profiles OR agents LOWER match, case-insensitive, project-scoped); no LOWER change — evidence: internal/db/referential_integrity.go: orphanSQL block unchanged; awk extraction byte-identical to pre-split (verified by file diff) — test: TestReferentialScanDetectsOrphanClasses (test.go:167) seeds one representative per class incl. orphan_profile pool resolver; TestBootScanMatchesSplit (test.go:872) proves boot single-tx == split open counts
+- 🟢 AC3: accepted one-tick race documented and pinned by behavioral test, not just by a code comment — evidence: internal/db/referential_integrity.go: refScanBetweenHook fires AFTER readRefDeltas returns, BEFORE beginWriterTx — test: TestScanHealBetweenReadAndApply (test.go:703) seeds ghost agent in the between hook → asserts scan 2 leaves row open, scan 3 resolves it
+- 🟢 AC4: both behavioral (recordingExecer captures real statements) and source-grep verifications in place; writerTimeout bound preserved by the beginWriterTx path — evidence: internal/db/referential_integrity.go applyRefDeltas runs only INSERT OR IGNORE INTO integrity_quarantine VALUES (...) and UPDATE integrity_quarantine SET ... WHERE row_id IN (chunked); called from RunReferentialScan via d.beginWriterTx (writerTimeout-bounded) — test: TestApplyPhaseRunsOnlyRowIDWrites (test.go:757) wraps the apply surface in recordingExecer and asserts every captured statement is INSERT OR IGNORE or UPDATE row_id IN; TestLiveScanUsesReaderAndWriterTx (test.go:822) is the grep-able source assertion for read phase=d.ro() + apply=beginWriterTx
+- 🟢 AC5: scope bounded to the listed code files; sibling scribe provenance commit (features/wraith-db-...) is outside implementation scope and not a runtime change — evidence: git diff 373e328..HEAD --name-only shows internal/db/referential_integrity.go + referential_integrity_test.go only (db.go untouched); orphanSQL byte-identical via awk extraction diff — test: go test -tags fts5 -race ./internal/db/... 307 passed (full suite, race-clean)
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-1ac2ce6e-40b6-41d8-a2ab-d282a14e267d)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 -race ./internal/db/... 307 ok; orphanSQL byte-identical; AC1-4 named tests pass; AC5 implementation scope = 2 code files (db.go not touched, fine).
+
+- **notice** `features/wraith-db-referential-scan-must-not-hold-the-single-writer-read-phase-on-the-rea.md:1` — sibling scribe provenance commit, separate from cff126d — not in the implementation scope but listed in the branch diff (AC5 "at most" lists 3 files)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `1ac2ce6e-40b6-41d8-a2ab-d282a14e267d`._
