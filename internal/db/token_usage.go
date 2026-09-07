@@ -153,6 +153,18 @@ func (d *DB) PurgeOldTokenUsage(maxAge time.Duration) (int64, error) {
 	return res.RowsAffected()
 }
 
+// rollupRow is one aggregated (day, project, agent, model) group carried from the
+// read phase (reader pool) to the apply phase (short writer tx).
+type rollupRow struct {
+	day, project, agent, model string
+	bytes, tokens, calls       int64
+}
+
+// rollupReadHook is a test-only seam (nil in production): it fires at the start of
+// the read phase so a test can pause the aggregate and prove the single coord writer
+// is NOT held while the rollup reads.
+var rollupReadHook func()
+
 // RollupTokenUsage refreshes the daily aggregate table (analytics.token_usage_daily)
 // from raw token_usage, summing ONLY calendar days whose rows are all still present
 // in raw — i.e. strictly newer than the raw-retention purge boundary (now minus
@@ -162,7 +174,21 @@ func (d *DB) PurgeOldTokenUsage(maxAge time.Duration) (int64, error) {
 // undercount once the day fully purges. Each day was captured in full on earlier
 // ticks while it sat wholly inside retention, and a fully-purged day yields no
 // SELECT row (so its stored aggregate is never overwritten) — together that keeps
-// the rollup a faithful, non-shrinking history. Idempotent; writer path.
+// the rollup a faithful, non-shrinking history. Idempotent.
+//
+// WRITER DISCIPLINE (task a0663508): the aggregate SELECT — a full GROUP BY over the
+// raw retention window (a TEMP B-TREE over hundreds of thousands of rows, seconds
+// under CPU load) — runs on the READER pool; the single coord writer is taken only
+// for the apply tx (beginWriterTx), whose statements are pure INSERT ... ON CONFLICT
+// DO UPDATE with explicit values (milliseconds). Running the aggregate on the writer
+// conn (one shared INSERT ... SELECT) was pinning that connection for its full
+// duration and starving every other relay write into writerTimeout.
+//
+// This is the FULL-window rollup: it re-sums every fully-retained day (since = the
+// first midnight after the purge boundary, byte-identical to the pre-split rollup).
+// The cleanup loop runs it once per UTC day as the catch-up that folds in rows which
+// arrived for older days after the cheap routine tick's window had passed them; the
+// frequent 5-min tick uses RollupTokenUsageRoutine instead.
 //
 // retentionDays MUST match the raw-retention window (cleanup.TokenUsageRetention);
 // passing a larger value would try to sum days already purged from raw.
@@ -175,17 +201,82 @@ func (d *DB) RollupTokenUsage(retentionDays int) error {
 	cutoff := time.Now().UTC().AddDate(0, 0, -retentionDays)
 	boundaryDay := time.Date(cutoff.Year(), cutoff.Month(), cutoff.Day(), 0, 0, 0, 0, time.UTC)
 	since := boundaryDay.AddDate(0, 0, 1).Format(time.RFC3339)
-	_, err := d.writerExec(`
-		INSERT INTO token_usage_daily (day, project, agent, model, bytes, tokens, call_count)
+	return d.rollupTokenUsageSince(since)
+}
+
+// RollupTokenUsageRoutine is the cheap 5-min tick: it re-sums only the days that can
+// still change — yesterday 00:00Z UTC onward — so the common tick touches two
+// calendar days instead of TEMP-B-TREE-ing the whole retention window. Late-arriving
+// rows for OLDER days are not corrected here; the once-per-day RollupTokenUsage
+// catch-up folds those in. Same read-then-apply path, so it never holds the writer
+// for the aggregate.
+func (d *DB) RollupTokenUsageRoutine() error {
+	now := time.Now().UTC()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	since := today.AddDate(0, 0, -1).Format(time.RFC3339) // yesterday 00:00Z UTC
+	return d.rollupTokenUsageSince(since)
+}
+
+// rollupTokenUsageSince is the read-then-apply core shared by both rollup ticks.
+// READ PHASE: aggregate raw token_usage for created_at >= since on the reader pool
+// (holds no writer). APPLY PHASE: one short writer tx that upserts the in-memory
+// groups. A day with no raw rows (fully purged) yields no group, so its stored
+// aggregate is never overwritten — the non-shrinking-history invariant above holds
+// for both the routine and the full-catch-up caller.
+func (d *DB) rollupTokenUsageSince(since string) error {
+	if rollupReadHook != nil {
+		rollupReadHook()
+	}
+	// READ PHASE — reader pool; the GROUP BY never touches the coord writer.
+	rows, err := d.ro().Query(`
 		SELECT strftime('%Y-%m-%d', created_at) AS day, project, agent, COALESCE(model, ''),
 		       SUM(bytes), `+tokenSum+`, COUNT(*)
 		FROM token_usage
 		WHERE created_at >= ?
-		GROUP BY day, project, agent, model
+		GROUP BY day, project, agent, model`, since)
+	if err != nil {
+		return err
+	}
+	var groups []rollupRow
+	for rows.Next() {
+		var r rollupRow
+		if err := rows.Scan(&r.day, &r.project, &r.agent, &r.model, &r.bytes, &r.tokens, &r.calls); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		groups = append(groups, r)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	_ = rows.Close()
+	if len(groups) == 0 {
+		return nil // nothing to upsert; purged days keep their stored aggregate
+	}
+
+	// APPLY PHASE — one short writer tx (the ONLY writer use in the rollup). Explicit
+	// values only; no SELECT ... FROM token_usage inside the tx.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.Prepare(`
+		INSERT INTO token_usage_daily (day, project, agent, model, bytes, tokens, call_count)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(day, project, agent, model) DO UPDATE SET
-			bytes=excluded.bytes, tokens=excluded.tokens, call_count=excluded.call_count`,
-		since)
-	return err
+			bytes=excluded.bytes, tokens=excluded.tokens, call_count=excluded.call_count`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+	for _, r := range groups {
+		if _, err := stmt.Exec(r.day, r.project, r.agent, r.model, r.bytes, r.tokens, r.calls); err != nil {
+			return fmt.Errorf("rollup apply: %w", err)
+		}
+	}
+	return tx.Commit()
 }
 
 // GetTokenUsageDailyByProject returns per-project totals from the daily rollup
