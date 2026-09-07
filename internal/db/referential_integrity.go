@@ -90,7 +90,7 @@ func refChecks() []refCheck {
 				WHERE t.dispatched_by IS NOT NULL AND t.dispatched_by <> ''
 				  AND t.archived_at IS NULL
 				  AND LOWER(t.dispatched_by) NOT IN (` + sent + `)
-				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND LOWER(a.name) = LOWER(t.dispatched_by))`,
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND a.name = t.dispatched_by)`,
 		},
 		{
 			class: "orphan_assignee", table: "tasks", refCol: "assigned_to",
@@ -99,7 +99,7 @@ func refChecks() []refCheck {
 				WHERE t.assigned_to IS NOT NULL AND t.assigned_to <> ''
 				  AND t.archived_at IS NULL
 				  AND LOWER(t.assigned_to) NOT IN (` + sent + `)
-				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND LOWER(a.name) = LOWER(t.assigned_to))`,
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND a.name = t.assigned_to)`,
 		},
 		{
 			class: "orphan_claimer", table: "tasks", refCol: "claimed_by",
@@ -108,7 +108,7 @@ func refChecks() []refCheck {
 				WHERE t.claimed_by IS NOT NULL AND t.claimed_by <> ''
 				  AND t.archived_at IS NULL
 				  AND LOWER(t.claimed_by) NOT IN (` + sent + `)
-				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND LOWER(a.name) = LOWER(t.claimed_by))`,
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND a.name = t.claimed_by)`,
 		},
 		// --- limbo: a NON-TERMINAL task assigned to an agent that EXISTS but is
 		// not active (deactivated/deleted/sleeping) and is not a service identity.
@@ -119,7 +119,7 @@ func refChecks() []refCheck {
 			class: "limbo", table: "tasks", refCol: "assigned_to",
 			orphanSQL: `SELECT t.id AS row_id, t.assigned_to AS ref_value, t.project AS project
 				FROM tasks t
-				JOIN agents a ON a.project = t.project AND LOWER(a.name) = LOWER(t.assigned_to)
+				JOIN agents a ON a.project = t.project AND a.name = t.assigned_to
 				WHERE t.status NOT IN ('done', 'cancelled')
 				  AND t.assigned_to IS NOT NULL AND t.assigned_to <> ''
 				  AND t.archived_at IS NULL
@@ -140,8 +140,8 @@ func refChecks() []refCheck {
 				WHERE t.profile_slug IS NOT NULL AND t.profile_slug <> ''
 				  AND t.archived_at IS NULL
 				  AND t.status NOT IN ('done', 'cancelled')
-				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = t.project AND LOWER(p.slug) = LOWER(t.profile_slug))
-				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND LOWER(a.profile_slug) = LOWER(t.profile_slug))`,
+				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = t.project AND p.slug = t.profile_slug)
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = t.project AND a.profile_slug = t.profile_slug)`,
 		},
 		// --- task id references (uuid) ---
 		{
@@ -211,14 +211,14 @@ func refChecks() []refCheck {
 				FROM agents a
 				WHERE a.reports_to IS NOT NULL AND a.reports_to <> ''
 				  AND LOWER(a.reports_to) NOT IN (` + sent + `)
-				  AND NOT EXISTS (SELECT 1 FROM agents b WHERE b.project = a.project AND LOWER(b.name) = LOWER(a.reports_to))`,
+				  AND NOT EXISTS (SELECT 1 FROM agents b WHERE b.project = a.project AND b.name = a.reports_to)`,
 		},
 		{
 			class: "orphan_agent_profile", table: "agents", refCol: "profile_slug",
 			orphanSQL: `SELECT a.id AS row_id, a.profile_slug AS ref_value, a.project AS project
 				FROM agents a
 				WHERE a.profile_slug IS NOT NULL AND a.profile_slug <> ''
-				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = a.project AND LOWER(p.slug) = LOWER(a.profile_slug))`,
+				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = a.project AND p.slug = a.profile_slug)`,
 		},
 		// --- message recipient / sender. Broadcast ('*'), team ('team:%') and
 		// empty (conversation-scoped) targets are addressing forms, not agent names.
@@ -229,7 +229,7 @@ func refChecks() []refCheck {
 				WHERE m.to_agent IS NOT NULL AND m.to_agent <> '' AND m.to_agent <> '*'
 				  AND m.to_agent NOT LIKE 'team:%'
 				  AND LOWER(m.to_agent) NOT IN (` + sent + `)
-				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = m.project AND LOWER(a.name) = LOWER(m.to_agent))`,
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = m.project AND a.name = m.to_agent)`,
 		},
 		{
 			class: "orphan_sender", table: "messages", refCol: "from_agent",
@@ -237,7 +237,7 @@ func refChecks() []refCheck {
 				FROM messages m
 				WHERE m.from_agent IS NOT NULL AND m.from_agent <> ''
 				  AND LOWER(m.from_agent) NOT IN (` + sent + `)
-				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = m.project AND LOWER(a.name) = LOWER(m.from_agent))`,
+				  AND NOT EXISTS (SELECT 1 FROM agents a WHERE a.project = m.project AND a.name = m.from_agent)`,
 		},
 	}
 }
@@ -608,6 +608,13 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 		return nil, err
 	}
 
+	// Case-invariant guard (task B2 790fe231): refChecks() dropped its per-row
+	// LOWER() wrappers for indexed point lookups, which is only sound because the
+	// write paths normalize name/slug/assignee/recipient to lowercase (task B1).
+	// Surface — never block on — any stored value that slipped past that so a
+	// missed/false-flagged orphan is attributable. Reader pool; log only.
+	d.checkCaseInvariant()
+
 	detect, heal := refScanLogLines(deltas, now)
 	for _, l := range detect {
 		log.Print(l)
@@ -701,4 +708,42 @@ func logReferentialCounts(phase string, counts map[string]int) {
 	}
 	log.Printf("integrity: %s referential scan — %d open across %d class(es): %s",
 		phase, total, len(classes), strings.Join(parts, " "))
+}
+
+// caseInvariantCols are the (table, column) pairs the referential scan now assumes
+// are stored lowercase. The write-path normalization (task B1) canonicalizes them,
+// so refChecks() dropped its per-row LOWER() wrappers in favour of indexed point
+// lookups (task B2). This list is the guard for that assumption.
+var caseInvariantCols = []struct{ table, col string }{
+	{"agents", "name"},
+	{"profiles", "slug"},
+	{"tasks", "assigned_to"},
+	{"messages", "to_agent"},
+}
+
+// checkCaseInvariant counts rows whose lowercase-canonical column still holds a
+// non-lowercase value and logs one line per offending table. It is a diagnostic
+// only: it never errors the scan and never blocks a write. A violation means a
+// value reached storage without the B1 write-path normalization, so the scan's
+// plain-equality orphan lookups (LOWER dropped in B2) could miss or false-flag
+// that row — that must be surfaced, not swallowed. Runs on the reader pool.
+// Returns the total number of violating rows (0 on a clean DB); callers in prod
+// ignore it, tests assert on it.
+func (d *DB) checkCaseInvariant() int {
+	total := 0
+	for _, tc := range caseInvariantCols {
+		// table/col are compile-time constants (not user input) — safe to inline.
+		q := fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s WHERE %s IS NOT NULL AND %s <> '' AND %s <> LOWER(%s)",
+			tc.table, tc.col, tc.col, tc.col, tc.col)
+		var n int
+		if err := d.ro().QueryRow(q).Scan(&n); err != nil {
+			continue // fail open — a diagnostic must never break the scan
+		}
+		if n > 0 {
+			log.Printf("integrity: case-invariant violated table=%s.%s n=%d", tc.table, tc.col, n)
+			total += n
+		}
+	}
+	return total
 }
