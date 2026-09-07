@@ -418,6 +418,15 @@ func (r *Relay) apiDeleteProject(w http.ResponseWriter, name string) {
 }
 
 func (r *Relay) apiGetSettings(w http.ResponseWriter) {
+	writeJSON(w, r.settingsResponse())
+}
+
+// settingsResponse assembles the GET (and PUT-200) body: the legacy v1-compat
+// fields kept byte-compatible — the v1 console (api-client.js:490 fetchSettings)
+// reads `linear_mode` and the nested `linear` object, and v1 assets are
+// untouched (T2c) — plus the frozen v2 shape (`groups` + `settings`, design
+// record 6f73f179) ADDED alongside.
+func (r *Relay) settingsResponse() map[string]any {
 	sunType := r.DB.GetSetting("sun_type")
 	if sunType == "" {
 		sunType = "1"
@@ -430,7 +439,7 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 			masked = "…" + apiKey[len(apiKey)-4:]
 		}
 	}
-	writeJSON(w, map[string]any{
+	return map[string]any{
 		"sun_type":    sunType,
 		"linear_mode": enabled,
 		"mode":        modeString(enabled),
@@ -444,50 +453,61 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 			"source":         source,
 		},
 		"federation": r.federationStatus(),
-	})
+		"groups":     settingGroups,
+		"settings":   r.settingsMetadata(),
+	}
 }
 
-// writableSettings is the allowlist of keys the settings API may write. Without
-// it, an (unauthenticated by default) caller could set arbitrary key→value pairs
-// — including swapping linear_api_key or repointing the connector.
-var writableSettings = map[string]bool{
-	"sun_type":         true,
-	setLinearEnabled:   true,
-	setLinearAPIKey:    true,
-	setLinearTeamKey:   true,
-	setLinearProject:   true,
-	setLinearInterval:  true,
-	setLinearRouting:   true,
-	setLinearProjMap:   true,
-	setFederationPeers: true,
-}
+// The settings PUT allowlist and validation now live in settings_spec.go: the
+// panel-facing writableSettings (console/linear/federation) and the full API
+// allowlist writableKeys() are both derived from settingSpecs. apiPutSetting
+// consults the spec (via validateSettings/writableKeys), never writableSettings.
 
 func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
-	var body map[string]string
+	// *string values so JSON null (explicit clear) is distinct from "" (unchanged
+	// on a secret) and from a real value.
+	var body map[string]*string
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
-	// Reject the whole request if any key is not writable (fail before applying).
-	for k := range body {
-		if !writableSettings[k] {
-			// json.Marshal so the (quoted) key is escaped — a raw fmt into a JSON
-			// literal produced invalid JSON, which the client's res.json() then
-			// swallowed, hiding the reason. Encoded, the message always parses.
-			eb, _ := json.Marshal(map[string]string{"error": fmt.Sprintf("setting %q is not writable", k)})
-			http.Error(w, string(eb), http.StatusForbidden)
-			return
+	// Whole-request validation BEFORE any write: 403 {error:"not writable",key}
+	// for unknown/non-writable keys, 400 {error:"invalid value",key,detail} for
+	// bad kind/bounds/cross-key. validateSettings never touches the DB, so a
+	// rejected request applies nothing.
+	if status, key, detail := r.validateSettings(body); status != http.StatusOK {
+		var eb []byte
+		if status == http.StatusForbidden {
+			// error names the key ("not writable: <key>") so the pre-existing
+			// v2 panel test (ServerErrorSurfaced) and the panel banner both see
+			// the refused key; the machine-readable `key` field carries it too.
+			eb, _ = json.Marshal(map[string]string{"error": "not writable: " + key, "key": key})
+		} else {
+			eb, _ = json.Marshal(map[string]string{"error": "invalid value", "key": key, "detail": detail})
 		}
+		http.Error(w, string(eb), status)
+		return
 	}
 	linearChanged := false
 	federationChanged := false
 	for k, v := range body {
-		if k == setFederationPeers {
-			// Preserve stored tokens for peers the UI submitted with an empty
-			// token (it only ever holds masked values).
-			v = r.mergeFederationPeersJSON(v)
+		spec := specByKey[k]
+		switch {
+		case v == nil:
+			// JSON null = explicit clear.
+			r.DB.SetSetting(k, "")
+		case spec.Secret && *v == "":
+			// "" on a secret = unchanged: never log, never apply.
+			continue
+		default:
+			val := *v
+			if k == setFederationPeers {
+				// Preserve stored tokens for peers the UI submitted with an empty
+				// token (it only ever holds masked values).
+				val = r.mergeFederationPeersJSON(val)
+			}
+			r.DB.SetSetting(k, val)
 		}
-		r.DB.SetSetting(k, v)
 		if strings.HasPrefix(k, "linear_") {
 			linearChanged = true
 		}
@@ -502,7 +522,8 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 	if federationChanged {
 		r.ReconfigureFederation()
 	}
-	writeJSON(w, map[string]string{"ok": "true"})
+	// 200 returns the same shape as GET (frozen contract A3).
+	writeJSON(w, r.settingsResponse())
 }
 
 // apiLinearTeams lists the Linear workspace teams using the effective API key
