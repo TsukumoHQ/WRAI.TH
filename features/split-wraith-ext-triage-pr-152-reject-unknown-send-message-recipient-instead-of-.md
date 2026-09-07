@@ -80,20 +80,27 @@ NITS (non-blocking):
 ## 3. Files changed
 
 ```
-internal/relay/ext_pr152_recipient_test.go |  81 ++++++++++++++
- internal/relay/handlers.go                 |  10 +-
- internal/relay/handlers_messaging.go       |  32 ++++++
- internal/relay/handlers_test.go            | 170 +++++++++++++++++++++++++++++
- internal/relay/suggest.go                  | 170 +++++++++++++++++++++++++++++
- 5 files changed, 461 insertions(+), 2 deletions(-)
+...t-unknown-send-message-recipient-instead-of-.md |  99 ++++++++++++
+ internal/relay/ext_pr152_recipient_test.go         |  81 ++++++++++
+ internal/relay/handlers.go                         |  10 +-
+ internal/relay/handlers_messaging.go               |  32 ++++
+ internal/relay/handlers_test.go                    | 170 +++++++++++++++++++++
+ internal/relay/suggest.go                          | 170 +++++++++++++++++++++
+ 6 files changed, 560 insertions(+), 2 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-54ea39d8-1bbd-4efe-a363-b9792b5d0d61 @ `05d21398f`
+- 🟢 AC1: guard fires on GetAgent==nil or status==deleted, message row never inserted because error returns before insert path — evidence: handlers_messaging.go:122-141 early-returns toolResultError(unknownRecipientError(...)) before InsertMessageWithDeliveries; error names the recipient — test: TestSendMessageUnknownRecipientRejected internal/relay/handlers_test.go:404-415
+- 🟢 AC2: test asserts no IsError and a persisted message id for all four recipients, plus inbox delivery for broadcast/team — evidence: handlers_messaging.go:122 exempts to in {*, user, human, team:*}; human/user hit ResolveRecipients direct path, team: hits team-fanout branch — same as baseline d35ab8c — test: TestSendMessageKnownNonAgentRecipientsStillAccepted internal/relay/ext_pr152_recipient_test.go:13-58
+- 🟢 AC3: behavioral half pins project-scoped ListAgents (no cross-project leak); structural halves (scope + author + green build) verified at the gate — evidence: diff 4 PR source files + 1 added test file matches plan files: scope OK; original author Jérôme Chincarini preserved on 207b9b1; validate command green — test: TestExtPR152DiffScope internal/relay/ext_pr152_recipient_test.go:60-81 + go test ./internal/relay/... ./internal/db/... exit=0
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-54ea39d8-1bbd-4efe-a363-b9792b5d0d61)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./internal/relay/... ./internal/db/... green (819 passed); AC1 reject guard at handlers_messaging.go:122-141 pins TestSendMessageUnknownRecipientRejected; AC2 'human'+'user' exemption at handlers_messaging.go:122 + RecipientIsFleetExpected deferral at 132-135 pin TestSendMessageKnownNonAgentRecipientsStillAccepted (4 cases: *, team:dev, user, human) + TestSendMessageQueuesForFleetExpectedRecipient; AC3 unknownRecipientError project-scoped ListAgents pins TestExtPR152DiffScope cross-project leak; original author jchincarini preserved on 207b9b1; diff 4 PR source files + 1 added test file matches plan
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `54ea39d8-1bbd-4efe-a363-b9792b5d0d61`._
