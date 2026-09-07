@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/t2d-a (from main)
 ## Relay task : e3d26498-49a2-46a9-8db5-8a6b22531720
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -56,11 +56,11 @@ auth/middleware, MCP registry, ingest/SSE/tokens, updater/release. Out of scope 
 ## 3. Files changed
 
 ```
-...blesettings-legacy-9-key-panel-allowlist-spe.md | 68 ++++++++++++++++++++
- internal/relay/api.go                              |  7 +--
- internal/relay/settings_spec.go                    | 18 +-----
- internal/relay/settings_spec_test.go               | 72 ++++++++++++----------
- 4 files changed, 112 insertions(+), 53 deletions(-)
+...blesettings-legacy-9-key-panel-allowlist-spe.md | 78 ++++++++++++++++++++++
+ internal/relay/api.go                              |  7 +-
+ internal/relay/settings_spec.go                    | 18 +----
+ internal/relay/settings_spec_test.go               | 72 +++++++++++---------
+ 4 files changed, 122 insertions(+), 53 deletions(-)
 ```
 
 ## 4. QA Log
@@ -70,9 +70,15 @@ auth/middleware, MCP registry, ingest/SSE/tokens, updater/release. Out of scope 
 - 🔴 AC2: Implementation commit missing; AC2 identifier scan returns 5 hits in non-_test.go files — evidence: grep -n writableSettings internal/relay/*.go | non-_test.go matches: settings_spec.go:14,144,150 and api.go:462,464 = 5 occurrences; TestNoWritableSettingsIdentifierInSource does not exist in settings_spec_test.go — test: NONE — AC2-named TestNoWritableSettingsIdentifierInSource absent from diff
 - 🔴 AC3: [partial] Tests green by accident — old code with writableSettings still present, not the contract-required new state — evidence: go test -tags fts5 ./internal/relay/... = 476 PASS; but AC3 scope: git diff main..wraith-backend-2/t2d-a shows ONLY features/wraith-relay-t2d-a-...md, zero changes to internal/relay/settings_spec.go|settings_spec_test.go|api.go — test: TestV2ConfigPanel + TestSettingsSpec* still green (cached) because implementation never landed
 
+### Round 2 — ✅ APPROVED by review-e3d26498-49a2-46a9-8db5-8a6b22531720 @ `fd813ae39`
+- 🟢 AC1: test runs live handler doAPI(r,PUT,/settings,...) and asserts both 200 + DB.GetSetting reads, behavioral not mock — evidence: internal/relay/settings_spec_test.go:36-106 TestSettingsSpecAllowlistDerived; internal/relay/settings_spec.go:144-154 writableKeys() unchanged — test: TestSettingsSpecAllowlistDerived internal/relay/settings_spec_test.go:36 — asserts len(wk)==24 == 9 legacy + 15 operational, no evil_key, PUT sun_type=2 + PUT message_retention=48h both 200 via doAPI through real apiPutSetting
+- 🟢 AC2: test exercises the package dir scan + identifier check end-to-end; passing proves zero matches in non-_test.go files — evidence: internal/relay/settings_spec_test.go:298-316 TestNoWritableSettingsIdentifierInSource; grep -l writableSettings internal/relay/*.go | grep -v _test.go empty — test: TestNoWritableSettingsIdentifierInSource internal/relay/settings_spec_test.go:298 — os.ReadDir + ReadFile every .go excluding _test.go, strings.Contains zero occurrences
+- 🟢 AC3: scope matches the 3-file AC requirement; full package suite clean (477/477) — evidence: go test -tags fts5 ./internal/relay/... 477 passed; git diff stat shows only api.go + settings_spec.go + settings_spec_test.go — test: TestSettingsSpecAllowlistDerived + TestSettingsPutBoundsAndCrossKey + TestSettingsGetFrozenShape + TestSettingsSecretHandling + TestSettingsUnknownKeyWholeRequest + TestNoWritableSettingsIdentifierInSource + 5x TestV2ConfigPanel* all green in single go test run
+
 ## 5. Timeline
 
 - round 1 → **reject** (review-e3d26498-49a2-46a9-8db5-8a6b22531720)
+- round 2 → **approve** (review-e3d26498-49a2-46a9-8db5-8a6b22531720)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `e3d26498-49a2-46a9-8db5-8a6b22531720`._
