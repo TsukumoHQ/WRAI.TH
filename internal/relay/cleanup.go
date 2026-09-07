@@ -117,6 +117,7 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 	lastBackup := time.Now() // first snapshot fires BackupInterval after boot
 	backupKeep := resolveBackupKeep()
 	reviewerTTL := resolveReviewerTTL()
+	lastRollupCatchup := "" // UTC day of the last full-window rollup catch-up ("" => run on first tick)
 	go func() {
 		defer ticker.Stop()
 		// A healthy boot is the post-upgrade verification the updater lacks: prune
@@ -166,8 +167,18 @@ func StartCleanup(database *db.DB, done <-chan struct{}) {
 				}
 				// Refresh the daily rollup BEFORE pruning raw rows, so shortening the
 				// raw window never drops aggregate history the dashboards still show.
-				if err := database.RollupTokenUsage(TokenUsageRetentionDays); err != nil {
+				// Routine tick: only days that can still change (yesterday 00:00Z on).
+				if err := database.RollupTokenUsageRoutine(); err != nil {
 					log.Printf("token usage rollup error: %v", err)
+				}
+				// Once per UTC day, re-sum the full retention window to fold in rows
+				// that arrived for older days after the routine window passed them.
+				if today := time.Now().UTC().Format("2006-01-02"); today != lastRollupCatchup {
+					if err := database.RollupTokenUsage(TokenUsageRetentionDays); err != nil {
+						log.Printf("token usage rollup (daily catch-up) error: %v", err)
+					} else {
+						lastRollupCatchup = today
+					}
 				}
 				if purged, err := database.PurgeOldTokenUsage(TokenUsageRetention); err != nil {
 					log.Printf("purge token usage error: %v", err)
