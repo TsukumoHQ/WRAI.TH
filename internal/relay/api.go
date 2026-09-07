@@ -955,7 +955,7 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 
 	replyTo := optionalString(body.ReplyTo)
 
-	msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(body.Project, "user", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To}, "")
+	msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(body.Project, "human", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To}, "")
 	if err != nil {
 		http.Error(w, `{"error":"failed to send response"}`, http.StatusInternalServerError)
 		return
@@ -967,7 +967,7 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 	// the 7th and last of InsertMessageWithDeliveries' 7 callers to close it).
 	if !dedupHit {
 		// Push notification to the target agent
-		r.Registry.Notify(body.Project, body.To, "user", "User response", msg.ID)
+		r.Registry.Notify(body.Project, body.To, "human", "User response", msg.ID)
 	}
 
 	writeJSON(w, map[string]any{"ok": true, "message_id": msg.ID})
