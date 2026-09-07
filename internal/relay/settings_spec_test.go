@@ -124,8 +124,9 @@ func TestSettingsPutBoundsAndCrossKey(t *testing.T) {
 		t.Fatalf("message_retention=1h: status %d, want 400\nbody: %s", w.Code, w.Body.String())
 	}
 	j := decodeJSON(t, w)
-	if j["error"] != "invalid value" || j["key"] != "message_retention" || j["detail"] == "" {
-		t.Errorf("400 body = %v, want {error:invalid value, key:message_retention, detail:non-empty}", j)
+	errStr, _ := j["error"].(string)
+	if !strings.Contains(errStr, "invalid value") || j["key"] != "message_retention" || j["detail"] == "" {
+		t.Errorf("400 body = %v, want error containing \"invalid value\" + key:message_retention + detail:non-empty", j)
 	}
 	if got := r.DB.GetSetting("message_retention"); got != "" {
 		t.Errorf("message_retention should be unchanged (empty), got %q", got)

@@ -483,7 +483,9 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 			// the refused key; the machine-readable `key` field carries it too.
 			eb, _ = json.Marshal(map[string]string{"error": "not writable: " + key, "key": key})
 		} else {
-			eb, _ = json.Marshal(map[string]string{"error": "invalid value", "key": key, "detail": detail})
+			// Symmetric with the 403 form (cto A6): human `error` names the key,
+			// `detail` carries the reason (panel renders j.detail || j.error).
+			eb, _ = json.Marshal(map[string]string{"error": "invalid value: " + key, "key": key, "detail": detail})
 		}
 		http.Error(w, string(eb), status)
 		return
