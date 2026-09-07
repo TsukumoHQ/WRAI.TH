@@ -246,17 +246,287 @@ func refChecks() []refCheck {
 // A var, not a const, so a test can shrink it.
 var referentialScanTimeout = 30 * time.Second
 
-// runReferentialScan runs every referential check inside one writer transaction
-// and upserts the results into integrity_quarantine. It returns the count of
-// currently-OPEN (unresolved) quarantine rows per class. Idempotent: re-running
-// on an unchanged DB inserts nothing and flips no marker. Backward-compatible:
-// only the side-table is written; no existing row is touched.
+// refScanReadHook and refScanBetweenHook are test-only seams (nil in production):
+// refScanReadHook fires once during the read phase (after the first class is read)
+// so a test can observe the writer is free while reads are in flight;
+// refScanBetweenHook fires in the live path AFTER the read phase and BEFORE the
+// apply tx so a test can mutate the DB and exercise the accepted read↔apply race.
+var (
+	refScanReadHook    func()
+	refScanBetweenHook func()
+)
+
+// --- scan orchestration -----------------------------------------------------
 //
-// Per check, three steps keep the lifecycle correct and re-run-safe:
-//  1. INSERT OR IGNORE the current orphans (new ones get detected_at; the UNIQUE
-//     key dedupes existing ones — first-seen detected_at is preserved).
-//  2. RE-OPEN any row that had been marked resolved but is orphan again.
-//  3. MARK RESOLVED any open row whose ref now resolves (no delete — audit trail).
+// The scan is split into a READ phase and an APPLY phase so it never holds the
+// single writer connection (db.go SetMaxOpenConns(1)) for longer than the
+// milliseconds its writes need. Root cause of the 2026-09-02 writer-starvation
+// window (task 1ac2ce6e): the previous implementation ran all ~16 classes' five
+// statements — each embedding the class orphanSQL — inside ONE writer tx bounded
+// by referentialScanTimeout (30s) > writerTimeout (15s), so under fleet load a
+// 20–40s scan deadlined every other write. Now the orphanSQL runs ONCE per class
+// on the reader pool (read phase), the deltas are computed in Go, and only short
+// INSERT/UPDATE-by-row_id statements touch the writer (apply phase, bounded by
+// writerTimeout via beginWriterTx). Pattern mirrors dangling_board.go and
+// limbo_sweep.go (reader scan, then a short writer tx).
+//
+// Accepted race (ruled): a ref that heals between the read and the apply is
+// resolved one tick (2 min) later, not in this scan. Idempotent.
+
+// orphanRow is one current offender: (row_id, ref_value, project) as the
+// orphanSQL aliases them.
+type orphanRow struct {
+	rowID    string
+	refValue string
+	project  string
+}
+
+// refDelta is the per-class change set computed by the read phase from the
+// current orphan set and the existing quarantine rows. The apply phase writes
+// exactly these — no orphanSQL text runs on the writer.
+type refDelta struct {
+	c          refCheck
+	newOrphans []orphanRow // orphan AND not currently open (brand-new or resolved-then-regressed)
+	reopenIDs  []string    // resolved rows that are orphan again → re-open
+	resolveIDs []string    // open rows whose ref now resolves → mark resolved
+}
+
+// roQueryer is the read surface the read phase needs: the reader pool in the
+// live path, the boot tx at startup. *sql.DB, *sql.Tx and *sql.Conn satisfy it.
+type roQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+}
+
+// execer is the write surface the apply phase needs. *sql.Tx (boot) and the
+// embedded *sql.Tx of a writerTx (live) satisfy it.
+type execer interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+}
+
+// readRefDeltas computes every class's change set with READ-ONLY queries on rq.
+// The orphanSQL runs ONCE per class here (never inside the writer tx). Set
+// arithmetic is done in Go: newOrphans = orphan \ open, reopen = resolved ∩
+// orphan, resolve = open \ orphan. Iteration order of the orphan/open queries is
+// preserved into the returned slices so the detect/heal log lines are stable.
+func readRefDeltas(ctx context.Context, rq roQueryer) ([]refDelta, error) {
+	out := make([]refDelta, 0, 16)
+	for i, c := range refChecks() {
+		if i == 0 && refScanReadHook != nil {
+			refScanReadHook()
+		}
+		var orphans []orphanRow
+		orphanIDs := map[string]bool{}
+		orows, err := rq.QueryContext(ctx, c.orphanSQL)
+		if err != nil {
+			return nil, fmt.Errorf("referential scan %s: orphan read: %w", c.class, err)
+		}
+		for orows.Next() {
+			var o orphanRow
+			if err := orows.Scan(&o.rowID, &o.refValue, &o.project); err != nil {
+				_ = orows.Close()
+				return nil, fmt.Errorf("referential scan %s: orphan scan: %w", c.class, err)
+			}
+			orphans = append(orphans, o)
+			orphanIDs[o.rowID] = true
+		}
+		if err := orows.Err(); err != nil {
+			_ = orows.Close()
+			return nil, fmt.Errorf("referential scan %s: orphan rows: %w", c.class, err)
+		}
+		_ = orows.Close()
+
+		open, err := readQuarantineIDs(ctx, rq, c.class, false)
+		if err != nil {
+			return nil, fmt.Errorf("referential scan %s: open read: %w", c.class, err)
+		}
+		resolved, err := readQuarantineIDs(ctx, rq, c.class, true)
+		if err != nil {
+			return nil, fmt.Errorf("referential scan %s: resolved read: %w", c.class, err)
+		}
+		openSet := idSet(open)
+
+		d := refDelta{c: c}
+		for _, o := range orphans {
+			if !openSet[o.rowID] {
+				d.newOrphans = append(d.newOrphans, o) // orphan \ open
+			}
+		}
+		for _, id := range resolved {
+			if orphanIDs[id] {
+				d.reopenIDs = append(d.reopenIDs, id) // resolved ∩ orphan
+			}
+		}
+		for _, id := range open {
+			if !orphanIDs[id] {
+				d.resolveIDs = append(d.resolveIDs, id) // open \ orphan
+			}
+		}
+		out = append(out, d)
+	}
+	return out, nil
+}
+
+// readQuarantineIDs returns the row_ids of the quarantine rows for a class,
+// either the OPEN set (resolved==false) or the RESOLVED set (resolved==true).
+func readQuarantineIDs(ctx context.Context, rq roQueryer, class string, resolved bool) ([]string, error) {
+	q := `SELECT row_id FROM integrity_quarantine WHERE class = ? AND resolved_at IS NULL`
+	if resolved {
+		q = `SELECT row_id FROM integrity_quarantine WHERE class = ? AND resolved_at IS NOT NULL`
+	}
+	rows, err := rq.QueryContext(ctx, q, class)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func idSet(ids []string) map[string]bool {
+	m := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		m[id] = true
+	}
+	return m
+}
+
+// refApplyChunk bounds each UPDATE ... row_id IN (...) list. SQLite's default
+// bound-parameter limit is 999; 500 keeps each statement small and well under it.
+const refApplyChunk = 500
+
+// applyRefDeltas writes the change sets on the writer surface x. The ONLY
+// statements it runs are INSERT OR IGNORE (explicit values) and UPDATE ...
+// WHERE row_id IN (explicit list) against integrity_quarantine — no orphanSQL
+// text, so the writer holds the connection for milliseconds, not the length of a
+// 16-class scan. Order per class: insert, reopen, resolve (matches the pre-split
+// statement order so a mid-scan crash leaves the same intermediate state).
+func applyRefDeltas(x execer, deltas []refDelta, now string) error {
+	for _, d := range deltas {
+		c := d.c
+		for _, o := range d.newOrphans {
+			if _, err := x.Exec(
+				`INSERT OR IGNORE INTO integrity_quarantine
+				   (table_name, row_id, ref_col, ref_value, class, project, detected_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+				c.table, o.rowID, c.refCol, o.refValue, c.class, o.project, now,
+			); err != nil {
+				return fmt.Errorf("referential scan %s: insert: %w", c.class, err)
+			}
+		}
+		for _, chunk := range chunkStrings(d.reopenIDs, refApplyChunk) {
+			ph, ids := inPlaceholders(chunk)
+			args := append([]interface{}{now, c.class}, ids...)
+			if _, err := x.Exec(
+				`UPDATE integrity_quarantine
+				 SET resolved_at = NULL, detected_at = ?
+				 WHERE class = ? AND resolved_at IS NOT NULL AND row_id IN (`+ph+`)`,
+				args...,
+			); err != nil {
+				return fmt.Errorf("referential scan %s: reopen: %w", c.class, err)
+			}
+		}
+		for _, chunk := range chunkStrings(d.resolveIDs, refApplyChunk) {
+			ph, ids := inPlaceholders(chunk)
+			args := append([]interface{}{now, c.class}, ids...)
+			if _, err := x.Exec(
+				`UPDATE integrity_quarantine
+				 SET resolved_at = ?
+				 WHERE class = ? AND resolved_at IS NULL AND row_id IN (`+ph+`)`,
+				args...,
+			); err != nil {
+				return fmt.Errorf("referential scan %s: resolve: %w", c.class, err)
+			}
+		}
+	}
+	return nil
+}
+
+// chunkStrings splits ids into slices of at most size (nil in → nil out).
+func chunkStrings(ids []string, size int) [][]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	var out [][]string
+	for i := 0; i < len(ids); i += size {
+		j := i + size
+		if j > len(ids) {
+			j = len(ids)
+		}
+		out = append(out, ids[i:j])
+	}
+	return out
+}
+
+// inPlaceholders renders "?, ?, ..." and the matching arg slice for an IN list.
+func inPlaceholders(ids []string) (string, []interface{}) {
+	ph := make([]string, len(ids))
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		ph[i] = "?"
+		args[i] = id
+	}
+	return strings.Join(ph, ", "), args
+}
+
+// refScanLogLines builds the transition log lines from the deltas: one detect
+// line per newly-opening orphan (class order, then orphan-query order), then one
+// heal line per resolving row (class order, then open-query order). Byte-identical
+// to the pre-split lines; emitted post-commit by the callers.
+func refScanLogLines(deltas []refDelta, now string) (detect, heal []string) {
+	for _, d := range deltas {
+		ref := d.c.table + "." + d.c.refCol
+		for _, o := range d.newOrphans {
+			detect = append(detect, fmt.Sprintf(
+				"integrity: detect class=%s ref=%s value=%s row=%s", d.c.class, ref, o.refValue, o.rowID))
+		}
+	}
+	for _, d := range deltas {
+		for _, id := range d.resolveIDs {
+			heal = append(heal, fmt.Sprintf(
+				"integrity: heal class=%s row=%s action=ref_resolved resolved_at=%s", d.c.class, id, now))
+		}
+	}
+	return detect, heal
+}
+
+// openCountsByClass returns the open (unresolved) quarantine count per class,
+// the scan's return value.
+func openCountsByClass(ctx context.Context, rq roQueryer) (map[string]int, error) {
+	counts := map[string]int{}
+	rows, err := rq.QueryContext(ctx,
+		`SELECT class, COUNT(*) FROM integrity_quarantine WHERE resolved_at IS NULL GROUP BY class`)
+	if err != nil {
+		return nil, fmt.Errorf("referential scan: count: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var class string
+		var n int
+		if err := rows.Scan(&class, &n); err != nil {
+			return nil, fmt.Errorf("referential scan: count scan: %w", err)
+		}
+		counts[class] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("referential scan: count rows: %w", err)
+	}
+	return counts, nil
+}
+
+// runReferentialScan runs the scan inside ONE transaction on conn (both read and
+// apply). Kept for the boot-time callers (migrate, reconcile) that run before the
+// reader pool exists and under no fleet contention — there the single-tx shape is
+// harmless. The live periodic path uses (*DB).RunReferentialScan, which splits
+// the phases across the reader pool and a short writer tx. Both share
+// readRefDeltas/applyRefDeltas, so the SQL and the delta arithmetic are one
+// source. Idempotent; only the side-table is written.
 func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), referentialScanTimeout)
 	defer cancel()
@@ -269,137 +539,81 @@ func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
-	// Per-row transition logging (emitted post-commit, transition-only so a
-	// restart re-emits just the delta — not every open row — keeping the live
-	// log bounded). detect = a row about to open (a brand-new orphan, or a
-	// previously-resolved row regressing to orphan); heal = an open row whose
-	// ref now resolves. Captured BEFORE the mutations below so the "not yet
-	// open" / "still open" sets are the pre-scan state.
-	var detectLines, healLines []string
-
-	for _, c := range refChecks() {
-		ref := c.table + "." + c.refCol
-		drows, err := tx.QueryContext(ctx,
-			`SELECT o.row_id, o.ref_value FROM (`+c.orphanSQL+`) o
-			 WHERE o.row_id NOT IN (
-			   SELECT row_id FROM integrity_quarantine WHERE class = ? AND resolved_at IS NULL)`,
-			c.class)
-		if err != nil {
-			return nil, fmt.Errorf("referential scan %s: detect capture: %w", c.class, err)
-		}
-		for drows.Next() {
-			var rowID, refValue string
-			if err := drows.Scan(&rowID, &refValue); err != nil {
-				_ = drows.Close()
-				return nil, fmt.Errorf("referential scan %s: detect scan: %w", c.class, err)
-			}
-			detectLines = append(detectLines, fmt.Sprintf(
-				"integrity: detect class=%s ref=%s value=%s row=%s", c.class, ref, refValue, rowID))
-		}
-		if err := drows.Err(); err != nil {
-			_ = drows.Close()
-			return nil, fmt.Errorf("referential scan %s: detect rows: %w", c.class, err)
-		}
-		_ = drows.Close()
-
-		hrows, err := tx.QueryContext(ctx,
-			`SELECT row_id FROM integrity_quarantine
-			 WHERE class = ? AND resolved_at IS NULL
-			   AND row_id NOT IN (SELECT o.row_id FROM (`+c.orphanSQL+`) o)`,
-			c.class)
-		if err != nil {
-			return nil, fmt.Errorf("referential scan %s: heal capture: %w", c.class, err)
-		}
-		for hrows.Next() {
-			var rowID string
-			if err := hrows.Scan(&rowID); err != nil {
-				_ = hrows.Close()
-				return nil, fmt.Errorf("referential scan %s: heal scan: %w", c.class, err)
-			}
-			healLines = append(healLines, fmt.Sprintf(
-				"integrity: heal class=%s row=%s action=ref_resolved resolved_at=%s", c.class, rowID, now))
-		}
-		if err := hrows.Err(); err != nil {
-			_ = hrows.Close()
-			return nil, fmt.Errorf("referential scan %s: heal rows: %w", c.class, err)
-		}
-		_ = hrows.Close()
-
-		// 1. insert new orphans
-		if _, err := tx.ExecContext(ctx,
-			`INSERT OR IGNORE INTO integrity_quarantine
-			   (table_name, row_id, ref_col, ref_value, class, project, detected_at)
-			 SELECT ?, o.row_id, ?, o.ref_value, ?, o.project, ?
-			 FROM (`+c.orphanSQL+`) o`,
-			c.table, c.refCol, c.class, now,
-		); err != nil {
-			return nil, fmt.Errorf("referential scan %s: insert: %w", c.class, err)
-		}
-		// 2. re-open regressed rows (resolved before, orphan again)
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE integrity_quarantine
-			 SET resolved_at = NULL, detected_at = ?
-			 WHERE class = ? AND resolved_at IS NOT NULL
-			   AND row_id IN (SELECT o.row_id FROM (`+c.orphanSQL+`) o)`,
-			now, c.class,
-		); err != nil {
-			return nil, fmt.Errorf("referential scan %s: reopen: %w", c.class, err)
-		}
-		// 3. mark healed rows resolved (ref now resolves) — never deleted
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE integrity_quarantine
-			 SET resolved_at = ?
-			 WHERE class = ? AND resolved_at IS NULL
-			   AND row_id NOT IN (SELECT o.row_id FROM (`+c.orphanSQL+`) o)`,
-			now, c.class,
-		); err != nil {
-			return nil, fmt.Errorf("referential scan %s: resolve: %w", c.class, err)
-		}
-	}
-
-	counts := map[string]int{}
-	rows, err := tx.QueryContext(ctx,
-		`SELECT class, COUNT(*) FROM integrity_quarantine WHERE resolved_at IS NULL GROUP BY class`)
+	deltas, err := readRefDeltas(ctx, tx)
 	if err != nil {
-		return nil, fmt.Errorf("referential scan: count: %w", err)
+		return nil, err
 	}
-	for rows.Next() {
-		var class string
-		var n int
-		if err := rows.Scan(&class, &n); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("referential scan: count scan: %w", err)
-		}
-		counts[class] = n
+	if err := applyRefDeltas(tx, deltas, now); err != nil {
+		return nil, err
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("referential scan: count rows: %w", err)
+	counts, err := openCountsByClass(ctx, tx)
+	if err != nil {
+		return nil, err
 	}
-	_ = rows.Close()
-
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("referential scan: commit: %w", err)
 	}
-	// Emit per-row lines only after the tx commits, so a rolled-back scan logs
-	// nothing. Volume is the transition delta (see the capture note above).
-	for _, l := range detectLines {
+
+	detect, heal := refScanLogLines(deltas, now)
+	for _, l := range detect {
 		log.Print(l)
 	}
-	for _, l := range healLines {
+	for _, l := range heal {
 		log.Print(l)
 	}
 	return counts, nil
 }
 
-// RunReferentialScan runs the referential scan on the writer connection and
-// returns the per-class open-orphan counts. Phase 2 wires it onto the existing
-// 2-minute task-maintenance sweeper (the periodic GC deferred from Phase 0), so
-// orphans created during a long uptime — e.g. a task whose assignee is
-// deactivated between reboots — surface without a restart. It is idempotent, so a
-// clean sweep is a cheap near-no-op.
+// RunReferentialScan runs the referential scan on the LIVE relay: the read phase
+// (every class's orphanSQL) on the reader pool, then ONE short writer tx
+// (beginWriterTx, writerTimeout-bounded) that applies only the INSERT/UPDATE
+// deltas. The writer is therefore never held for the length of the scan, so a
+// slow scan under fleet load can no longer starve send_message/claim_task/
+// complete_task/flush/expire into writerTimeout (task 1ac2ce6e). Idempotent.
 func (d *DB) RunReferentialScan() (map[string]int, error) {
-	return runReferentialScan(d.conn)
+	// Read phase — reader pool, own ctx (referentialScanTimeout). Holds no writer.
+	rctx, rcancel := context.WithTimeout(context.Background(), referentialScanTimeout)
+	deltas, err := readRefDeltas(rctx, d.ro())
+	rcancel()
+	if err != nil {
+		return nil, err
+	}
+
+	if refScanBetweenHook != nil {
+		refScanBetweenHook()
+	}
+
+	now := time.Now().UTC().Format(memoryTimeFmt)
+
+	// Apply phase — one short writer tx, bounded by writerTimeout via beginWriterTx.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, fmt.Errorf("referential scan: begin writer: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after commit
+	if err := applyRefDeltas(tx.Tx, deltas, now); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("referential scan: commit: %w", err)
+	}
+
+	// Count phase — reader pool, post-commit (sees the committed apply).
+	cctx, ccancel := context.WithTimeout(context.Background(), referentialScanTimeout)
+	counts, err := openCountsByClass(cctx, d.ro())
+	ccancel()
+	if err != nil {
+		return nil, err
+	}
+
+	detect, heal := refScanLogLines(deltas, now)
+	for _, l := range detect {
+		log.Print(l)
+	}
+	for _, l := range heal {
+		log.Print(l)
+	}
+	return counts, nil
 }
 
 // MarkQuarantine upserts ONE referential-integrity quarantine row (the same

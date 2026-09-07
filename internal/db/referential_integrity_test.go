@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"database/sql"
 	"log"
+	"os"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // captureLog redirects the stdlib logger (what referential_integrity.go writes
@@ -209,7 +213,7 @@ func TestReferentialScanDetectsOrphanClasses(t *testing.T) {
 	seedCycle(t, c, "cy-clean", "p1")
 	seedCycle(t, c, "cy-oproject", "ghost-project")
 
-	counts, err := runReferentialScan(c)
+	counts, err := d.RunReferentialScan()
 	if err != nil {
 		t.Fatalf("scan: %v", err)
 	}
@@ -293,14 +297,14 @@ func TestReferentialScanIdempotent(t *testing.T) {
 	seedWorkflow(t, c, "wf-oproject", "ghost-project")
 	seedCycle(t, c, "cy-oproject", "ghost-project")
 
-	first, err := runReferentialScan(c)
+	first, err := d.RunReferentialScan()
 	if err != nil {
 		t.Fatalf("scan 1: %v", err)
 	}
 	var rowsAfter1 int
 	_ = c.QueryRow(`SELECT COUNT(*) FROM integrity_quarantine`).Scan(&rowsAfter1)
 
-	second, err := runReferentialScan(c)
+	second, err := d.RunReferentialScan()
 	if err != nil {
 		t.Fatalf("scan 2: %v", err)
 	}
@@ -330,7 +334,7 @@ func TestReferentialScanResolvesHealedRefs(t *testing.T) {
 	seedProfile(t, c, "p1", "backend")
 	seedTask(t, c, "t-odisp", "p1", "pending", "latecomer", "", "", "backend", "", "", false)
 
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan 1: %v", err)
 	}
 	if openCount(t, c, "orphan_dispatcher") != 1 {
@@ -340,7 +344,7 @@ func TestReferentialScanResolvesHealedRefs(t *testing.T) {
 	// The referenced agent now exists → the ref resolves.
 	seedAgent(t, c, "p1", "latecomer", "active", "backend", "", 0)
 
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan 2: %v", err)
 	}
 	if openCount(t, c, "orphan_dispatcher") != 0 {
@@ -368,7 +372,7 @@ func TestReferentialScanReopensRegressedRef(t *testing.T) {
 	seedTask(t, c, "t-odisp", "p1", "pending", "flaky", "", "", "backend", "", "", false)
 
 	// Scan 1: resolves (flaky exists) → no open orphan.
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan 1: %v", err)
 	}
 	if openCount(t, c, "orphan_dispatcher") != 0 {
@@ -380,7 +384,7 @@ func TestReferentialScanReopensRegressedRef(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan 2: %v", err)
 	}
 	if openCount(t, c, "orphan_dispatcher") != 1 {
@@ -509,7 +513,7 @@ func TestOrphanProfilePoolResolver(t *testing.T) {
 	// Task slug matches neither profiles nor agents → orphan.
 	seedTask(t, c, "t-dead", "p1", "pending", "linear", "", "", "no-such-slug", "", "", false)
 
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if got := openCount(t, c, "orphan_profile"); got != 1 {
@@ -537,7 +541,7 @@ func TestOrphanProfilePoolCaseInsensitive(t *testing.T) {
 	seedAgent(t, c, "p2", "other", "active", "cross-slug", "", 0)
 	seedTask(t, c, "t-xproj", "p1", "pending", "linear", "", "", "cross-slug", "", "", false)
 
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if quarantineRowExists(t, c, "orphan_profile", "t-ci") {
@@ -562,7 +566,7 @@ func TestOrphanProfileTerminalExclusion(t *testing.T) {
 	// ...and on a non-terminal task → STILL flagged.
 	seedTask(t, c, "t-open", "p1", "in-progress", "linear", "", "", "dead-slug", "", "", false)
 
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if got := openCount(t, c, "orphan_profile"); got != 1 {
@@ -586,7 +590,7 @@ func TestOrphanProfileHealPath(t *testing.T) {
 	seedTask(t, c, "t-heal", "p1", "pending", "linear", "", "", "joins-later", "", "", false)
 
 	// Scan 1: no profile, no agent → flagged.
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan 1: %v", err)
 	}
 	if !quarantineRowExists(t, c, "orphan_profile", "t-heal") {
@@ -595,7 +599,7 @@ func TestOrphanProfileHealPath(t *testing.T) {
 
 	// An agent now carries the slug → the condition clears.
 	seedAgent(t, c, "p1", "newcomer", "active", "joins-later", "", 0)
-	if _, err := runReferentialScan(c); err != nil {
+	if _, err := d.RunReferentialScan(); err != nil {
 		t.Fatalf("scan 2: %v", err)
 	}
 	if openCount(t, c, "orphan_profile") != 0 {
@@ -608,5 +612,289 @@ func TestOrphanProfileHealPath(t *testing.T) {
 	}
 	if resolved != 1 {
 		t.Errorf("healed quarantine row must be stamped resolved (not deleted): got %d", resolved)
+	}
+}
+
+// --- task 1ac2ce6e: writer-starvation split (read phase off the writer) ------
+
+// TestReadPhaseDoesNotHoldWriter (AC1) parks a live scan inside its read phase
+// and proves a concurrent writerExec still completes fast — the scan holds no
+// writer while it reads. Revert-check: if the read phase ran on d.conn inside a
+// tx (the pre-split bug), the writer would be held and the concurrent write would
+// block past the 100ms bound, failing this test.
+func TestReadPhaseDoesNotHoldWriter(t *testing.T) {
+	d := testDB(t)
+	seedProject(t, d.conn, "p1")
+	seedTask(t, d.conn, "t-odisp", "p1", "pending", "ghost", "", "", "backend", "", "", false)
+
+	readParked := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	refScanReadHook = func() {
+		once.Do(func() { close(readParked) })
+		<-release
+	}
+	defer func() { refScanReadHook = nil }()
+
+	scanDone := make(chan error, 1)
+	go func() { _, err := d.RunReferentialScan(); scanDone <- err }()
+
+	<-readParked // scan is parked inside the read phase (no apply tx open yet)
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := d.writerExec(
+			`INSERT INTO settings (key, value) VALUES ('ac1_probe', '1')
+			 ON CONFLICT(key) DO UPDATE SET value = '1'`)
+		writeDone <- err
+	}()
+
+	select {
+	case err := <-writeDone:
+		if err != nil {
+			close(release)
+			t.Fatalf("concurrent writerExec errored during read phase: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		close(release)
+		<-scanDone
+		t.Fatal("concurrent writerExec blocked >100ms while the scan read phase was in progress — the scan is holding the writer during reads")
+	}
+
+	close(release)
+	if err := <-scanDone; err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+}
+
+// TestReadPhaseHoldGuard is the positive control for AC1's 100ms discriminator:
+// while a writer tx is genuinely held, a concurrent writerExec MUST block past
+// 100ms. This proves the AC1 bound can actually catch a writer being held (so the
+// AC1 pass is meaningful, not vacuous).
+func TestReadPhaseHoldGuard(t *testing.T) {
+	d := testDB(t)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	defer tx.Rollback()
+
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := d.writerExec(
+			`INSERT INTO settings (key, value) VALUES ('hold_probe', '1')
+			 ON CONFLICT(key) DO UPDATE SET value = '1'`)
+		writeDone <- err
+	}()
+
+	select {
+	case <-writeDone:
+		t.Fatal("writerExec completed while a writer tx was held — the 100ms guard would be vacuous")
+	case <-time.After(100 * time.Millisecond):
+		// expected: the held tx blocks the concurrent write
+	}
+	_ = tx.Rollback() // release so the parked write can drain
+	<-writeDone
+}
+
+// TestScanHealBetweenReadAndApply (AC3) proves the accepted one-tick race: a ref
+// that heals AFTER the read phase but BEFORE the apply tx is NOT resolved in that
+// scan (the read saw it still orphan) and IS resolved by the next scan.
+func TestScanHealBetweenReadAndApply(t *testing.T) {
+	d := testDB(t)
+	seedProject(t, d.conn, "p1")
+	seedTask(t, d.conn, "t-odisp", "p1", "pending", "ghost", "", "", "backend", "", "", false)
+
+	if _, err := d.RunReferentialScan(); err != nil {
+		t.Fatalf("scan 1: %v", err)
+	}
+	if openCount(t, d.conn, "orphan_dispatcher") != 1 {
+		t.Fatalf("expected 1 open orphan_dispatcher after scan 1")
+	}
+
+	// Heal the ref (register the missing agent) DURING the second scan, after its
+	// read phase has already snapshotted the ref as still-orphan.
+	var once sync.Once
+	refScanBetweenHook = func() {
+		once.Do(func() { seedAgent(t, d.conn, "p1", "ghost", "active", "backend", "", 0) })
+	}
+	if _, err := d.RunReferentialScan(); err != nil {
+		refScanBetweenHook = nil
+		t.Fatalf("scan 2: %v", err)
+	}
+	refScanBetweenHook = nil
+
+	// Scan 2 read the pre-heal state → the row stays OPEN this tick.
+	if got := openCount(t, d.conn, "orphan_dispatcher"); got != 1 {
+		t.Errorf("scan 2 (heal after read): got %d open, want 1 — the mid-scan heal must NOT resolve this tick", got)
+	}
+
+	// Next scan sees the agent → the ref resolves now.
+	if _, err := d.RunReferentialScan(); err != nil {
+		t.Fatalf("scan 3: %v", err)
+	}
+	if got := openCount(t, d.conn, "orphan_dispatcher"); got != 0 {
+		t.Errorf("scan 3: got %d open, want 0 — the healed ref must resolve on the next scan", got)
+	}
+}
+
+// recordingExecer captures every statement run on the writer during the apply
+// phase while forwarding it to a real tx.
+type recordingExecer struct {
+	x       execer
+	queries []string
+}
+
+func (r *recordingExecer) Exec(q string, args ...interface{}) (sql.Result, error) {
+	r.queries = append(r.queries, q)
+	return r.x.Exec(q, args...)
+}
+
+// TestApplyPhaseRunsOnlyRowIDWrites (AC4) proves the apply phase runs ONLY
+// INSERT OR IGNORE (explicit values) and UPDATE ... WHERE row_id IN (...) against
+// integrity_quarantine — no orphanSQL / SELECT / NOT EXISTS text touches the
+// writer — and that it works on a beginWriterTx-derived surface.
+func TestApplyPhaseRunsOnlyRowIDWrites(t *testing.T) {
+	d := testDB(t)
+	now := "2026-01-01T00:00:00Z"
+	// Pre-seed one resolved row (reopen target) and one open row (resolve target).
+	if _, err := d.conn.Exec(
+		`INSERT INTO integrity_quarantine (table_name,row_id,ref_col,ref_value,class,project,detected_at,resolved_at)
+		 VALUES ('tasks','r2','dispatched_by','ghost','orphan_dispatcher','p1',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.conn.Exec(
+		`INSERT INTO integrity_quarantine (table_name,row_id,ref_col,ref_value,class,project,detected_at)
+		 VALUES ('tasks','r3','dispatched_by','ghost','orphan_dispatcher','p1',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+
+	deltas := []refDelta{{
+		c:          refCheck{class: "orphan_dispatcher", table: "tasks", refCol: "dispatched_by"},
+		newOrphans: []orphanRow{{rowID: "r1", refValue: "ghost", project: "p1"}},
+		reopenIDs:  []string{"r2"},
+		resolveIDs: []string{"r3"},
+	}}
+
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		t.Fatalf("begin writer: %v", err)
+	}
+	rec := &recordingExecer{x: tx.Tx}
+	if err := applyRefDeltas(rec, deltas, now); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("apply: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+
+	if len(rec.queries) == 0 {
+		t.Fatal("apply phase ran no writer statements")
+	}
+	for _, q := range rec.queries {
+		up := strings.ToUpper(q)
+		if strings.Contains(up, "SELECT") || strings.Contains(up, "NOT EXISTS") {
+			t.Errorf("apply statement embeds a read/orphanSQL construct: %q", q)
+		}
+		insert := strings.Contains(up, "INSERT OR IGNORE INTO INTEGRITY_QUARANTINE")
+		update := strings.Contains(up, "UPDATE INTEGRITY_QUARANTINE") && strings.Contains(up, "ROW_ID IN (")
+		if !insert && !update {
+			t.Errorf("unexpected apply statement shape (not INSERT OR IGNORE / UPDATE row_id IN): %q", q)
+		}
+	}
+
+	// End state: r1 inserted open, r2 reopened (open), r3 resolved (not open).
+	if !quarantineRowExists(t, d.conn, "orphan_dispatcher", "r1") {
+		t.Error("r1 should be inserted open")
+	}
+	if !quarantineRowExists(t, d.conn, "orphan_dispatcher", "r2") {
+		t.Error("r2 should be reopened (resolved_at cleared)")
+	}
+	if quarantineRowExists(t, d.conn, "orphan_dispatcher", "r3") {
+		t.Error("r3 should be resolved (no longer open)")
+	}
+}
+
+// TestLiveScanUsesReaderAndWriterTx (AC4, grep-able) asserts the live scan reads
+// on the reader pool and opens its apply via the writerTimeout-bounded
+// beginWriterTx, and never references orphanSQL directly in the apply path.
+func TestLiveScanUsesReaderAndWriterTx(t *testing.T) {
+	src, err := os.ReadFile("referential_integrity.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "deltas, err := readRefDeltas(rctx, d.ro())") {
+		t.Error("RunReferentialScan read phase must run on the reader pool d.ro()")
+	}
+	if !strings.Contains(text, "tx, err := d.beginWriterTx()") {
+		t.Error("RunReferentialScan apply phase must open via beginWriterTx (writerTimeout-bounded)")
+	}
+	// applyRefDeltas must not embed orphanSQL: its body has no NOT EXISTS / orphanSQL.
+	apply := funcBodyText(text, "func applyRefDeltas(")
+	if apply == "" {
+		t.Fatal("could not isolate applyRefDeltas body")
+	}
+	if strings.Contains(apply, "orphanSQL") || strings.Contains(apply, "NOT EXISTS") {
+		t.Error("applyRefDeltas (writer surface) must not embed orphanSQL text")
+	}
+}
+
+// funcBodyText returns the source of the function whose signature starts with
+// sig, from sig to the matching top-level closing brace.
+func funcBodyText(src, sig string) string {
+	i := strings.Index(src, sig)
+	if i < 0 {
+		return ""
+	}
+	depth := 0
+	started := false
+	for j := i; j < len(src); j++ {
+		switch src[j] {
+		case '{':
+			depth++
+			started = true
+		case '}':
+			depth--
+			if started && depth == 0 {
+				return src[i : j+1]
+			}
+		}
+	}
+	return ""
+}
+
+// TestBootScanMatchesSplit proves the boot-time single-tx path
+// (runReferentialScan on the writer conn) and the live split path
+// ((*DB).RunReferentialScan) return identical open counts on the same fixture —
+// the two callers share readRefDeltas/applyRefDeltas, so their output cannot drift.
+func TestBootScanMatchesSplit(t *testing.T) {
+	seed := func(d *DB) {
+		seedProject(t, d.conn, "p1")
+		seedProfile(t, d.conn, "p1", "backend")
+		seedAgent(t, d.conn, "p1", "alice", "active", "backend", "", 0)
+		seedTask(t, d.conn, "t1", "p1", "pending", "ghost", "", "", "backend", "", "", false)
+		seedTask(t, d.conn, "t2", "p1", "pending", "alice", "ghost2", "", "backend", "", "", false)
+		seedTrigger(t, d.conn, "tr-orphan", "ghost-project")
+		seedMemory(t, d.conn, "mem-orphan", "ghost-project", false)
+	}
+
+	d1 := testDB(t)
+	seed(d1)
+	bootCounts, err := runReferentialScan(d1.conn)
+	if err != nil {
+		t.Fatalf("boot scan: %v", err)
+	}
+
+	d2 := testDB(t)
+	seed(d2)
+	splitCounts, err := d2.RunReferentialScan()
+	if err != nil {
+		t.Fatalf("split scan: %v", err)
+	}
+
+	if !reflect.DeepEqual(bootCounts, splitCounts) {
+		t.Errorf("boot vs split open counts differ:\n boot=%v\nsplit=%v", bootCounts, splitCounts)
 	}
 }
