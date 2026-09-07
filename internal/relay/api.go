@@ -458,10 +458,9 @@ func (r *Relay) settingsResponse() map[string]any {
 	}
 }
 
-// The settings PUT allowlist and validation now live in settings_spec.go: the
-// panel-facing writableSettings (console/linear/federation) and the full API
-// allowlist writableKeys() are both derived from settingSpecs. apiPutSetting
-// consults the spec (via validateSettings/writableKeys), never writableSettings.
+// The settings PUT allowlist and validation live in settings_spec.go: the full
+// API allowlist writableKeys() is derived from settingSpecs. apiPutSetting
+// consults the spec via validateSettings/writableKeys().
 
 func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 	// *string values so JSON null (explicit clear) is distinct from "" (unchanged

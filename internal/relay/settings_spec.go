@@ -11,7 +11,7 @@ import (
 
 // settingSpec is the single server-side description of one configuration key. It
 // drives three things at once so they can never drift: (i) the PUT allowlist
-// (writableKeys / writableSettings), (ii) PUT validation by kind + bounds +
+// (writableKeys), (ii) PUT validation by kind + bounds +
 // cross-key rules, (iii) the GET /api/settings per-key metadata (the frozen
 // contract in trovex 6f73f179). Design record: wraith-v2-config-surface-20260907.
 type settingSpec struct {
@@ -137,22 +137,6 @@ var specByKey = func() map[string]settingSpec {
 	m := make(map[string]settingSpec, len(settingSpecs))
 	for _, s := range settingSpecs {
 		m[s.Key] = s
-	}
-	return m
-}()
-
-// writableSettings is the PANEL-facing allowlist (console/linear/federation
-// groups) kept in lockstep with v2/settings.js FIELDS via the
-// FieldsMatchWritableAllowlist contract test. The FULL API PUT allowlist is
-// writableKeys() — every Writable spec, including Operational keys the panel
-// does not render yet (widened in T2c). Var name preserved so the panel test
-// keeps compiling.
-var writableSettings = func() map[string]bool {
-	m := map[string]bool{}
-	for _, s := range settingSpecs {
-		if s.Writable && (s.Group == groupConsole || s.Group == groupLinear || s.Group == groupFederation) {
-			m[s.Key] = true
-		}
 	}
 	return m
 }()
