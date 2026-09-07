@@ -644,6 +644,62 @@ func TestScanLogsCaseInvariantViolationOnce(t *testing.T) {
 	}
 }
 
+// TestScanLowerDropSuiteSmoke (B2 AC5): scope/suite-green smoke. After the LOWER
+// drop, one full scan over the fixture set completes without error and every one
+// of the 16 refCheck classes runs — refChecks() is the canonical set the read
+// phase iterates (asserted len==16), the 15 orphan-producing fixtures each report
+// exactly one open row, and orphan_claimer stays 0 (no claimed_by orphan seeded).
+// Guards the whole scan pipeline against a regression the per-AC tests miss.
+func TestScanLowerDropSuiteSmoke(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedProfile(t, c, "p1", "backend")
+	seedProfile(t, c, "p1", "analytics-lead")
+	seedAgent(t, c, "p1", "alice", "active", "backend", "", 0)
+	seedAgent(t, c, "p1", "analytics-lead", "active", "backend", "", 0)
+	seedAgent(t, c, "p1", "zombie", "deleted", "backend", "", 0)   // limbo source
+	seedAgent(t, c, "p1", "svc", "inactive", "backend", "", 1)     // limbo-exempt
+	seedAgent(t, c, "p1", "bob", "active", "backend", "ghost", 0)  // orphan_reports_to
+	seedAgent(t, c, "p1", "carol", "active", "no-profile", "", 0)  // orphan_agent_profile
+	seedTask(t, c, "t-odisp", "p1", "pending", "ghost", "", "", "backend", "", "", false)
+	seedTask(t, c, "t-oassign", "p1", "pending", "alice", "ghost", "", "backend", "", "", false)
+	seedTask(t, c, "t-limbo", "p1", "in-progress", "alice", "zombie", "", "backend", "", "", false)
+	seedTask(t, c, "t-oprofile", "p1", "pending", "alice", "", "", "no-such-profile", "", "", false)
+	seedTask(t, c, "t-oproject", "ghost-project", "pending", "linear", "", "", "", "", "", false)
+	seedTask(t, c, "t-oboard", "p1", "pending", "linear", "", "", "", "", "no-board", false)
+	seedTask(t, c, "t-oparent", "p1", "pending", "linear", "", "", "", "no-parent", "", false)
+	seedMessage(t, c, "m-orecip", "p1", "alice", "ghost")
+	seedMessage(t, c, "m-osend", "p1", "ghost", "alice")
+	seedTrigger(t, c, "tr-oproject", "ghost-project")
+	seedMemory(t, c, "mem-oproject", "ghost-project", false)
+	seedWorkflow(t, c, "wf-oproject", "ghost-project")
+	seedCycle(t, c, "cy-oproject", "ghost-project")
+
+	if n := len(refChecks()); n != 16 {
+		t.Fatalf("refChecks canonical class set: got %d, want 16", n)
+	}
+	counts, err := d.RunReferentialScan()
+	if err != nil {
+		t.Fatalf("full scan must complete without error: %v", err)
+	}
+	want := map[string]int{
+		"orphan_dispatcher": 1, "orphan_assignee": 1, "limbo": 1,
+		"orphan_profile": 1, "orphan_task_project": 1, "orphan_board": 1,
+		"orphan_parent": 1, "orphan_reports_to": 1, "orphan_agent_profile": 1,
+		"orphan_recipient": 1, "orphan_sender": 1, "orphan_trigger_project": 1,
+		"orphan_memory_project": 1, "orphan_workflow_project": 1, "orphan_cycle_project": 1,
+	}
+	for class, exp := range want {
+		if got := counts[class]; got != exp {
+			t.Errorf("class %s: got %d open, want %d", class, got, exp)
+		}
+	}
+	if got := counts["orphan_claimer"]; got != 0 {
+		t.Errorf("orphan_claimer: got %d, want 0", got)
+	}
+}
+
 // TestOrphanProfileTerminalExclusion (DEC-wraith-orphan-profile-burndown-1 Q2):
 // done/cancelled tasks are excluded from orphan_profile — a dead slug on a
 // finished task is noise, not limbo. The same dead slug on a non-terminal task
