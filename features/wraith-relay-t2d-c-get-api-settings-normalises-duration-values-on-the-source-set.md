@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/t2d-c (from main)
 ## Relay task : ac5314a5-831a-43e8-9c15-41eece95a391
-## Status : 🔵 IN REVIEW
+## Status : 🔵 SUBMITTED
 
 ## 1. Product Brief
 
@@ -51,10 +51,10 @@ deliveries/inbox, auth, MCP registry, ingest/SSE, updater/release, api.go, clean
 ## 3. Files changed
 
 ```
-...normalises-duration-values-on-the-source-set.md | 67 ++++++++++++++++++++++
+...normalises-duration-values-on-the-source-set.md | 72 ++++++++++++++++++++++
  internal/relay/settings_spec.go                    | 22 ++++++-
- internal/relay/settings_spec_test.go               | 37 ++++++++++++
- 3 files changed, 125 insertions(+), 1 deletion(-)
+ internal/relay/settings_spec_test.go               | 37 +++++++++++
+ 3 files changed, 130 insertions(+), 1 deletion(-)
 ```
 
 ## 4. QA Log
@@ -67,6 +67,8 @@ deliveries/inbox, auth, MCP registry, ingest/SSE, updater/release, api.go, clean
 ## 5. Timeline
 
 - round 1 → **approve** (review-ac5314a5-831a-43e8-9c15-41eece95a391)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./internal/relay/... 479 ok; new tests AC1/AC2 exercise real PUT+GET and DB-bypass+GET, would fail pre-fix
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `ac5314a5-831a-43e8-9c15-41eece95a391`._
