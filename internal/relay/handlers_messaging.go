@@ -109,7 +109,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	}
 
 	// Permission check: only enforce when teams are configured (bypass for "user" — always reachable)
-	if conversationID == nil && to != "*" && to != "user" && !strings.HasPrefix(to, "team:") {
+	if conversationID == nil && to != "*" && !isOperator(to) && !strings.HasPrefix(to, "team:") {
 		hasTeams, _ := h.db.HasTeams(project)
 		if hasTeams {
 			allowed, err := h.db.CanMessage(project, from, to)

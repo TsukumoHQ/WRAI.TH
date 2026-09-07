@@ -590,8 +590,11 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		return nil, fmt.Errorf("task not found: %s", taskID)
 	}
 
-	// Validate transition (skip for user — admin can force any move)
-	if agentName != "user" {
+	// Validate transition (skip for the operator — admin can force any move).
+	// The operator identity is "human" (canonical) or "user" (legacy alias);
+	// both keep the console's admin force-path. Package db cannot import the
+	// relay helper, so the predicate is inlined.
+	if agentName != "user" && agentName != "human" {
 		allowed := validTransitions[task.Status]
 		valid := false
 		for _, s := range allowed {
