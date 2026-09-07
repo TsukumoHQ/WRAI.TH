@@ -5,10 +5,27 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"sync"
 	"time"
 
 	"agent-relay/internal/db"
 )
+
+// envWarnedKeys dedupes the invalid-env-twin WARN to one line per env name per
+// process. The cleanup tick calls envBackupKeep/envReviewerTTL every
+// PurgeInterval (ruling A7 moved the probes into the tick), so without the guard
+// a single bad env value would re-log on every tick. Mirrors
+// db.settingWarnedKeys (projects.go).
+var envWarnedKeys sync.Map // env name string -> struct{}{}
+
+// warnEnvOnce logs one WARN for an invalid env twin the first time name is seen
+// this process; subsequent calls for the same name are silent.
+func warnEnvOnce(name, format string, args ...interface{}) {
+	if _, seen := envWarnedKeys.LoadOrStore(name, struct{}{}); seen {
+		return
+	}
+	log.Printf(format, args...)
+}
 
 const (
 	// PurgeInterval is how often the cleanup runs.
@@ -81,7 +98,7 @@ func envBackupKeep() (int, bool) {
 	if n, err := strconv.Atoi(v); err == nil && n > 0 {
 		return n, true
 	}
-	log.Printf("RELAY_BACKUP_KEEP=%q invalid; using default %d", v, DefaultBackupKeep)
+	warnEnvOnce("RELAY_BACKUP_KEEP", "RELAY_BACKUP_KEEP=%q invalid; using default %d", v, DefaultBackupKeep)
 	return 0, false
 }
 
@@ -116,7 +133,7 @@ func envReviewerTTL() (time.Duration, bool) {
 	if n, err := strconv.Atoi(v); err == nil && n > 0 {
 		return time.Duration(n) * 24 * time.Hour, true
 	}
-	log.Printf("RELAY_REVIEWER_TTL_DAYS=%q invalid; using default %s", v, DefaultReviewerTTL)
+	warnEnvOnce("RELAY_REVIEWER_TTL_DAYS", "RELAY_REVIEWER_TTL_DAYS=%q invalid; using default %s", v, DefaultReviewerTTL)
 	return 0, false
 }
 
