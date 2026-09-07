@@ -52,18 +52,25 @@ NITS (non-blocking):
 ## 3. Files changed
 
 ```
-internal/relay/api.go                         |  37 +++++++-
- internal/relay/console_v1_dyson_alias_test.go | 123 ++++++++++++++++++++++++++
- internal/relay/settings_spec.go               |   2 +-
- 3 files changed, 160 insertions(+), 2 deletions(-)
+...ide-alias-dyson-type-sun-type-so-the-v1-dyso.md |  69 ++++++++++++
+ internal/relay/api.go                              |  37 ++++++-
+ internal/relay/console_v1_dyson_alias_test.go      | 123 +++++++++++++++++++++
+ internal/relay/settings_spec.go                    |   2 +-
+ 4 files changed, 229 insertions(+), 2 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-1ab761c2-d4d7-40dc-be5e-11cfdebf1fcd @ `d694219a2`
+- 🟢 AC1: alias added server-side; off/auto/1..7 paths and dup-key reject each pinned by observed DB read or 400 body inspection — evidence: internal/relay/api.go:481-505 translation runs before validateSettings; sun_type Min lowered to 0 in settings_spec.go:64 so off->0 passes bounds — test: TestDysonAliasPut internal/relay/console_v1_dyson_alias_test.go:18 — all 5 sub-cases PUT through HTTP, then reads r.DB.GetSetting
+- 🟢 AC2: flat mirror plus v1 byte-compat fields exercised end-to-end — evidence: internal/relay/api.go:430-444 settingsResponse maps storedSun -> dysonType (auto/off/n) and keeps sun_type default 1 plus linear_mode/linear/groups/settings — test: TestDysonAliasGet internal/relay/console_v1_dyson_alias_test.go:73 — 3 GET calls against 3 DB states; v1 field presence asserted
+- 🟢 AC3: byte-identical verified by tree diff and by test scanning for the 3 server-only error strings — evidence: git diff origin/main...HEAD -- internal/web/ is empty (internal/web/static/{js/main.js,index.html,style.css} unchanged); full suite 483/483 ok including TestSettingsSpec* + TestV2ConfigPanel — test: TestV1AssetsUntouched internal/relay/console_v1_dyson_alias_test.go:97 reads static/js/main.js, index.html, style.css via web.StaticFiles and asserts no server-only token leaked
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-1ab761c2-d4d7-40dc-be5e-11cfdebf1fcd)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./internal/relay/... 483/483 ok; TestDysonAliasPut/Get/V1AssetsUntouched + TestSettingsSpec*/TestV2ConfigPanel green; v1 assets byte-identical (git diff origin/main...HEAD -- internal/web/ empty); AC1 AC2 AC3 verified by named tests at internal/relay/console_v1_dyson_alias_test.go:18,73,97
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `1ab761c2-d4d7-40dc-be5e-11cfdebf1fcd`._
