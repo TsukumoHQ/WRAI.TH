@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/t2b-tick-reads (from main)
 ## Relay task : 1c3324e2-fa0b-4de3-8c2f-df859557031f
-## Status : 🔵 IN REVIEW
+## Status : 🔵 SUBMITTED
 
 ## 1. Product Brief
 
@@ -49,11 +49,11 @@ NITS (non-blocking):
 ## 3. Files changed
 
 ```
-...s-read-at-tick-time-settingduration-settingi.md |  66 ++++
+...s-read-at-tick-time-settingduration-settingi.md |  73 +++++
  internal/db/projects.go                            |  67 ++++
  internal/relay/cleanup.go                          | 320 +++++++++++-------
  internal/relay/cleanup_test.go                     | 359 +++++++++++++++++++++
- 4 files changed, 688 insertions(+), 124 deletions(-)
+ 4 files changed, 695 insertions(+), 124 deletions(-)
 ```
 
 ## 4. QA Log
@@ -68,6 +68,10 @@ NITS (non-blocking):
 ## 5. Timeline
 
 - round 1 → **approve** (review-1c3324e2-fa0b-4de3-8c2f-df859557031f)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./internal/relay/... = 479 passed; 5 named AC tests all pass; accessors clamp+dedupe-warn, runCleanupTick reads every Operational key at tick, env twins keep precedence, token_days drives purge+rollup, empty table == consts + spec defaults align
+
+- **notice** `features/wraith-db-relay-t2b-operational-knobs-read-at-tick-time-settingduration-settingi.md:1` — scope says exactly 3 Go files; diffstat shows a 4th file (auto-generated scribe provenance .md). No code impact — proceed.
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `1c3324e2-fa0b-4de3-8c2f-df859557031f`._
