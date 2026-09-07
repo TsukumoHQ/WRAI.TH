@@ -68,7 +68,7 @@ func taskErrorCategory(code string) (category string, retryable bool) {
 func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
-	profile := req.GetString("profile", "")
+	profile := strings.ToLower(strings.TrimSpace(req.GetString("profile", "")))
 	requiredSkill := req.GetString("required_skill", "")
 	// Quota check: tasks
 	if qErr := h.db.CheckQuotaError(project, agent, "tasks"); qErr != "" {
@@ -937,8 +937,8 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	assignedTo := optionalString(strings.TrimSpace(req.GetString("assigned_to", "")))
-	profileSlug := optionalString(strings.TrimSpace(req.GetString("profile_slug", "")))
+	assignedTo := optionalStringLower(strings.TrimSpace(req.GetString("assigned_to", "")))
+	profileSlug := optionalStringLower(strings.TrimSpace(req.GetString("profile_slug", "")))
 
 	title := optionalString(req.GetString("title", ""))
 	description := optionalString(req.GetString("description", ""))

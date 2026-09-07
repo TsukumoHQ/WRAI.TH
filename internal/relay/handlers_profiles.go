@@ -4,13 +4,14 @@ import (
 	"agent-relay/internal/models"
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
 func (h *Handlers) HandleRegisterProfile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
-	slug := req.GetString("slug", "")
+	slug := strings.ToLower(strings.TrimSpace(req.GetString("slug", "")))
 	if slug == "" {
 		return toolResultError("slug is required"), nil
 	}
@@ -30,7 +31,7 @@ func (h *Handlers) HandleRegisterProfile(ctx context.Context, req mcp.CallToolRe
 
 func (h *Handlers) HandleGetProfile(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
-	slug := req.GetString("slug", "")
+	slug := strings.ToLower(strings.TrimSpace(req.GetString("slug", "")))
 	if slug == "" {
 		return toolResultError("slug is required"), nil
 	}

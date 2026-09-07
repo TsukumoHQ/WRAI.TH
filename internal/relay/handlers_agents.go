@@ -102,7 +102,7 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	role := req.GetString("role", "")
 	description := req.GetString("description", "")
 	reportsTo := optionalStringLower(req.GetString("reports_to", ""))
-	profileSlug := optionalString(req.GetString("profile_slug", ""))
+	profileSlug := optionalStringLower(req.GetString("profile_slug", ""))
 	isExecutive := req.GetBool("is_executive", false)
 	sessionID := optionalString(req.GetString("session_id", ""))
 	interestTags := req.GetString("interest_tags", "[]")
