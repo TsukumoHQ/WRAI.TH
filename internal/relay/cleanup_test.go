@@ -217,6 +217,58 @@ func TestTickEnvTwinsBeatStoredBackupReviewer(t *testing.T) {
 	}
 }
 
+// TestEnvTwinInvalidValueWarnsOncePerProcess is AC1: an invalid RELAY_BACKUP_KEEP
+// / RELAY_REVIEWER_TTL_DAYS logs its invalid line exactly once across repeated
+// tick reads (the env>stored>const precedence is unchanged — the reads fall
+// through to the stored setting); a valid env logs nothing and wins.
+func TestEnvTwinInvalidValueWarnsOncePerProcess(t *testing.T) {
+	// envWarnedKeys is package-global: another test may already have warned these
+	// names this process, so reset for an order-independent count.
+	envWarnedKeys.Delete("RELAY_BACKUP_KEEP")
+	envWarnedKeys.Delete("RELAY_REVIEWER_TTL_DAYS")
+
+	d := newCleanupTestDB(t)
+	d.SetSetting("backup_keep", "9")
+	d.SetSetting("reviewer_ttl_days", "9")
+
+	// Invalid env → falls through to the stored setting; WARN once across 3 ticks.
+	t.Setenv("RELAY_BACKUP_KEEP", "abc")
+	t.Setenv("RELAY_REVIEWER_TTL_DAYS", "abc")
+	out := captureLog(func() {
+		for i := 0; i < 3; i++ {
+			if got := tickBackupKeep(d); got != 9 {
+				t.Fatalf("invalid env backup_keep tick %d: got %d want 9", i, got)
+			}
+			if got := tickReviewerTTL(d); got != 9*24*time.Hour {
+				t.Fatalf("invalid env reviewer_ttl tick %d: got %s want 216h", i, got)
+			}
+		}
+	})
+	if n := strings.Count(out, `RELAY_BACKUP_KEEP="abc" invalid`); n != 1 {
+		t.Errorf("RELAY_BACKUP_KEEP invalid WARN count = %d, want 1\nlog:\n%s", n, out)
+	}
+	if n := strings.Count(out, `RELAY_REVIEWER_TTL_DAYS="abc" invalid`); n != 1 {
+		t.Errorf("RELAY_REVIEWER_TTL_DAYS invalid WARN count = %d, want 1\nlog:\n%s", n, out)
+	}
+
+	// A valid env logs nothing and wins over the stored setting.
+	envWarnedKeys.Delete("RELAY_BACKUP_KEEP")
+	envWarnedKeys.Delete("RELAY_REVIEWER_TTL_DAYS")
+	t.Setenv("RELAY_BACKUP_KEEP", "5")
+	t.Setenv("RELAY_REVIEWER_TTL_DAYS", "5")
+	out = captureLog(func() {
+		if got := tickBackupKeep(d); got != 5 {
+			t.Fatalf("valid env backup_keep: got %d want 5", got)
+		}
+		if got := tickReviewerTTL(d); got != 5*24*time.Hour {
+			t.Fatalf("valid env reviewer_ttl: got %s want 120h", got)
+		}
+	})
+	if strings.TrimSpace(out) != "" {
+		t.Errorf("valid env should log nothing, got:\n%s", out)
+	}
+}
+
 // TestTickTokenUsageRetentionDaysDrivesPurgeAndRollup is AC4: the one key
 // token_usage_retention_days drives BOTH the raw-purge window and the rollup
 // window. A 5-day-old row survives + is rolled up at the default (14) but is
