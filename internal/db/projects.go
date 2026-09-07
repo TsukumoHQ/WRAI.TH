@@ -5,8 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"math/rand"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -139,6 +142,70 @@ func (d *DB) GetSetting(key string) string {
 // SetSetting upserts a setting.
 func (d *DB) SetSetting(key, value string) {
 	_, _ = d.writerExec("INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = ?", key, value, value)
+}
+
+// settingWarnedKeys dedupes the invalid-setting WARN to one line per key per
+// process. The cleanup tick reads these accessors every PurgeInterval, so
+// without the guard a single bad stored value would re-log on every tick.
+var settingWarnedKeys sync.Map // key string -> struct{}{}
+
+// warnSettingOnce logs one WARN for an unparsable/out-of-range setting the first
+// time key is seen this process; subsequent calls for the same key are silent.
+func warnSettingOnce(key, raw, reason string, using interface{}) {
+	if _, seen := settingWarnedKeys.LoadOrStore(key, struct{}{}); seen {
+		return
+	}
+	log.Printf("setting %q=%q %s; using %v", key, raw, reason, using)
+}
+
+// SettingDuration reads a duration setting by key. An empty/unset value returns
+// def silently; an unparsable value returns def; a value outside [min,max] is
+// clamped to the nearest bound. Any unparsable/out-of-range value logs exactly
+// one WARN per key per process. Bounds and def come from the caller (the D2
+// Operational spec), so a PUT takes effect on the next read with no restart.
+func (d *DB) SettingDuration(key string, def, min, max time.Duration) time.Duration {
+	raw := d.GetSetting(key)
+	if raw == "" {
+		return def
+	}
+	v, err := time.ParseDuration(raw)
+	if err != nil {
+		warnSettingOnce(key, raw, "unparsable as duration", def)
+		return def
+	}
+	if v < min {
+		warnSettingOnce(key, raw, fmt.Sprintf("below min %s", min), min)
+		return min
+	}
+	if v > max {
+		warnSettingOnce(key, raw, fmt.Sprintf("above max %s", max), max)
+		return max
+	}
+	return v
+}
+
+// SettingInt reads an integer setting by key with the same empty->def,
+// unparsable->def, out-of-range->clamp, one-WARN-per-key-per-process contract as
+// SettingDuration.
+func (d *DB) SettingInt(key string, def, min, max int) int {
+	raw := d.GetSetting(key)
+	if raw == "" {
+		return def
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		warnSettingOnce(key, raw, "unparsable as int", def)
+		return def
+	}
+	if v < min {
+		warnSettingOnce(key, raw, fmt.Sprintf("below min %d", min), min)
+		return min
+	}
+	if v > max {
+		warnSettingOnce(key, raw, fmt.Sprintf("above max %d", max), max)
+		return max
+	}
+	return v
 }
 
 // DeleteProject removes a project and all its associated data (cascade delete).
