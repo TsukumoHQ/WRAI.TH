@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/scan-lower-drop (from main)
 ## Relay task : 790fe231-eb55-45a9-a2f6-784fdd7b75c9
-## Status : 🔵 IN REVIEW
+## Status : 🔵 SUBMITTED
 
 ## 1. Product Brief
 
@@ -77,10 +77,10 @@ very large.
 ## 3. Files changed
 
 ```
-...ntial-scan-s-agent-profile-lookups-lowercase.md |  93 ++++++++++++
+...ntial-scan-s-agent-profile-lookups-lowercase.md | 100 +++++++++++++
  internal/db/referential_integrity.go               |  65 ++++++--
  internal/db/referential_integrity_test.go          | 166 +++++++++++++++++++--
- 3 files changed, 305 insertions(+), 19 deletions(-)
+ 3 files changed, 312 insertions(+), 19 deletions(-)
 ```
 
 ## 4. QA Log
@@ -95,6 +95,8 @@ very large.
 ## 5. Timeline
 
 - round 1 → **approve** (review-790fe231-eb55-45a9-a2f6-784fdd7b75c9)
+
+**Approve-with-findings (follow-up):** go test -tags fts5 ./internal/db/... 322 ok; banned LOWER(a.name/p.slug/a.profile_slug) removed from refChecks() equality (sentinel NOT IN guards kept); checkCaseInvariant uses d.ro() reader pool, fails open; AC3 revert-check holds (direct method call).
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `790fe231-eb55-45a9-a2f6-784fdd7b75c9`._
