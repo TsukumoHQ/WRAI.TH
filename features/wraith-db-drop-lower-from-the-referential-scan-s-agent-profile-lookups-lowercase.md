@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/scan-lower-drop (from main)
 ## Relay task : 790fe231-eb55-45a9-a2f6-784fdd7b75c9
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -77,17 +77,24 @@ very large.
 ## 3. Files changed
 
 ```
-internal/db/referential_integrity.go      |  65 ++++++++++--
- internal/db/referential_integrity_test.go | 166 ++++++++++++++++++++++++++++--
- 2 files changed, 212 insertions(+), 19 deletions(-)
+...ntial-scan-s-agent-profile-lookups-lowercase.md |  93 ++++++++++++
+ internal/db/referential_integrity.go               |  65 ++++++--
+ internal/db/referential_integrity_test.go          | 166 +++++++++++++++++++--
+ 3 files changed, 305 insertions(+), 19 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-790fe231-eb55-45a9-a2f6-784fdd7b75c9 @ `11759bd9a`
+- 🟢 AC1: banned patterns gone, sentinel guards asserted kept — evidence: internal/db/referential_integrity.go:90-240 — LOWER(a.name)/LOWER(b.name)/LOWER(p.slug)/LOWER(a.profile_slug) removed from equality; LOWER(x) NOT IN (sentinels) guards retained — test: TestRefChecksDropLowerEquality internal/db/referential_integrity_test.go:534
+- 🟢 AC2: byte-identical invariant broadly verified across 16 classes; named test covers 2 focused cases — evidence: internal/db/referential_integrity_test.go:564-590 pins byte-identical for t-pool/t-dead; pre-existing TestReferentialScanDetectsOrphanClasses:167 covers 16 classes with exact counts; TestScanLowerDropSuiteSmoke:651 re-pins 16 classes — test: TestReferentialScanFixturesByteIdentical internal/db/referential_integrity_test.go:564
+- 🟢 AC3: revert-check holds: direct method call, removing checkCaseInvariant breaks compilation — evidence: internal/db/referential_integrity.go:732-749 checkCaseInvariant reports n>0 per offending col; test asserts 0 on lowercase, 1 after UPDATE inject of mixed-case agent row — test: TestCaseInvariantCheckDetectsMixedCase internal/db/referential_integrity_test.go:592
+- 🟢 AC4: log-only guard, never blocks; reader pool; fail-open on error — evidence: internal/db/referential_integrity.go:613 d.checkCaseInvariant() called in RunReferentialScan post-commit, log-only; test captures log output via captureLog, asserts exactly 1 line, scan returns nil err — test: TestScanLogsCaseInvariantViolationOnce internal/db/referential_integrity_test.go:628
+- 🟢 AC5: scope matches plan; full db test suite green — evidence: git diff 482a338~1..9c4521d --stat shows exactly 2 files: referential_integrity.go + referential_integrity_test.go; go test -tags fts5 ./internal/db/... 322 passed — test: TestScanLowerDropSuiteSmoke internal/db/referential_integrity_test.go:651
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-790fe231-eb55-45a9-a2f6-784fdd7b75c9)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `790fe231-eb55-45a9-a2f6-784fdd7b75c9`._
