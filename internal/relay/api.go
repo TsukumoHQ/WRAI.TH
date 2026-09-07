@@ -1083,7 +1083,7 @@ func (r *Relay) apiPostMemory(w http.ResponseWriter, req *http.Request) {
 		body.Project = "default"
 	}
 	if body.AgentName == "" {
-		body.AgentName = "user"
+		body.AgentName = "human"
 	}
 	if body.Scope == "" {
 		body.Scope = "project"

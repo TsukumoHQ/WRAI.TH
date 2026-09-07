@@ -10,6 +10,14 @@ import (
 	"agent-relay/internal/db"
 )
 
+// isOperator reports whether name is the human operator under either identity:
+// the canonical "human" or the legacy "user" alias. Both are always reachable
+// (they bypass the teams CanMessage gate), so an agent can answer the operator
+// regardless of which identity the console last used.
+func isOperator(name string) bool {
+	return name == "user" || name == "human"
+}
+
 // apiListQuotas returns the per-agent quotas for a project. Path: GET /api/quotas
 func (r *Relay) apiListQuotas(w http.ResponseWriter, req *http.Request) {
 	project := req.URL.Query().Get("project")
@@ -193,7 +201,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 	}
 	// Permission: when teams are configured, a direct send needs a path
 	// (shared team / reports_to / notify channel). "user" + broadcast + team: handled below.
-	if to != "*" && to != "user" && !strings.HasPrefix(to, "team:") {
+	if to != "*" && !isOperator(to) && !strings.HasPrefix(to, "team:") {
 		if hasTeams, _ := r.DB.HasTeams(project); hasTeams {
 			if allowed, _ := r.DB.CanMessage(project, from, to); !allowed {
 				jsonError(w, http.StatusForbidden, "not authorized to message '"+to+"' (no shared team / reports_to / notify channel)")
