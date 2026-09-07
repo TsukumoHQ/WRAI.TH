@@ -283,7 +283,7 @@ export class APIClient {
 
   async transitionTask(taskId, status, project, agent, result, reason) {
     try {
-      const body = { status, project: project || "default", agent: agent || "user" };
+      const body = { status, project: project || "default", agent: agent || "human" };
       if (result) body.result = result;
       if (reason) body.reason = reason;
       const res = await fetch(`/api/tasks/${taskId}/transition`, {

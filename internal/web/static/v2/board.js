@@ -541,7 +541,7 @@ export function initBoard(root, ctx) {
     const prev = t.status;
     reconcile(() => { t.status = status; if (status === 'in-review') t.in_review_at = new Date().toISOString(); if (status === 'done') t.done_at = new Date().toISOString(); });
     try {
-      await ctx.api.transition(id, { project: selection(), status, agent: 'user' });
+      await ctx.api.transition(id, { project: selection(), status, agent: 'human' });
     } catch (err) {
       reconcile(() => { t.status = prev; });
     }
