@@ -1278,6 +1278,40 @@ button { font-family: inherit; }
 .cfg-note-ok { background: rgba(74,222,128,.10); color: var(--accent); border: 1px solid var(--accent-dim); }
 .cfg-note-err { background: rgba(248,113,113,.10); color: #f87171; border: 1px solid rgba(248,113,113,.35); }
 .cfg-note-warn { background: rgba(234,179,8,.08); color: #eab308; border: 1px solid rgba(234,179,8,.30); }
+
+/* ---- metadata-driven rows (T2c): source badges, locks, notes, inline errors ---- */
+.cfg-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; align-items: center; }
+.cfg-ctl { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.cfg-badge { font-size: 10px; font-weight: 600; letter-spacing: 0.3px; text-transform: uppercase;
+  padding: 1px 6px; border-radius: 999px; border: 1px solid var(--border); color: var(--text-dim);
+  background: var(--bg-elev); white-space: nowrap; }
+.cfg-badge-env { color: #eab308; border-color: rgba(234,179,8,.35); background: rgba(234,179,8,.08); }
+.cfg-badge-setting { color: var(--accent); border-color: var(--accent-dim); background: rgba(74,222,128,.08); }
+.cfg-badge-default { color: var(--text-dim); }
+.cfg-badge-code { color: #60a5fa; border-color: rgba(96,165,250,.35); background: rgba(96,165,250,.08); text-transform: none; }
+.cfg-lock { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+  color: var(--text-dim); padding: 1px 6px; border-radius: 999px; border: 1px dashed var(--border); }
+.cfg-note-row { font-size: 11.5px; color: var(--text-dim); line-height: 1.4; }
+.cfg-err { font-size: 12px; color: #f87171; line-height: 1.4; }
+/* secret: set/unset pill + never-prefilled replace input + clear action */
+.cfg-secret-wrap { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.cfg-secret-wrap .cfg-secret { flex: 1 1 160px; }
+.cfg-pill { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px;
+  padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); }
+.cfg-pill-set { color: var(--accent); border-color: var(--accent-dim); background: rgba(74,222,128,.10); }
+.cfg-pill-unset { color: var(--text-dim); }
+.cfg-clear { background: transparent; color: #f87171; border: 1px solid rgba(248,113,113,.35);
+  border-radius: var(--radius-sm); padding: 5px 10px; font-size: 12px; cursor: pointer; }
+.cfg-clear:hover { background: rgba(248,113,113,.10); }
+/* federation: read-only summary + link to the dedicated editor page */
+.cfg-fed-summary { display: flex; flex-direction: column; gap: 8px; }
+.cfg-fed-count { font-size: 13px; color: var(--text); }
+.cfg-fed-labels { display: flex; flex-wrap: wrap; gap: 6px; }
+.cfg-fed-peer { font-size: 11.5px; color: var(--text-dim); padding: 1px 8px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--bg-elev); }
+.cfg-fed-link { font-size: 12.5px; color: var(--accent); text-decoration: none; align-self: flex-start; }
+.cfg-fed-link:hover { text-decoration: underline; }
+
 @media (max-width: 560px) {
   .cfg-row, .cfg-check { grid-template-columns: 1fr; gap: 6px; }
   .cfg-lbl { padding-top: 0; }
