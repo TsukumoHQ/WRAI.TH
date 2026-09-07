@@ -108,6 +108,38 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		return toolResultError("to is required (or provide conversation_id)"), nil
 	}
 
+	// Reject an unknown recipient up front — this must run regardless of
+	// hasTeams (unlike the permission check below), because an unregistered
+	// 'to' is otherwise accepted silently: a message-id comes back, zero
+	// deliveries happen, nobody is ever alerted. Only a name that was never
+	// registered, or was soft-deleted, is rejected — 'sleeping'/'inactive'
+	// agents are re-bindable identities and their delivery legitimately
+	// queues.
+	// "human" is the console operator inbox, the twin of "user" (notifications.go
+	// resolveTargets maps both to the same target); it is a literal, not an agent
+	// row, so it must be exempted here exactly like "user" — otherwise operator
+	// traffic addressed to "human" is wrongly rejected as an unknown recipient.
+	if conversationID == nil && to != "*" && to != "user" && to != "human" && !strings.HasPrefix(to, "team:") {
+		recipient, err := h.db.GetAgent(project, to)
+		if err != nil {
+			return toolResultError(fmt.Sprintf("failed to resolve recipient '%s': %v", to, err)), nil
+		}
+		// A name with no agent row is rejected UNLESS the fleet already expects
+		// it — a task dispatched to it (profile_slug = name) before it called
+		// register_agent is a boot-race, not a bad address, and its delivery
+		// legitimately queues until the identity binds (task 0464d6cb; mirrors
+		// the permission check below). A soft-deleted agent is always rejected.
+		// Errors route through toolResultError so this path speaks the same
+		// canonical envelope as the rest of the tool surface (errors.go).
+		if recipient == nil {
+			if !h.db.RecipientIsFleetExpected(project, to) {
+				return toolResultError(h.unknownRecipientError(project, to)), nil
+			}
+		} else if recipient.Status == "deleted" {
+			return toolResultError(h.unknownRecipientError(project, to)), nil
+		}
+	}
+
 	// Permission check: only enforce when teams are configured (bypass for "user" — always reachable)
 	if conversationID == nil && to != "*" && !isOperator(to) && !strings.HasPrefix(to, "team:") {
 		hasTeams, _ := h.db.HasTeams(project)
