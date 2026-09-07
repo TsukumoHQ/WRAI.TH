@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"testing"
 )
@@ -29,10 +30,9 @@ func getSettingEntry(t *testing.T, body map[string]any, key string) (map[string]
 }
 
 // TestSettingsSpecAllowlistDerived (T2a AC1): writableKeys() is the spec-derived
-// full PUT allowlist (24 = 9 legacy + 15 Operational); writableSettings is the
-// spec-derived panel subset (9, console|linear|federation) and a strict subset;
-// apiPutSetting consults the spec (an Operational key not in writableSettings
-// still applies); spec keys are unique and every group is valid.
+// full PUT allowlist (24 = 9 legacy + 15 Operational), contains no evil_key;
+// apiPutSetting consults the spec — a legacy key and an Operational key both
+// apply via PUT; spec keys are unique and every group is valid.
 func TestSettingsSpecAllowlistDerived(t *testing.T) {
 	legacy := []string{
 		"sun_type", "linear_enabled", "linear_api_key", "linear_team_key",
@@ -67,19 +67,9 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 		}
 	}
 
-	// writableSettings = the 9 panel keys, strict subset of writableKeys.
-	if len(writableSettings) != len(legacy) {
-		t.Errorf("writableSettings size %d, want %d", len(writableSettings), len(legacy))
-	}
-	for _, k := range legacy {
-		if !writableSettings[k] {
-			t.Errorf("writableSettings missing panel key %q", k)
-		}
-	}
-	for k := range writableSettings {
-		if !wk[k] {
-			t.Errorf("writableSettings key %q not in writableKeys (not a subset)", k)
-		}
+	// evil_key is not in the allowlist.
+	if wk["evil_key"] {
+		t.Error("writableKeys must not contain evil_key")
 	}
 
 	// Spec keys unique; every group valid.
@@ -98,14 +88,16 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 		}
 	}
 
-	// apiPutSetting consults the spec, not writableSettings: an Operational key
-	// (writable in the spec, absent from writableSettings) applies via PUT.
+	// apiPutSetting consults the spec: a legacy panel key and an Operational key
+	// both apply via PUT through the same allowlist.
 	r := testRelay(t)
-	if _, ok := writableSettings["message_retention"]; ok {
-		t.Fatal("precondition: message_retention must NOT be in the panel allowlist")
+	if w := doAPI(r, http.MethodPut, "/settings", `{"sun_type":"2"}`); w.Code != http.StatusOK {
+		t.Fatalf("PUT legacy key: status %d, want 200\nbody: %s", w.Code, w.Body.String())
 	}
-	w := doAPI(r, http.MethodPut, "/settings", `{"message_retention":"48h"}`)
-	if w.Code != http.StatusOK {
+	if got := r.DB.GetSetting("sun_type"); got != "2" {
+		t.Errorf("sun_type stored %q, want 2", got)
+	}
+	if w := doAPI(r, http.MethodPut, "/settings", `{"message_retention":"48h"}`); w.Code != http.StatusOK {
 		t.Fatalf("PUT operational key: status %d, want 200\nbody: %s", w.Code, w.Body.String())
 	}
 	if got := r.DB.GetSetting("message_retention"); got != "48h" {
@@ -279,8 +271,7 @@ func TestSettingsSecretHandling(t *testing.T) {
 }
 
 // TestSettingsUnknownKeyWholeRequest (T2a AC5): a PUT carrying an unknown key
-// alongside a valid one is rejected 403 whole-request and applies nothing; the
-// panel-facing writableSettings stays the 9-key contract the v2 panel test pins.
+// alongside a valid one is rejected 403 whole-request and applies nothing.
 func TestSettingsUnknownKeyWholeRequest(t *testing.T) {
 	r := testRelay(t)
 
@@ -297,12 +288,29 @@ func TestSettingsUnknownKeyWholeRequest(t *testing.T) {
 	if got := r.DB.GetSetting("sun_type"); got != "" {
 		t.Errorf("sun_type must be unchanged after a rejected whole request, got %q", got)
 	}
-	// Panel contract (guarded end-to-end by the pre-existing TestV2ConfigPanel):
-	// writableSettings excludes evil_key and every Operational key.
-	if writableSettings["evil_key"] {
-		t.Error("writableSettings must not contain evil_key")
+}
+
+// TestNoWritableSettingsIdentifierInSource (T2d-a AC2): the dead legacy
+// writableSettings map is gone — a scan of every non-_test.go source file in the
+// package dir finds zero occurrences of the identifier. writableKeys() is the
+// sole PUT allowlist. (Precedent: console_v2_config_panel_test.go scans embedded
+// assets; here we scan the package's own .go source.)
+func TestNoWritableSettingsIdentifierInSource(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read package dir: %v", err)
 	}
-	if writableSettings["message_retention"] {
-		t.Error("writableSettings (panel) must not contain Operational keys")
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		if strings.Contains(string(b), "writableSettings") {
+			t.Errorf("%s still references dead identifier writableSettings", name)
+		}
 	}
 }
