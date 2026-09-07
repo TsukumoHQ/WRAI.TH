@@ -427,9 +427,16 @@ func (r *Relay) apiGetSettings(w http.ResponseWriter) {
 // untouched (T2c) — plus the frozen v2 shape (`groups` + `settings`, design
 // record 6f73f179) ADDED alongside.
 func (r *Relay) settingsResponse() map[string]any {
-	sunType := r.DB.GetSetting("sun_type")
+	storedSun := r.DB.GetSetting("sun_type")
+	sunType := storedSun
 	if sunType == "" {
 		sunType = "1"
+	}
+	dysonType := "auto"
+	if storedSun == "0" {
+		dysonType = "off"
+	} else if storedSun != "" {
+		dysonType = storedSun
 	}
 	apiKey, teamKey, enabled, interval, source := r.effectiveLinearConfig()
 	masked := ""
@@ -441,6 +448,7 @@ func (r *Relay) settingsResponse() map[string]any {
 	}
 	return map[string]any{
 		"sun_type":    sunType,
+		"dyson_type":  dysonType,
 		"linear_mode": enabled,
 		"mode":        modeString(enabled),
 		"linear": map[string]any{
@@ -469,6 +477,33 @@ func (r *Relay) apiPutSetting(w http.ResponseWriter, req *http.Request) {
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
+	}
+	// v1 compat: the v1 dyson picker (static/js/main.js) PUTs the legacy key
+	// dyson_type; translate it to the sun_type spec key BEFORE validation so v1
+	// assets stay byte-identical (founder ruling B). "auto"/null -> clear,
+	// "off" -> "0", "1".."7" -> same; anything else -> 400 naming dyson_type; a
+	// body carrying both keys is ambiguous -> 400.
+	if dv, ok := body["dyson_type"]; ok {
+		if _, dup := body["sun_type"]; dup {
+			eb, _ := json.Marshal(map[string]string{"error": "invalid value: dyson_type", "key": "dyson_type", "detail": "send dyson_type or sun_type, not both"})
+			http.Error(w, string(eb), http.StatusBadRequest)
+			return
+		}
+		delete(body, "dyson_type")
+		switch {
+		case dv == nil || *dv == "auto":
+			body["sun_type"] = nil
+		case *dv == "off":
+			z := "0"
+			body["sun_type"] = &z
+		case len(*dv) == 1 && (*dv)[0] >= '1' && (*dv)[0] <= '7':
+			v := *dv
+			body["sun_type"] = &v
+		default:
+			eb, _ := json.Marshal(map[string]string{"error": "invalid value: dyson_type", "key": "dyson_type", "detail": "must be auto, off, or 1..7"})
+			http.Error(w, string(eb), http.StatusBadRequest)
+			return
+		}
 	}
 	// Whole-request validation BEFORE any write: 403 {error:"not writable",key}
 	// for unknown/non-writable keys, 400 {error:"invalid value",key,detail} for

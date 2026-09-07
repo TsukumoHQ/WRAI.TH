@@ -61,7 +61,7 @@ func dur(d time.Duration) string { return d.String() }
 // Durations are encoded via time.Duration.String(); ints as decimal strings.
 var settingSpecs = []settingSpec{
 	// ---- Console ----
-	{Key: "sun_type", Group: groupConsole, Kind: kindInt, Source: "db", Writable: true, Min: "1", Default: "1", Note: "console sun/dyson variant index"},
+	{Key: "sun_type", Group: groupConsole, Kind: kindInt, Source: "db", Writable: true, Min: "0", Default: "1", Note: "console sun/dyson variant index (0 = off)"},
 
 	// ---- Linear (7 writable + the RO webhook secret) ----
 	{Key: "linear_enabled", Group: groupLinear, Kind: kindBool, Source: "env", EnvName: "RELAY_LINEAR_MODE", Writable: true, Default: "0"},
