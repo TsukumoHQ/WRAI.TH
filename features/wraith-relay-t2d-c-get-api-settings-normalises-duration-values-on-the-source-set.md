@@ -3,7 +3,7 @@
 ## Team : wraith-backend-2 (tsukumo)
 ## Branch : wraith-backend-2/t2d-c (from main)
 ## Relay task : ac5314a5-831a-43e8-9c15-41eece95a391
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -51,17 +51,22 @@ deliveries/inbox, auth, MCP registry, ingest/SSE, updater/release, api.go, clean
 ## 3. Files changed
 
 ```
-internal/relay/settings_spec.go      | 22 ++++++++++++++++++++-
- internal/relay/settings_spec_test.go | 37 ++++++++++++++++++++++++++++++++++++
- 2 files changed, 58 insertions(+), 1 deletion(-)
+...normalises-duration-values-on-the-source-set.md | 67 ++++++++++++++++++++++
+ internal/relay/settings_spec.go                    | 22 ++++++-
+ internal/relay/settings_spec_test.go               | 37 ++++++++++++
+ 3 files changed, 125 insertions(+), 1 deletion(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ✅ APPROVED by review-ac5314a5-831a-43e8-9c15-41eece95a391 @ `d32ce7783`
+- 🟢 AC1: Real httptest PUT then GET, observable output asserted, not mock — evidence: settings_spec.go:208 routes source=setting non-secret through normalizeStoredValue; settings_spec.go:225-227 time.ParseDuration(raw).String() — test: TestGetNormalisesStoredDurationValue settings_spec_test.go:313 (PUT 48h → GET asserts 48h0m0s/setting; pre-fix returns raw 48h → would fail)
+- 🟢 AC2: Hits the parse-error fall-through branch via real handler; no panic/500 verified by status==200 — evidence: settings_spec.go:222-233; kindDuration parse-error returns raw unchanged; no panic — test: TestGetEchoesUnparseableStoredDurationRaw settings_spec_test.go:331 (DB.SetSetting garbage → GET 200, value=garbage, source=setting)
+- 🟢 AC3: Suite green; no test deleted or weakened — evidence: go test -tags fts5 ./internal/relay/... = 479 passed including TestV2ConfigPanel and existing TestSettingsSpec* — test: TestV2ConfigPanel and TestSettingsSpec* (pre-existing, all green)
 
 ## 5. Timeline
 
+- round 1 → **approve** (review-ac5314a5-831a-43e8-9c15-41eece95a391)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `ac5314a5-831a-43e8-9c15-41eece95a391`._
