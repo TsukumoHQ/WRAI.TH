@@ -18,6 +18,7 @@ export function initMessages(root, ctx) {
   const isMe = (who) => who === ME || who === 'user';
   const ALL = '__all__';
   const BROADCAST = '__broadcast__';
+  const USER = '__user__';
   const SKIP = new Set(['', '*', 'system']);
 
   let msgs = [];
@@ -83,6 +84,7 @@ export function initMessages(root, ctx) {
   function threadFor(key) {
     if (key === ALL) return msgs;
     if (key === BROADCAST) return msgs.filter((m) => m.to === '*');
+    if (key === USER) return msgs.filter((m) => isMe(m.to));
     if (isConv(key)) return convCache.get(key.slice(5)) || [];
     return msgs.filter((m) => m.from === key || m.to === key);
   }
@@ -106,6 +108,8 @@ export function initMessages(root, ctx) {
 
     const items = [];
     items.push(railRow(ALL, 'all traffic', `${msgs.length} msg${msgs.length === 1 ? '' : 's'}`, '#'));
+    const inbox = threadFor(USER);
+    items.push(railRow(USER, 'User', `${inbox.length} received`, ME, inbox[0]));
     if (scopeMode === 'project' && canProjectScope()) {
       const bc = threadFor(BROADCAST).length;
       items.push(railRow(BROADCAST, 'broadcast', bc ? `${bc} sent` : 'message all', '*'));
@@ -165,12 +169,13 @@ export function initMessages(root, ctx) {
 
   function renderThread() {
     const conv = isConv(selected) ? convs.find((c) => 'conv:' + c.id === selected) : null;
-    const isAgent = selected !== ALL && selected !== BROADCAST && !isConv(selected);
+    const isAgent = selected !== ALL && selected !== BROADCAST && selected !== USER && !isConv(selected);
     let title; let sub;
     if (isConv(selected)) {
       title = (conv && conv.title) || 'conversation';
       sub = conv && conv.members && conv.members.length ? conv.members.join(', ') : 'conversation thread';
     } else if (selected === ALL) { title = 'all traffic'; sub = 'every message in scope (read-only)'; }
+    else if (selected === USER) { title = 'User'; sub = 'messages to you (user / human, read-only)'; }
     else if (selected === BROADCAST) { title = 'broadcast to fleet'; sub = 'goes to every agent in this project'; }
     else { title = selected; sub = scopeMode === 'all' ? `in ${esc(lastProjectForAgent(selected))}` : 'direct message'; }
     threadHead.innerHTML = `<div class="msg-th-title">${esc(title)}</div><div class="msg-th-sub">${sub}</div>`;
@@ -182,7 +187,7 @@ export function initMessages(root, ctx) {
       threadBody.innerHTML = list.map(bubble).join('');
       threadBody.scrollTop = threadBody.scrollHeight;
     }
-    // composer: agent DM or broadcast; all-traffic + conversations are read-only here.
+    // composer: agent DM or broadcast; aggregate views + conversations are read-only here.
     const showComposer = selected === BROADCAST || isAgent;
     composer.hidden = !showComposer;
     if (showComposer) input.placeholder = selected === BROADCAST ? 'broadcast to all agents…' : `message ${selected}…`;
@@ -207,6 +212,7 @@ export function initMessages(root, ctx) {
 
   /* ---------------- send ---------------- */
   async function send() {
+    if (selected === ALL || selected === USER || isConv(selected)) return;
     const text = input.value.trim();
     if (!text) return;
     let to, sendProj;
