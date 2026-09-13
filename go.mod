@@ -1,12 +1,12 @@
 module agent-relay
 
-go 1.25.5
+go 1.26.0
 
 require (
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v1.0.0
-	github.com/mattn/go-sqlite3 v1.14.50
-	golang.org/x/time v0.15.0
+	github.com/mattn/go-sqlite3 v1.14.52
+	golang.org/x/time v0.16.0
 )
 
 require (
