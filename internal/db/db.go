@@ -1378,6 +1378,15 @@ func migrate(conn *sql.DB) error {
 	// self-route going forward via DispatchTask.
 	runProductBoardRoutingBackfill(conn)
 
+	// Promote relay-written metadata.task_id into messages.task_id on historical
+	// rows (DEC-wraith-linkage-1). Touches only NULL rows, so every later boot is
+	// a no-op; new rows are linked at insert by deriveTaskID.
+	if n, err := backfillMessageTaskIDs(conn); err != nil {
+		log.Printf("migrate: message task_id backfill skipped (non-fatal): %v", err)
+	} else if n > 0 {
+		log.Printf("migrate: backfilled task_id on %d message(s) from metadata (DEC-wraith-linkage-1)", n)
+	}
+
 	// Referential-integrity scan (Phase 0, task 536ecc40): detect + log + quarantine
 	// dangling identity references. Read-mostly (writes only the quarantine
 	// side-table), idempotent, NO behavior change — the offending rows are untouched.
@@ -1439,6 +1448,20 @@ func backfillProjects(conn *sql.DB) {
 // (rows are copied before the drop) and idempotent (safe to run every boot: once
 // the legacy table is gone the backfill branch is skipped). conn is the writer,
 // which has the analytics DB attached read-write.
+// backfillMessageTaskIDs applies deriveTaskID's metadata rule to historical
+// rows: a non-empty text metadata.task_id that resolves to a task in the same
+// project. Only rows with task_id IS NULL are updated, so a rerun changes nothing.
+func backfillMessageTaskIDs(conn *sql.DB) (int64, error) {
+	res, err := conn.Exec(`UPDATE messages SET task_id = json_extract(metadata, '$.task_id')
+		WHERE task_id IS NULL AND json_valid(metadata)
+		  AND json_type(metadata, '$.task_id') = 'text' AND json_extract(metadata, '$.task_id') <> ''
+		  AND EXISTS (SELECT 1 FROM tasks t WHERE t.id = json_extract(messages.metadata, '$.task_id') AND t.project = messages.project)`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func migrateTokenUsageToAnalytics(conn *sql.DB) error {
 	// Analytics in its own WAL so telemetry writes never contend on the coord DB.
 	_, _ = conn.Exec("PRAGMA analytics.journal_mode=WAL")

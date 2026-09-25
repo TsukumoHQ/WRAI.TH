@@ -287,7 +287,7 @@ func projectMessages(msgs []models.Message, maxBytes int, agent string) []Messag
 	for _, m := range sorted {
 		s := summarizeMessage(m)
 		b := messageSummaryBytes(s)
-		journal.Scores = append(journal.Scores, budgetScore{ID: m.ID, Priority: m.Priority, Bytes: b})
+		journal.Scores = append(journal.Scores, budgetScore{ID: m.ID, Priority: m.Priority, Bytes: b, HasTask: m.TaskID != nil && *m.TaskID != ""})
 		// Hard ceiling caps the bypass flood; the first (most-important) P0
 		// item always surfaces even under a tiny budget.
 		if hardCeil > 0 && used+b > hardCeil && len(out) > 0 {

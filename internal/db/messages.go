@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -106,6 +107,35 @@ func (d *DB) deriveTraceID(metadata string, replyTo *string, project string) *st
 	return nil
 }
 
+// deriveTaskID computes a message's task_id (DEC-wraith-linkage-1). Sources,
+// in precedence order: a non-empty metadata "task_id" that resolves to a task
+// in the same project (the shape announceClaimable and the notifier write),
+// else the reply_to parent's task_id (same project only). Never inferred from
+// subject/content prose — a false link is worse than none. When both sources
+// exist and differ, metadata wins and the conflict is logged. Best-effort like
+// deriveTraceID: a lookup miss leaves nil, never errors the insert.
+func (d *DB) deriveTaskID(metadata string, replyTo *string, project string) *string {
+	var inherited string
+	if replyTo != nil && *replyTo != "" {
+		var t sql.NullString
+		_ = d.ro().QueryRow("SELECT task_id FROM messages WHERE id = ? AND project = ?", *replyTo, project).Scan(&t)
+		inherited = t.String
+	}
+	if taskID := extractTaskIDFromMetadata(metadata); taskID != "" {
+		var id string
+		if err := d.ro().QueryRow("SELECT id FROM tasks WHERE id = ? AND project = ?", taskID, project).Scan(&id); err == nil {
+			if inherited != "" && inherited != id {
+				log.Printf("[linkage] task_id conflict in project %s: metadata %s wins over reply_to-inherited %s", project, id, inherited)
+			}
+			return &id
+		}
+	}
+	if inherited != "" {
+		return &inherited
+	}
+	return nil
+}
+
 // extractTaskIDFromMetadata pulls "task_id" out of a message's metadata JSON
 // (the shape announceClaimable writes: {"task_id":"<uuid>"}). "" if absent or
 // unparseable — best-effort, never errors the insert.
@@ -128,6 +158,7 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 	actionRequired := d.deriveActionRequired(msgType, replyTo, project)
 	normalizedMetadata := normalize.JSONKeys(metadata)
 	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
+	taskID := d.deriveTaskID(normalizedMetadata, replyTo, project)
 
 	msg := &models.Message{
 		ID:             uuid.New().String(),
@@ -145,11 +176,12 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 		TTLSeconds:     ttlSeconds,
 		ActionRequired: &actionRequired,
 		TraceID:        traceID,
+		TaskID:         taskID,
 	}
 
 	_, err := d.writerExec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, actionRequired, traceID,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, actionRequired, traceID, taskID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert message: %w", err)
@@ -196,6 +228,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	effTag := d.effectiveActionRequired(actionRequired, msgType, replyTo, project)
 	normalizedMetadata := normalize.JSONKeys(metadata)
 	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
+	taskID := d.deriveTaskID(normalizedMetadata, replyTo, project)
 
 	var key string
 	if len(idempotencyKey) > 0 {
@@ -218,6 +251,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 		TTLSeconds:     ttlSeconds,
 		ActionRequired: &effTag,
 		TraceID:        traceID,
+		TaskID:         taskID,
 	}
 
 	tx, err := d.beginWriterTx()
@@ -247,8 +281,8 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 		keyVal = key
 	}
 	if _, err := tx.Exec(
-		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id, idempotency_key) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag, traceID, keyVal,
+		"INSERT INTO messages (id, from_agent, to_agent, reply_to, type, subject, content, metadata, created_at, conversation_id, project, priority, ttl_seconds, action_required, trace_id, idempotency_key, task_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.From, msg.To, msg.ReplyTo, msg.Type, msg.Subject, msg.Content, msg.Metadata, msg.CreatedAt, msg.ConversationID, msg.Project, msg.Priority, msg.TTLSeconds, effTag, traceID, keyVal, taskID,
 	); err != nil {
 		return nil, false, fmt.Errorf("insert message: %w", err)
 	}

@@ -51,6 +51,7 @@ func applyBudget(messages []models.Message, agentTags []string, maxBytes int) []
 		journal.Candidates = append(journal.Candidates, s.msg.ID)
 		journal.Scores = append(journal.Scores, budgetScore{
 			ID: s.msg.ID, Priority: s.msg.Priority, Score: &score, Bytes: s.bytes,
+			HasTask: s.msg.TaskID != nil && *s.msg.TaskID != "",
 		})
 	}
 	defer func() { journal.emit() }()
@@ -127,6 +128,7 @@ type budgetScore struct {
 	Priority string   `json:"priority"`
 	Score    *float64 `json:"score,omitempty"`
 	Bytes    int      `json:"bytes"`
+	HasTask  bool     `json:"has_task"` // messages.task_id set (DEC-wraith-linkage-1 coverage)
 }
 
 // budgetJournal is the replayable record of one budgeted selection run

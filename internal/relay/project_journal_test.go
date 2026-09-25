@@ -126,3 +126,19 @@ func TestProjectMessages_EmptyNoJournal(t *testing.T) {
 		t.Errorf("empty input: got %d [budget] lines, want 0", len(lines))
 	}
 }
+
+// DEC-wraith-linkage-1 (task da1945d5): the boot journal records, per scored
+// message, whether messages.task_id is set — linkage coverage is measurable.
+func TestProjectMessages_JournalHasTask(t *testing.T) {
+	lines := captureBudgetJournal(t, func() {
+		projectMessages(bootJournalFixture(), bootJournalFixtureBudget, "wraith-engine")
+	})
+	if len(lines) != 1 {
+		t.Fatalf("got %d [budget] lines, want exactly 1", len(lines))
+	}
+	for _, s := range lines[0].Scores {
+		if want := s.ID == "m-p1-new"; s.HasTask != want {
+			t.Errorf("%s has_task = %v, want %v", s.ID, s.HasTask, want)
+		}
+	}
+}
