@@ -45,11 +45,12 @@ func applyBudget(messages []models.Message, agentTags []string, maxBytes int) []
 		all[i] = scored{msg: m, score: utility(m, agentTagSet, now), bytes: messageBytes(m)}
 	}
 
-	journal := budgetJournal{BudgetMax: maxBytes}
+	journal := budgetJournal{Path: "get_inbox", BudgetMax: maxBytes}
 	for _, s := range all {
+		score := s.score
 		journal.Candidates = append(journal.Candidates, s.msg.ID)
 		journal.Scores = append(journal.Scores, budgetScore{
-			ID: s.msg.ID, Priority: s.msg.Priority, Score: s.score, Bytes: s.bytes,
+			ID: s.msg.ID, Priority: s.msg.Priority, Score: &score, Bytes: s.bytes,
 		})
 	}
 	defer func() { journal.emit() }()
@@ -79,6 +80,9 @@ func applyBudget(messages []models.Message, agentTags []string, maxBytes int) []
 
 	if usedBytes >= maxBytes {
 		// P0 alone exceeds budget — return only P0
+		for _, s := range rest {
+			journal.Omitted = append(journal.Omitted, s.msg.ID)
+		}
 		journal.BudgetUsed = usedBytes
 		return p0
 	}
@@ -92,6 +96,7 @@ func applyBudget(messages []models.Message, agentTags []string, maxBytes int) []
 	var selected []models.Message
 	for _, s := range rest {
 		if usedBytes+s.bytes > maxBytes {
+			journal.Omitted = append(journal.Omitted, s.msg.ID)
 			continue
 		}
 		selected = append(selected, s.msg)
@@ -114,18 +119,25 @@ func applyBudget(messages []models.Message, agentTags []string, maxBytes int) []
 	return result
 }
 
-// budgetScore is one candidate's line in the selection journal.
+// budgetScore is one candidate's line in the selection journal. Score is
+// the applyBudget utility; it is absent for selectors that rank without one
+// (projectMessages orders by priority rank + recency).
 type budgetScore struct {
-	ID       string  `json:"id"`
-	Priority string  `json:"priority"`
-	Score    float64 `json:"score"`
-	Bytes    int     `json:"bytes"`
+	ID       string   `json:"id"`
+	Priority string   `json:"priority"`
+	Score    *float64 `json:"score,omitempty"`
+	Bytes    int      `json:"bytes"`
 }
 
-// budgetJournal is the replayable record of one applyBudget run.
+// budgetJournal is the replayable record of one budgeted selection run
+// (applyBudget on get_inbox, projectMessages on get_session_context).
+// Path names the selector; Agent is the recipient when the caller knows it.
 type budgetJournal struct {
+	Path       string        `json:"path"`
+	Agent      string        `json:"agent,omitempty"`
 	Candidates []string      `json:"candidates"`
 	Selected   []string      `json:"selected"`
+	Omitted    []string      `json:"omitted"`
 	Scores     []budgetScore `json:"scores"`
 	BudgetUsed int           `json:"budget_used"`
 	BudgetMax  int           `json:"budget_max"`
@@ -134,6 +146,9 @@ type budgetJournal struct {
 func (j *budgetJournal) emit() {
 	if j.Selected == nil {
 		j.Selected = []string{}
+	}
+	if j.Omitted == nil {
+		j.Omitted = []string{}
 	}
 	payload, err := json.Marshal(j)
 	if err != nil {

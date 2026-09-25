@@ -247,10 +247,20 @@ func messageSummaryBytes(s MessageSummary) int {
 // then newest within priority), summarize each with a bounded content preview,
 // then greedily select until maxBytes is reached. P0 messages bypass the budget
 // (but are still content-truncated), mirroring projectTasks' P0-bypass rule.
-func projectMessages(msgs []models.Message, maxBytes int) []MessageSummary {
+//
+// Every call with at least one candidate emits one "[budget]" journal line
+// (path=session_context, agent) in the applyBudget journal shape, so the live
+// boot selection is replayable. Logging only: the projection is unchanged.
+func projectMessages(msgs []models.Message, maxBytes int, agent string) []MessageSummary {
 	if len(msgs) == 0 {
 		return []MessageSummary{}
 	}
+
+	journal := budgetJournal{Path: "session_context", Agent: agent, BudgetMax: maxBytes}
+	for _, m := range msgs {
+		journal.Candidates = append(journal.Candidates, m.ID)
+	}
+	defer func() { journal.emit() }()
 
 	// Stable insertion sort: P0 first, then created_at DESC within priority.
 	sorted := make([]models.Message, len(msgs))
@@ -277,22 +287,28 @@ func projectMessages(msgs []models.Message, maxBytes int) []MessageSummary {
 	for _, m := range sorted {
 		s := summarizeMessage(m)
 		b := messageSummaryBytes(s)
+		journal.Scores = append(journal.Scores, budgetScore{ID: m.ID, Priority: m.Priority, Bytes: b})
 		// Hard ceiling caps the bypass flood; the first (most-important) P0
 		// item always surfaces even under a tiny budget.
 		if hardCeil > 0 && used+b > hardCeil && len(out) > 0 {
+			journal.Omitted = append(journal.Omitted, m.ID)
 			continue
 		}
 		if m.Priority == "P0" {
 			out = append(out, s)
 			used += b
+			journal.Selected = append(journal.Selected, m.ID)
 			continue
 		}
 		if maxBytes > 0 && used+b > maxBytes {
+			journal.Omitted = append(journal.Omitted, m.ID)
 			continue
 		}
 		out = append(out, s)
 		used += b
+		journal.Selected = append(journal.Selected, m.ID)
 	}
+	journal.BudgetUsed = used
 	return out
 }
 

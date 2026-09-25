@@ -122,7 +122,7 @@ func TestProjectMessages_BoundsVerboseUnread(t *testing.T) {
 			Content:   strings.Repeat("Prometheus digest line. ", 200), // ~4.8KB each
 		})
 	}
-	out := projectMessages(msgs, sessionUnreadBudget)
+	out := projectMessages(msgs, sessionUnreadBudget, "")
 	total := 0
 	for _, s := range out {
 		total += messageSummaryBytes(s)
@@ -141,7 +141,7 @@ func TestProjectMessages_P0BypassesBudget(t *testing.T) {
 		{ID: "low", From: "a", Priority: "P3", Content: "noise"},
 		{ID: "crit", From: "a", Priority: "P0", Content: "fire"},
 	}
-	out := projectMessages(msgs, 10) // tiny budget
+	out := projectMessages(msgs, 10, "") // tiny budget
 	found := false
 	for _, s := range out {
 		if s.ID == "crit" {
@@ -330,7 +330,7 @@ func TestProjectMessages_P0FloodObeysHardCeiling(t *testing.T) {
 		})
 	}
 	const soft = 6000
-	out := projectMessages(msgs, soft)
+	out := projectMessages(msgs, soft, "")
 
 	total := 0
 	for _, s := range out {

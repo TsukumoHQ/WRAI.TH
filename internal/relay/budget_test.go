@@ -259,6 +259,12 @@ func TestApplyBudgetJournalLine(t *testing.T) {
 	if got := strings.Join(j.Selected, ","); got != "p0,p1" {
 		t.Errorf("selected = %s, want p0,p1", got)
 	}
+	if got := strings.Join(j.Omitted, ","); got != "p3" {
+		t.Errorf("omitted = %s, want p3", got)
+	}
+	if j.Path != "get_inbox" {
+		t.Errorf("path = %q, want get_inbox", j.Path)
+	}
 	if j.BudgetMax != maxBytes || j.BudgetUsed != maxBytes {
 		t.Errorf("budget used/max = %d/%d, want %d/%d", j.BudgetUsed, j.BudgetMax, maxBytes, maxBytes)
 	}
@@ -272,11 +278,14 @@ func TestApplyBudgetJournalLine(t *testing.T) {
 		if s.Bytes != messageBytes(msgs[i]) {
 			t.Errorf("scores[%d].bytes = %d, want %d", i, s.Bytes, messageBytes(msgs[i]))
 		}
-		if s.Score < 0 || s.Score > 1 {
-			t.Errorf("scores[%d].score = %f, want within [0,1]", i, s.Score)
+		if s.Score == nil || *s.Score < 0 || *s.Score > 1 {
+			t.Errorf("scores[%d].score = %v, want within [0,1]", i, s.Score)
 		}
 	}
-	if !(j.Scores[0].Score > j.Scores[1].Score && j.Scores[1].Score > j.Scores[2].Score) {
+	if j.Scores[0].Score == nil || j.Scores[1].Score == nil || j.Scores[2].Score == nil {
+		t.Fatalf("scores missing: %+v", j.Scores)
+	}
+	if !(*j.Scores[0].Score > *j.Scores[1].Score && *j.Scores[1].Score > *j.Scores[2].Score) {
 		t.Errorf("scores not ordered P0>P1>P3: %+v", j.Scores)
 	}
 }
@@ -287,8 +296,8 @@ func TestApplyBudgetJournalEdgePaths(t *testing.T) {
 	msgs := []models.Message{msg("p0", "P0", "critical"), msg("p2", "P2", "n")}
 
 	lines := captureBudgetJournal(t, func() { applyBudget(msgs, nil, 1) })
-	if len(lines) != 1 || strings.Join(lines[0].Selected, ",") != "p0" {
-		t.Errorf("P0-over-budget: lines = %+v, want one line selecting p0", lines)
+	if len(lines) != 1 || strings.Join(lines[0].Selected, ",") != "p0" || strings.Join(lines[0].Omitted, ",") != "p2" {
+		t.Errorf("P0-over-budget: lines = %+v, want one line selecting p0, omitting p2", lines)
 	}
 
 	lines = captureBudgetJournal(t, func() { applyBudget(msgs, nil, 0) })

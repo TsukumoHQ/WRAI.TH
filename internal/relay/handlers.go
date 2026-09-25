@@ -843,7 +843,7 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	if err != nil || unread == nil {
 		unread = []models.Message{}
 	}
-	projected := projectMessages(unread, sessionUnreadBudget)
+	projected := projectMessages(unread, sessionUnreadBudget, agentName)
 	result["unread_messages"] = projected
 	if len(projected) < len(unread) {
 		result["unread_omitted"] = len(unread) - len(projected)
