@@ -41,6 +41,9 @@ type Handlers struct {
 	// a disabled Federation (no peers) makes the send path behave as before.
 	federation *Federation
 
+	// memReads backs set_memory's based_on auto-fill (memory_readcache.go).
+	memReads memoryReadCache
+
 	// budgetAlerted dedupes the per-agent budget-exceeded alert to once an hour
 	// (TSU-53 slice-C), so a runaway agent pings once, not every flush.
 	budgetMu      sync.Mutex

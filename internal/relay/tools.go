@@ -301,6 +301,7 @@ func setMemoryTool() mcp.Tool {
 			mcp.Enum("constraints", "behavior", "context"),
 		),
 		mcp.WithBoolean("upsert", mcp.Description("true (default): overwrite. false: flag a conflict if value differs.")),
+		mcp.WithString("based_on", mcp.Description("Memory id you read ('new' = expect none); auto-filled from your last get_memory. If newer exists, both stay live.")),
 		mcp.WithString("valid_until", mcp.Description("Optional ISO-8601 UTC expiry; past it reads 'stale' (hidden unless include_stale).")),
 	)
 }

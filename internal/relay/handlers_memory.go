@@ -4,7 +4,10 @@ import (
 	"agent-relay/internal/db"
 	"agent-relay/internal/models"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"log"
 	"math"
 	"strings"
 	"time"
@@ -48,10 +51,31 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 		}
 	}
 
-	mem, err := h.db.SetMemory(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert)
+	// Causal context (DEC-wraith-memory-causal-1): an explicit based_on wins,
+	// else the id this agent's last get_memory of the key returned, else none
+	// (legacy last-writer-wins).
+	basedOn, causal := req.GetString("based_on", ""), "arg"
+	if basedOn == "" {
+		causal = "none"
+		if cached := h.memReads.lookup(project, agent, scope, key); cached != "" {
+			basedOn, causal = cached, "cache"
+		}
+	}
+	mem, err := h.db.SetMemoryWith(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert, db.SetMemoryOpts{BasedOn: basedOn})
+	if errors.Is(err, db.ErrBasedOnMismatch) {
+		if causal == "arg" {
+			return validationError(CodeInvalidArgument, err.Error()), nil
+		}
+		// A cached read that no longer resolves degrades to legacy, never to
+		// a refused write or a false conflict.
+		causal = "none"
+		mem, err = h.db.SetMemoryWith(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert, db.SetMemoryOpts{})
+	}
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to set memory: %v", err)), nil
 	}
+	outcome := memoryWriteOutcome(mem)
+	log.Printf("[memory] causal=%s outcome=%s project=%s agent=%s key=%s", causal, outcome, project, agent, key)
 
 	// Optional temporal validity window (T5). Stamped after the memory exists so
 	// the caller can set an expiry at write time; past valid_until reads as stale.
@@ -76,11 +100,13 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 			result["warning"] = warning
 		}
 	}
+	result["causal"] = causal
 	action := "set"
 	if mem.ConflictWith != nil {
 		result["conflict"] = true
 		result["message"] = fmt.Sprintf("Conflict detected: key '%s' already exists with a different value. Both versions preserved. Use resolve_conflict to pick the truth.", key)
 		action = "conflict"
+		h.routeMemoryConflict(result, project, agent, key, scope, layer, causal, upsert, mem)
 	}
 	h.events.Emit(MCPEvent{Type: "memory", Action: action, Agent: agent, Project: project, Label: key})
 
@@ -102,6 +128,11 @@ func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest)
 	}
 	if memories == nil {
 		memories = []models.Memory{}
+	}
+	// Remember what this agent read (in memory, no DB write) so its next
+	// set_memory of the key carries causal context without a based_on arg.
+	if len(memories) == 1 {
+		h.memReads.record(project, agent, memories[0].Scope, key, memories[0].ID)
 	}
 
 	result := map[string]any{
@@ -129,6 +160,56 @@ func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest)
 
 	return h.resultJSONTracked(project, agent, "get_memory", result)
 }
+
+// memoryWriteOutcome classifies what SetMemoryWith did, for the [memory] log.
+func memoryWriteOutcome(mem *models.Memory) string {
+	switch {
+	case mem.ConflictWith != nil:
+		return "sibling"
+	case mem.CreatedAt != mem.UpdatedAt:
+		return "noop" // convergent write: existing row touched, nothing inserted
+	case mem.Supersedes != nil:
+		return "fast-forward"
+	default:
+		return "fresh"
+	}
+}
+
+// routeMemoryConflict reports a sibling: the live row it conflicts with and its
+// author go in the result, event:memory-conflict goes to the notifier, and for
+// a based_on mismatch the current author gets a relay message (fyi P2, or a P1
+// decide message for constraints/decision layer keys). No message on a
+// self-race or for agent-scope memories.
+func (h *Handlers) routeMemoryConflict(result map[string]any, project, agent, key, scope, layer, causal string, upsert bool, mem *models.Memory) {
+	current, err := h.db.GetMemoryByID(*mem.ConflictWith)
+	if err != nil || current == nil {
+		return
+	}
+	result["conflict_with"] = current.ID
+	result["current_author"] = current.AgentName
+	preview, _ := truncatePreview(current.Value, msgContentPreview)
+	result["current_value"] = preview
+	h.events.EmitSemantic("event:memory-conflict", project, agent, map[string]any{
+		"key": key, "scope": scope, "current_id": current.ID, "sibling_id": mem.ID,
+		"writer": agent, "current_author": current.AgentName,
+	})
+	if causal == "none" || !upsert || scope == "agent" || current.AgentName == agent {
+		return
+	}
+	msgType, priority, action := "fyi", "P2", "none"
+	if isDoctrineLayer(current.Layer) || isDoctrineLayer(layer) {
+		msgType, priority, action = "notification", "P1", "decide"
+	}
+	content := fmt.Sprintf("%s wrote memory %q (%s scope) based on an older version than yours. Your value (%s) and theirs (%s) are both live; use resolve_conflict to pick the truth.",
+		agent, key, scope, current.ID, mem.ID)
+	meta, _ := json.Marshal(map[string]string{"memory_key": key, "current_id": current.ID, "sibling_id": mem.ID})
+	if _, _, err := h.db.InsertMessageWithDeliveries(project, "relay", current.AgentName, msgType, "memory conflict: "+key, content, string(meta),
+		priority, -1, nil, nil, []string{current.AgentName}, action); err != nil {
+		log.Printf("[memory] conflict notice to %s failed: %v", current.AgentName, err)
+	}
+}
+
+func isDoctrineLayer(layer string) bool { return layer == "constraints" || layer == "decision" }
 
 // HandleRemember records an ADR-style decision (TSU-51). Decisions are project
 // memories (layer="decision"); the accepted set is surfaced at session start so
