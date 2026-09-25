@@ -1,6 +1,9 @@
 package db
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // Dangling board_id sweep (Q4 residual of DEC-wraith-boards-linear-guard-1). A
 // native task can keep a board_id that points at a board which no longer exists
@@ -23,6 +26,13 @@ import "fmt"
 // every target lookup complete on the read pool BEFORE a single writer tx applies
 // all re-homes. Idempotent: after an apply pass every task points at an active
 // board, so a re-run finds no candidates.
+//
+// A no-target task stays a candidate forever, so an apply pass records it once
+// in integrity_quarantine (class danglingNoTargetClass, keyed by task, ref_value
+// = the dangling board_id) and later passes skip it: it is journaled once, not
+// every sweep (task 27a77033). The marker resolves when the task stops being
+// that no-target candidate (re-homed, archived, board fixed), so a later
+// recurrence is journaled again. Scanned still counts every candidate.
 
 // DanglingDisposition is one native task the sweep re-homed (or, in dry-run,
 // would re-home) because its board_id references a missing or archived board.
@@ -41,6 +51,10 @@ type DanglingSweepResult struct {
 	Scanned      int // native tasks whose board_id is missing-or-archived
 	Dispositions []DanglingDisposition
 }
+
+// danglingNoTargetClass is the quarantine class that records a journaled
+// no-target disposition.
+const danglingNoTargetClass = "dangling_board_no_target"
 
 // danglingCandidate is a scanned row before target resolution.
 type danglingCandidate struct {
@@ -82,7 +96,30 @@ func (d *DB) SweepDanglingBoards(apply bool) (*DanglingSweepResult, error) {
 	}
 	rows.Close() // drain + close BEFORE any write (single-writer discipline)
 
+	// Open no-target markers: task id -> the board_id it was journaled for.
+	marked := map[string]string{}
+	mrows, err := d.ro().Query(
+		`SELECT row_id, ref_value FROM integrity_quarantine WHERE class = ? AND resolved_at IS NULL`,
+		danglingNoTargetClass)
+	if err != nil {
+		return nil, fmt.Errorf("dangling sweep: marker query: %w", err)
+	}
+	for mrows.Next() {
+		var task, board string
+		if err := mrows.Scan(&task, &board); err != nil {
+			mrows.Close()
+			return nil, fmt.Errorf("dangling sweep: marker scan: %w", err)
+		}
+		marked[task] = board
+	}
+	if err := mrows.Err(); err != nil {
+		mrows.Close()
+		return nil, fmt.Errorf("dangling sweep: marker rows: %w", err)
+	}
+	mrows.Close()
+
 	res := &DanglingSweepResult{DryRun: !apply, Scanned: len(candidates)}
+	stillNoTarget := map[string]bool{} // marked tasks that are still the same no-target
 
 	// Resolve the active product board per (project, slug) once — cached, negative
 	// results included. All reads happen here, before the writer tx opens.
@@ -117,6 +154,10 @@ func (d *DB) SweepDanglingBoards(apply bool) (*DanglingSweepResult, error) {
 		if !tgt.ok {
 			// No active product board for this profile in this project — leave the
 			// task exactly as is (never delete, never blank the board_id).
+			if b, ok := marked[c.id]; ok && b == c.boardID {
+				stillNoTarget[c.id] = true // already journaled once
+				continue
+			}
 			disp.Action = "no-target"
 			res.Dispositions = append(res.Dispositions, disp)
 			continue
@@ -137,14 +178,43 @@ func (d *DB) SweepDanglingBoards(apply bool) (*DanglingSweepResult, error) {
 
 	// Apply every re-home in ONE writer tx. The board_id = FromBoard guard makes a
 	// concurrent move win instead of being clobbered; RowsAffected 0 is a benign
-	// raced no-op. no-target dispositions write nothing.
+	// raced no-op. no-target dispositions write only their quarantine marker,
+	// never the task row.
 	tx, err := d.beginWriterTx()
 	if err != nil {
 		return res, fmt.Errorf("dangling sweep: begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	for task := range marked {
+		if stillNoTarget[task] {
+			continue
+		}
+		if _, err := tx.Exec(
+			`UPDATE integrity_quarantine SET resolved_at = ?
+			 WHERE class = ? AND row_id = ? AND resolved_at IS NULL`,
+			now, danglingNoTargetClass, task,
+		); err != nil {
+			return res, fmt.Errorf("dangling sweep: resolve marker %s: %w", task, err)
+		}
+	}
 	for _, disp := range res.Dispositions {
+		if disp.Action == "no-target" {
+			// Upsert: a resolved marker for this task is re-opened on recurrence.
+			if _, err := tx.Exec(
+				`INSERT INTO integrity_quarantine
+				   (table_name, row_id, ref_col, ref_value, class, project, detected_at)
+				 VALUES ('tasks', ?, 'board_id', ?, ?, ?, ?)
+				 ON CONFLICT(table_name, row_id, ref_col, class) DO UPDATE SET
+				   ref_value = excluded.ref_value, project = excluded.project,
+				   detected_at = excluded.detected_at, resolved_at = NULL`,
+				disp.Task, disp.FromBoard, danglingNoTargetClass, disp.Project, now,
+			); err != nil {
+				return res, fmt.Errorf("dangling sweep: mark %s: %w", disp.Task, err)
+			}
+			continue
+		}
 		if disp.Action != "rehome" {
 			continue
 		}

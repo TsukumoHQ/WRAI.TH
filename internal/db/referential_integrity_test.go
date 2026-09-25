@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -658,10 +660,10 @@ func TestScanLowerDropSuiteSmoke(t *testing.T) {
 	seedProfile(t, c, "p1", "analytics-lead")
 	seedAgent(t, c, "p1", "alice", "active", "backend", "", 0)
 	seedAgent(t, c, "p1", "analytics-lead", "active", "backend", "", 0)
-	seedAgent(t, c, "p1", "zombie", "deleted", "backend", "", 0)   // limbo source
-	seedAgent(t, c, "p1", "svc", "inactive", "backend", "", 1)     // limbo-exempt
-	seedAgent(t, c, "p1", "bob", "active", "backend", "ghost", 0)  // orphan_reports_to
-	seedAgent(t, c, "p1", "carol", "active", "no-profile", "", 0)  // orphan_agent_profile
+	seedAgent(t, c, "p1", "zombie", "deleted", "backend", "", 0)  // limbo source
+	seedAgent(t, c, "p1", "svc", "inactive", "backend", "", 1)    // limbo-exempt
+	seedAgent(t, c, "p1", "bob", "active", "backend", "ghost", 0) // orphan_reports_to
+	seedAgent(t, c, "p1", "carol", "active", "no-profile", "", 0) // orphan_agent_profile
 	seedTask(t, c, "t-odisp", "p1", "pending", "ghost", "", "", "backend", "", "", false)
 	seedTask(t, c, "t-oassign", "p1", "pending", "alice", "ghost", "", "backend", "", "", false)
 	seedTask(t, c, "t-limbo", "p1", "in-progress", "alice", "zombie", "", "backend", "", "", false)
@@ -1044,5 +1046,81 @@ func TestBootScanMatchesSplit(t *testing.T) {
 
 	if !reflect.DeepEqual(bootCounts, splitCounts) {
 		t.Errorf("boot vs split open counts differ:\n boot=%v\nsplit=%v", bootCounts, splitCounts)
+	}
+}
+
+// TestReferentialScanTimingNamesSlowestClass (task 27a77033 AC1): a slow scan's
+// line names every phase and the slowest class; a fast scan stays silent. The
+// read hook sleeps inside the first class's timed window, so that class is
+// deterministically the slowest.
+func TestReferentialScanTimingNamesSlowestClass(t *testing.T) {
+	d := testDB(t)
+	orig := writerSlowWait
+	defer func() { writerSlowWait = orig }()
+
+	writerSlowWait = time.Hour
+	if out := captureLog(t, func() {
+		if _, err := d.RunReferentialScan(); err != nil {
+			t.Fatalf("RunReferentialScan: %v", err)
+		}
+	}); strings.Contains(out, "integrity scan: took") {
+		t.Fatalf("fast scan must stay silent, got:\n%s", out)
+	}
+
+	writerSlowWait = 5 * time.Millisecond
+	refScanReadHook = func() { time.Sleep(30 * time.Millisecond) }
+	defer func() { refScanReadHook = nil }()
+	out := captureLog(t, func() {
+		if _, err := d.RunReferentialScan(); err != nil {
+			t.Fatalf("RunReferentialScan: %v", err)
+		}
+	})
+
+	checks := refChecks()
+	re := regexp.MustCompile(`(?m)^integrity scan: took \S+ \(read \S+ apply \S+ count \S+ invariant \S+; slowest class=` +
+		regexp.QuoteMeta(checks[0].class) + ` (\S+); ` + strconv.Itoa(len(checks)) + ` classes\)$`)
+	m := re.FindStringSubmatch(out)
+	if m == nil {
+		t.Fatalf("timing line missing or malformed, got:\n%s", out)
+	}
+	if took, err := time.ParseDuration(m[1]); err != nil || took < 30*time.Millisecond {
+		t.Fatalf("slowest class duration = %q (%v), want >= 30ms", m[1], err)
+	}
+}
+
+// TestOrphanAgentProfileActiveOnly (task 27a77033 AC2, design Q4): only an
+// active agent with an unknown profile slug is flagged; inactive/deleted agents
+// are not, and an open row left for a dead agent heals on the next scan.
+func TestOrphanAgentProfileActiveOnly(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedAgent(t, c, "p1", "live", "active", "no-profile", "", 0)
+	seedAgent(t, c, "p1", "idle", "inactive", "no-profile", "", 0)
+	seedAgent(t, c, "p1", "gone", "deleted", "no-profile", "", 0)
+	// A row the pre-Q4 scan opened for the deleted agent.
+	if _, err := c.Exec(`INSERT INTO integrity_quarantine (table_name, row_id, ref_col, ref_value, class, project, detected_at)
+		VALUES ('agents', 'ag-gone', 'profile_slug', 'no-profile', 'orphan_agent_profile', 'p1', '2026-01-01T00:00:00Z')`); err != nil {
+		t.Fatalf("seed legacy open row: %v", err)
+	}
+
+	if _, err := d.RunReferentialScan(); err != nil {
+		t.Fatalf("RunReferentialScan: %v", err)
+	}
+	if !quarantineRowExists(t, c, "orphan_agent_profile", "ag-live") {
+		t.Error("active agent with unknown slug must be flagged")
+	}
+	if quarantineRowExists(t, c, "orphan_agent_profile", "ag-idle") {
+		t.Error("inactive agent must not be flagged")
+	}
+	if quarantineRowExists(t, c, "orphan_agent_profile", "ag-gone") {
+		t.Error("deleted agent's open row must heal")
+	}
+	var resolvedAt sql.NullString
+	if err := c.QueryRow(`SELECT resolved_at FROM integrity_quarantine WHERE class = 'orphan_agent_profile' AND row_id = 'ag-gone'`).Scan(&resolvedAt); err != nil || !resolvedAt.Valid {
+		t.Fatalf("ag-gone resolved_at = %v (%v), want stamped", resolvedAt, err)
+	}
+	if n := openCount(t, c, "orphan_agent_profile"); n != 1 {
+		t.Fatalf("open orphan_agent_profile = %d, want 1", n)
 	}
 }

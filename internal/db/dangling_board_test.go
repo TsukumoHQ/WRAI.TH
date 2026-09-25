@@ -208,3 +208,76 @@ func TestSweepDanglingBoardsScope(t *testing.T) {
 		t.Fatalf("archived task board_id = %q, want unchanged (out of scope)", got)
 	}
 }
+
+// taskRowSnapshot renders every column of a task row, for byte-identity checks.
+func taskRowSnapshot(t *testing.T, d *DB, taskID string) string {
+	t.Helper()
+	rows, err := d.conn.Query("SELECT * FROM tasks WHERE id = ?", taskID)
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", taskID, err)
+	}
+	defer rows.Close()
+	cols, _ := rows.Columns()
+	if !rows.Next() {
+		t.Fatalf("snapshot %s: row missing", taskID)
+	}
+	vals := make([]sql.RawBytes, len(cols))
+	ptrs := make([]interface{}, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		t.Fatalf("snapshot %s: %v", taskID, err)
+	}
+	out := ""
+	for i, v := range vals {
+		out += cols[i] + "=" + string(v) + "\x00"
+	}
+	return out
+}
+
+// TestDanglingBoardNoTargetJournaledOnce (task 27a77033 AC3): a no-target task
+// is reported once across apply passes (Scanned stays honest), its row is never
+// touched, and re-homing or archiving it clears the marker so a recurrence is
+// reported again.
+func TestDanglingBoardNoTargetJournaledOnce(t *testing.T) {
+	d := testDB(t)
+	task := danglingTask(t, d, "p", "analytics-lead", "ghost-board") // slug backlog: no target
+	before := taskRowSnapshot(t, d, task)
+
+	sweep := func(wantScanned, wantDisp int) {
+		t.Helper()
+		res, err := d.SweepDanglingBoards(true)
+		if err != nil {
+			t.Fatalf("apply sweep: %v", err)
+		}
+		if res.Scanned != wantScanned || len(res.Dispositions) != wantDisp {
+			t.Fatalf("scanned=%d dispositions=%d (%+v), want %d/%d",
+				res.Scanned, len(res.Dispositions), res.Dispositions, wantScanned, wantDisp)
+		}
+	}
+
+	sweep(1, 1) // first sight: journaled
+	sweep(1, 0) // same no-target: scanned, not journaled again
+	if after := taskRowSnapshot(t, d, task); after != before {
+		t.Fatalf("task row changed:\nbefore %q\nafter  %q", before, after)
+	}
+
+	// Archive: the task leaves the candidate set, the marker resolves; unarchive
+	// and the recurrence is journaled again.
+	rawExec(t, d, "UPDATE tasks SET archived_at = ? WHERE id = ?", time.Now().UTC().Format(memoryTimeFmt), task)
+	sweep(0, 0)
+	rawExec(t, d, "UPDATE tasks SET archived_at = NULL WHERE id = ?", task)
+	sweep(1, 1)
+
+	// Re-home onto a live board, then dangle again: journaled again.
+	live, err := d.CreateBoard("p", "Live", "live", "", "cto")
+	if err != nil {
+		t.Fatalf("create board: %v", err)
+	}
+	rawExec(t, d, "UPDATE tasks SET board_id = ? WHERE id = ?", live.ID, task)
+	sweep(0, 0)
+	rawExec(t, d, "UPDATE tasks SET board_id = 'ghost-board' WHERE id = ?", task)
+	sweep(1, 1)
+	sweep(1, 0)
+}

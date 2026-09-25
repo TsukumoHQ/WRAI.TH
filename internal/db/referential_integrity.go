@@ -213,11 +213,15 @@ func refChecks() []refCheck {
 				  AND LOWER(a.reports_to) NOT IN (` + sent + `)
 				  AND NOT EXISTS (SELECT 1 FROM agents b WHERE b.project = a.project AND b.name = a.reports_to)`,
 		},
+		// Active agents only (design Q4, task 27a77033): the agents ARE the
+		// profile pool, so an inactive/deleted agent's slug can never bite. Open
+		// rows for dead agents heal on the next pass (resolve = open \ orphan).
 		{
 			class: "orphan_agent_profile", table: "agents", refCol: "profile_slug",
 			orphanSQL: `SELECT a.id AS row_id, a.profile_slug AS ref_value, a.project AS project
 				FROM agents a
 				WHERE a.profile_slug IS NOT NULL AND a.profile_slug <> ''
+				  AND a.status = 'active'
 				  AND NOT EXISTS (SELECT 1 FROM profiles p WHERE p.project = a.project AND p.slug = a.profile_slug)`,
 		},
 		// --- message recipient / sender. Broadcast ('*'), team ('team:%') and
@@ -286,9 +290,10 @@ type orphanRow struct {
 // exactly these — no orphanSQL text runs on the writer.
 type refDelta struct {
 	c          refCheck
-	newOrphans []orphanRow // orphan AND not currently open (brand-new or resolved-then-regressed)
-	reopenIDs  []string    // resolved rows that are orphan again → re-open
-	resolveIDs []string    // open rows whose ref now resolves → mark resolved
+	newOrphans []orphanRow   // orphan AND not currently open (brand-new or resolved-then-regressed)
+	reopenIDs  []string      // resolved rows that are orphan again → re-open
+	resolveIDs []string      // open rows whose ref now resolves → mark resolved
+	took       time.Duration // this class's read time, for the slow-scan line
 }
 
 // roQueryer is the read surface the read phase needs: the reader pool in the
@@ -311,6 +316,7 @@ type execer interface {
 func readRefDeltas(ctx context.Context, rq roQueryer) ([]refDelta, error) {
 	out := make([]refDelta, 0, 16)
 	for i, c := range refChecks() {
+		classStart := time.Now()
 		if i == 0 && refScanReadHook != nil {
 			refScanReadHook()
 		}
@@ -345,7 +351,7 @@ func readRefDeltas(ctx context.Context, rq roQueryer) ([]refDelta, error) {
 		}
 		openSet := idSet(open)
 
-		d := refDelta{c: c}
+		d := refDelta{c: c, took: time.Since(classStart)}
 		for _, o := range orphans {
 			if !openSet[o.rowID] {
 				d.newOrphans = append(d.newOrphans, o) // orphan \ open
@@ -572,6 +578,7 @@ func runReferentialScan(conn *sql.DB) (map[string]int, error) {
 // complete_task/flush/expire into writerTimeout (task 1ac2ce6e). Idempotent.
 func (d *DB) RunReferentialScan() (map[string]int, error) {
 	scanStart := time.Now()
+	var tRead, tApply, tCount, tInvariant time.Duration
 
 	// Read phase — reader pool, own ctx (referentialScanTimeout). Holds no writer.
 	rctx, rcancel := context.WithTimeout(context.Background(), referentialScanTimeout)
@@ -580,6 +587,7 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 	if err != nil {
 		return nil, err
 	}
+	tRead = time.Since(scanStart)
 
 	if refScanBetweenHook != nil {
 		refScanBetweenHook()
@@ -588,6 +596,7 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
 	// Apply phase — one short writer tx, bounded by writerTimeout via beginWriterTx.
+	phaseStart := time.Now()
 	tx, err := d.beginWriterTx()
 	if err != nil {
 		return nil, fmt.Errorf("referential scan: begin writer: %w", err)
@@ -599,21 +608,26 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("referential scan: commit: %w", err)
 	}
+	tApply = time.Since(phaseStart)
 
 	// Count phase — reader pool, post-commit (sees the committed apply).
+	phaseStart = time.Now()
 	cctx, ccancel := context.WithTimeout(context.Background(), referentialScanTimeout)
 	counts, err := openCountsByClass(cctx, d.ro())
 	ccancel()
 	if err != nil {
 		return nil, err
 	}
+	tCount = time.Since(phaseStart)
 
 	// Case-invariant guard (task B2 790fe231): refChecks() dropped its per-row
 	// LOWER() wrappers for indexed point lookups, which is only sound because the
 	// write paths normalize name/slug/assignee/recipient to lowercase (task B1).
 	// Surface — never block on — any stored value that slipped past that so a
 	// missed/false-flagged orphan is attributable. Reader pool; log only.
+	phaseStart = time.Now()
 	d.checkCaseInvariant()
+	tInvariant = time.Since(phaseStart)
 
 	detect, heal := refScanLogLines(deltas, now)
 	for _, l := range detect {
@@ -626,11 +640,26 @@ func (d *DB) RunReferentialScan() (map[string]int, error) {
 	// Writer-starvation diagnostic (task 2d5fb3c2): a scan slower than
 	// writerSlowWait is what used to hold the writer long enough to starve other
 	// writes — surface its duration so the cause is attributable. Silent when fast
-	// (the common clean-DB near-no-op).
+	// (the common clean-DB near-no-op). Names each phase and the slowest class
+	// (task 27a77033) so a slow scan points at its cause.
 	if took := time.Since(scanStart); took >= writerSlowWait {
-		log.Printf("integrity scan: took %s (%d classes)", took.Round(time.Millisecond), len(deltas))
+		log.Print(refScanTimingLine(took, tRead, tApply, tCount, tInvariant, deltas))
 	}
 	return counts, nil
+}
+
+// refScanTimingLine formats the slow-scan line: total, per-phase durations and
+// the slowest class read. The first class wins a tie (stable).
+func refScanTimingLine(took, read, apply, count, invariant time.Duration, deltas []refDelta) string {
+	ms := func(d time.Duration) time.Duration { return d.Round(time.Millisecond) }
+	slowest, slowestTook := "none", time.Duration(0)
+	for _, d := range deltas {
+		if slowest == "none" || d.took > slowestTook {
+			slowest, slowestTook = d.c.class, d.took
+		}
+	}
+	return fmt.Sprintf("integrity scan: took %s (read %s apply %s count %s invariant %s; slowest class=%s %s; %d classes)",
+		ms(took), ms(read), ms(apply), ms(count), ms(invariant), slowest, ms(slowestTook), len(deltas))
 }
 
 // MarkQuarantine upserts ONE referential-integrity quarantine row (the same
