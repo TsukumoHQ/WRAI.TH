@@ -29,6 +29,7 @@ func newFedRelay(t *testing.T, peers []config.FederationPeer) *Relay {
 	events := NewEventBus()
 	registry := NewSessionRegistry(mcpSrv)
 	handlers := NewHandlers(database, registry, nil, events)
+	t.Cleanup(handlers.Close) // LIFO: stops the flusher before the DB closes
 	fed := NewFederation(peers)
 	handlers.federation = fed
 

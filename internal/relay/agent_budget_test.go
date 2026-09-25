@@ -20,6 +20,7 @@ func TestCheckBudgets(t *testing.T) {
 	t.Cleanup(func() { _ = database.Close() })
 	events := NewEventBus()
 	h := NewHandlers(database, NewSessionRegistry(nil), nil, events)
+	t.Cleanup(h.Close) // LIFO: stops the flusher before the DB closes
 
 	const project, agent = "p1", "greedy"
 	if err := database.SetAgentQuota(project, agent, 1000, 0, 0, 0); err != nil { // 1000 tokens/day
@@ -59,4 +60,42 @@ func TestCheckBudgets(t *testing.T) {
 	case <-time.After(300 * time.Millisecond):
 		// good — deduped
 	}
+}
+
+// TestHandlersCloseFlushesAndStops pins the teardown path (task d230b752):
+// Close flushes records still queued for the batched flusher, waits for the
+// flusher to exit (so the DB can be closed right after without a leaked
+// goroutine logging into a later test's captured output), is idempotent, and a
+// RecordTokens after Close takes the drop path instead of panicking.
+func TestHandlersCloseFlushesAndStops(t *testing.T) {
+	database, err := db.NewTestDB(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("db: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	h := NewHandlers(database, NewSessionRegistry(nil), nil, NewEventBus())
+
+	const project, agent = "p1", "worker"
+	if err := database.SetAgentQuota(project, agent, 1_000_000, 0, 0, 0); err != nil {
+		t.Fatalf("quota: %v", err)
+	}
+	now := time.Now().UTC().Format("2006-01-02T15:04:05.000000Z")
+	// 3 records: below the 50-record batch threshold and well inside the 5s
+	// ticker, so only the stop path can flush them.
+	for i := 0; i < 3; i++ {
+		h.RecordTokens(db.TokenRecord{Project: project, Agent: agent, Input: 10, Output: 5, CreatedAt: now})
+	}
+
+	h.Close()
+	select {
+	case <-h.flushDone:
+	default:
+		t.Fatal("Close returned before the flusher exited")
+	}
+	if _, used, _ := database.CheckQuota(project, agent, "tokens"); used != 45 {
+		t.Fatalf("tokens flushed on Close = %d, want 45", used)
+	}
+
+	h.Close() // idempotent: no double-close panic, no hang
+	h.RecordTokens(db.TokenRecord{Project: project, Agent: agent, Input: 1, CreatedAt: now})
 }

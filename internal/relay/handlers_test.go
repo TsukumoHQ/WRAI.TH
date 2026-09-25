@@ -28,7 +28,9 @@ func testHandlers(t *testing.T) *Handlers {
 	mcpSrv := server.NewMCPServer("test", "0.0.0")
 	registry := NewSessionRegistry(mcpSrv)
 	events := NewEventBus()
-	return NewHandlers(database, registry, nil, events)
+	h := NewHandlers(database, registry, nil, events)
+	t.Cleanup(h.Close) // LIFO: stops the flusher before the DB closes
+	return h
 }
 
 func call(args map[string]any) mcp.CallToolRequest {

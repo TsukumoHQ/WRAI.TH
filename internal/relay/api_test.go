@@ -29,6 +29,7 @@ func testRelay(t *testing.T) *Relay {
 	events := NewEventBus()
 	registry := NewSessionRegistry(mcpSrv)
 	handlers := NewHandlers(database, registry, nil, events)
+	t.Cleanup(handlers.Close) // LIFO: stops the flusher before the DB closes
 
 	return &Relay{
 		MCPServer: mcpSrv,

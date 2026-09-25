@@ -20,6 +20,7 @@ func TestSessionContext_InjectsDecisions(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	h := NewHandlers(database, NewSessionRegistry(nil), nil, NewEventBus())
+	t.Cleanup(h.Close) // LIFO: stops the flusher before the DB closes
 	const project = "p1"
 
 	if _, err := database.RememberDecision(project, "wraith-dev", "ingest/hooks",
@@ -61,6 +62,7 @@ func TestSessionContext_DecisionsOmitted_ReflectsByteBudget(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	h := NewHandlers(database, NewSessionRegistry(nil), nil, NewEventBus())
+	t.Cleanup(h.Close) // LIFO: stops the flusher before the DB closes
 	const project = "p1"
 
 	// 10 fat decisions (< sessionDecisionMax=40) — distinct areas so each is a

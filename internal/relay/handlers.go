@@ -28,6 +28,15 @@ type Handlers struct {
 	connMu    sync.RWMutex
 	connector connector.TaskConnector
 
+	// stopCh ends the background goroutines started by NewHandlers; flushDone
+	// closes once flushTokenUsage has flushed its buffer and returned. Close
+	// uses both so a caller (test teardown) can stop the flusher before the DB
+	// it writes to is closed. tokenCh itself is never closed: RecordTokens
+	// keeps sending into it and a send on a closed channel panics.
+	stopCh    chan struct{}
+	flushDone chan struct{}
+	closeOnce sync.Once
+
 	// federation forwards direct messages to/from trusted peer relays. Nil-safe:
 	// a disabled Federation (no peers) makes the send path behave as before.
 	federation *Federation
@@ -70,8 +79,14 @@ func (h *Handlers) allowRegister(project, name string) bool {
 // sweepRegisterLimiters drops idle entries so the map doesn't grow unbounded
 // across the lifetime of a long-running relay.
 func (h *Handlers) sweepRegisterLimiters() {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
 	for {
-		time.Sleep(10 * time.Minute)
+		select {
+		case <-h.stopCh:
+			return
+		case <-ticker.C:
+		}
 		h.registerMu.Lock()
 		for key, v := range h.registerLimiters {
 			if time.Since(v.lastSeen) > 15*time.Minute {
@@ -150,10 +165,20 @@ func (h *Handlers) getConnector() connector.TaskConnector {
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
-	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
+	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), stopCh: make(chan struct{}), flushDone: make(chan struct{}), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
 	go h.flushTokenUsage()
 	go h.sweepRegisterLimiters()
 	return h
+}
+
+// Close stops the background goroutines started by NewHandlers and blocks
+// until the token-usage flusher has flushed its pending batch and exited, so
+// the DB can be closed right after without the flusher racing it. Idempotent.
+// Records queued after Close are dropped (RecordTokens' non-blocking send
+// fills the buffered channel, then takes its drop path).
+func (h *Handlers) Close() {
+	h.closeOnce.Do(func() { close(h.stopCh) })
+	<-h.flushDone
 }
 
 // checkBudgets fires a budget-exceeded event for any agent in the just-flushed
@@ -198,6 +223,7 @@ func (h *Handlers) checkBudgets(batch []db.TokenRecord) {
 
 // flushTokenUsage batches token usage records and inserts them every 5s or 50 records.
 func (h *Handlers) flushTokenUsage() {
+	defer close(h.flushDone)
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	buf := make([]db.TokenRecord, 0, 64)
@@ -229,6 +255,19 @@ func (h *Handlers) flushTokenUsage() {
 			}
 		case <-ticker.C:
 			flush()
+		case <-h.stopCh:
+			// Drain what is already queued, flush it, exit.
+		drain:
+			for {
+				select {
+				case r := <-h.tokenCh:
+					buf = append(buf, r)
+				default:
+					break drain
+				}
+			}
+			flush()
+			return
 		}
 	}
 }

@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"database/sql"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -97,14 +98,18 @@ func TestSettingAccessorsClampDefaultWarnOnce(t *testing.T) {
 	}
 
 	// WARN dedupe: three reads of one bad key emit exactly one WARN line for it.
-	d.SetSetting("ac1_warnonce", "1000h") // > 24h, out of range
+	// The dedupe set is process-wide (db.settingWarnedKeys), so the key is
+	// unique per run: under -count=N a fixed key was already warned by run 1
+	// and runs 2..N saw 0 WARNs.
+	warnKey := fmt.Sprintf("ac1_warnonce_%d", time.Now().UnixNano())
+	d.SetSetting(warnKey, "1000h") // > 24h, out of range
 	out := captureLog(func() {
 		for i := 0; i < 3; i++ {
-			_ = d.SettingDuration("ac1_warnonce", durDef, durMin, durMax)
+			_ = d.SettingDuration(warnKey, durDef, durMin, durMax)
 		}
 	})
-	if n := strings.Count(out, "ac1_warnonce"); n != 1 {
-		t.Fatalf("expected exactly 1 WARN for ac1_warnonce across 3 reads, got %d\nlog:\n%s", n, out)
+	if n := strings.Count(out, warnKey); n != 1 {
+		t.Fatalf("expected exactly 1 WARN for %s across 3 reads, got %d\nlog:\n%s", warnKey, n, out)
 	}
 }
 
