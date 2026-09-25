@@ -999,7 +999,7 @@ func (d *DB) GetUnackedTasks(minAge time.Duration) ([]models.Task, error) {
 // write time; ok=false means the caller must no-op (skip the notify), not act
 // on the stale read.
 func (d *DB) MarkTaskAckNotified(taskID string) (ok bool, err error) {
-	now := time.Now().UTC().Format(memoryTimeFmt)
+	now := d.Now().Format(memoryTimeFmt)
 	res, err := d.writerExec(
 		`UPDATE tasks SET ack_notified_at = ? WHERE id = ? AND status = 'pending'
 		 AND (run_state IS NULL OR run_state = '') AND ack_notified_at IS NULL`,
@@ -1015,7 +1015,7 @@ func (d *DB) MarkTaskAckNotified(taskID string) (ok bool, err error) {
 // MarkTaskAckEscalated sets the ack_escalated_at timestamp — same CAS guard as
 // MarkTaskAckNotified, see its doc comment.
 func (d *DB) MarkTaskAckEscalated(taskID string) (ok bool, err error) {
-	now := time.Now().UTC().Format(memoryTimeFmt)
+	now := d.Now().Format(memoryTimeFmt)
 	res, err := d.writerExec(
 		`UPDATE tasks SET ack_escalated_at = ? WHERE id = ? AND status = 'pending'
 		 AND (run_state IS NULL OR run_state = '') AND ack_escalated_at IS NULL`,

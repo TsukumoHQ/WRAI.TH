@@ -317,6 +317,8 @@ func runCleanupTick(database *db.DB, st *cleanupState) {
 
 // StartACKChecker runs a background goroutine that checks for unacknowledged tasks.
 // 15min → notify dispatcher. 45min → escalate. Never auto-redispatch.
+// Since DEC-wraith-obligations-1 slice 1 each check runs on the obligations
+// engine (evaluateObligations), with the legacy checker's exact behaviour.
 func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan struct{}) {
 	ticker := time.NewTicker(ACKCheckInterval)
 	go func() {
@@ -326,63 +328,90 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 			case <-done:
 				return
 			case <-ticker.C:
-				checkUnackedTasks(database, registry)
+				evaluateObligations(database, registry, database.Now())
 			}
 		}
 	}()
 }
 
-func checkUnackedTasks(database *db.DB, registry *SessionRegistry) {
+// ackNotifier is the push channel the ACK sanctions use (*SessionRegistry in
+// production, a recorder in the equivalence test).
+type ackNotifier interface {
+	Notify(project, agentName, from, subject, messageID string)
+}
+
+// evaluateObligations is the ACK checker on the obligations engine. It keeps
+// the legacy checkUnackedTasks behaviour byte-for-byte (same settings, clamps,
+// candidates, texts, CAS marks and quirks Q1-Q4): per task, the escalate norm
+// is weighed before the notify norm and at most one sanction fires per tick,
+// which is the legacy if / else-if. TestACKEquivalence proves it against the
+// legacy checker kept verbatim as an oracle.
+func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 	// Read the ack knobs at check time so a PUT takes effect on the next ACK
 	// tick without restart (const default, D2 bounds clamp).
 	notifyAge := database.SettingDuration("ack_notify_age", ACKNotifyAge, time.Minute, 24*time.Hour)
 	escalateAge := database.SettingDuration("ack_escalate_age", ACKEscalateAge, time.Minute, 24*time.Hour)
-	// Get tasks pending for at least the notify age
-	tasks, err := database.GetUnackedTasks(notifyAge)
+	cutoff := now.Add(-notifyAge)
+
+	// Close first so a task claimed in the gap reads fulfilled, not breached.
+	if _, err := database.CloseMootTaskObligations(now); err != nil {
+		log.Printf("obligations close error: %v", err)
+	}
+	if _, err := database.StampLateDone(now); err != nil {
+		log.Printf("obligations late-done error: %v", err)
+	}
+	if _, err := database.InstantiateTaskAck(cutoff, now); err != nil {
+		log.Printf("ACK checker error: %v", err)
+		return
+	}
+	obligations, err := database.ActiveTaskObligations(cutoff)
 	if err != nil {
 		log.Printf("ACK checker error: %v", err)
 		return
 	}
 
-	now := time.Now().UTC()
-	for _, task := range tasks {
-		dispatchedAt, err := time.Parse("2006-01-02T15:04:05Z", task.DispatchedAt)
+	sanctioned := map[string]bool{} // one sanction branch per task per tick (Q3)
+	for _, o := range obligations {
+		if sanctioned[o.TaskID] {
+			continue
+		}
+		dispatchedAt, err := time.Parse("2006-01-02T15:04:05Z", o.DispatchedAt)
 		if err != nil {
 			continue
 		}
 		age := now.Sub(dispatchedAt)
 
-		if age >= escalateAge && task.AckEscalatedAt == nil {
-			// CAS-guarded mark FIRST: the batch read above can be stale by the time
-			// we get here (a run container claimed run_state, or the task moved off
-			// 'pending', or a concurrent tick already marked it). ok=false means one
-			// of those happened — no-op instead of escalating on data that's no
-			// longer true.
-			ok, err := database.MarkTaskAckEscalated(task.ID)
-			if err != nil {
-				log.Printf("ACK escalate mark error: task %s: %v", task.ID, err)
-				continue
-			}
-			if !ok {
-				continue
-			}
-			registry.Notify(task.Project, task.DispatchedBy, "relay",
-				fmt.Sprintf("ESCALATED: Task '%s' no ACK for %dmin. Consider re-dispatching.", task.Title, int(age.Minutes())),
-				task.ID)
-			log.Printf("ACK escalated: task %s (%s) — %dmin", task.ID, task.Title, int(age.Minutes()))
-		} else if age >= notifyAge && task.AckNotifiedAt == nil {
-			ok, err := database.MarkTaskAckNotified(task.ID)
-			if err != nil {
-				log.Printf("ACK notify mark error: task %s: %v", task.ID, err)
-				continue
-			}
-			if !ok {
-				continue
-			}
-			registry.Notify(task.Project, task.DispatchedBy, "relay",
-				fmt.Sprintf("Task '%s' no ACK after %dmin. Profile: %s", task.Title, int(age.Minutes()), task.ProfileSlug),
-				task.ID)
-			log.Printf("ACK notify: task %s (%s) — %dmin", task.ID, task.Title, int(age.Minutes()))
+		var threshold time.Duration
+		switch o.NormID {
+		case db.NormAckEscalate:
+			threshold = escalateAge
+		case db.NormAckNotify:
+			threshold = notifyAge
+		default:
+			continue
+		}
+		if age < threshold {
+			continue
+		}
+		// Branch taken: like the legacy if/else-if, a failed CAS below still
+		// consumes this task's tick (no notify after a refused escalate).
+		sanctioned[o.TaskID] = true
+		ok, err := database.TransitionTaskAck(o.ID, o.NormID, o.TaskID, dispatchedAt.Add(threshold), now)
+		if err != nil {
+			log.Printf("ACK %s mark error: task %s: %v", o.NormID, o.TaskID, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if o.NormID == db.NormAckEscalate {
+			notifier.Notify(o.Project, o.DispatchedBy, "relay",
+				fmt.Sprintf(o.SanctionTemplate, o.Title, int(age.Minutes())), o.TaskID)
+			log.Printf("ACK escalated: task %s (%s) — %dmin", o.TaskID, o.Title, int(age.Minutes()))
+		} else {
+			notifier.Notify(o.Project, o.DispatchedBy, "relay",
+				fmt.Sprintf(o.SanctionTemplate, o.Title, int(age.Minutes()), o.ProfileSlug), o.TaskID)
+			log.Printf("ACK notify: task %s (%s) — %dmin", o.TaskID, o.Title, int(age.Minutes()))
 		}
 	}
 }

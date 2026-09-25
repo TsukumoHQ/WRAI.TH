@@ -22,7 +22,22 @@ type DB struct {
 	conn   *sql.DB // writer: single connection, serializes all writes
 	reader *sql.DB // reader: multiple connections for concurrent reads
 	path   string
+	clock  func() time.Time // nil = time.Now; see Now/SetClock
 }
+
+// Now is the ACK checker's clock: the obligations sweep and the legacy ACK
+// marks read it, so one instant stamps both (DEC-wraith-obligations-1).
+func (d *DB) Now() time.Time {
+	if d.clock != nil {
+		return d.clock().UTC()
+	}
+	return time.Now().UTC()
+}
+
+// SetClock pins Now to fn (nil restores time.Now). Test seam: the ACK
+// equivalence test runs the legacy checker and the engine at one instant so
+// their mark timestamps compare byte-for-byte.
+func (d *DB) SetClock(fn func() time.Time) { d.clock = fn }
 
 // resolveDBPath returns the database file path. RELAY_DB overrides the default
 // (~/.agent-relay/relay.db) — set it in dev / CI / tests so a local `agent-relay`
@@ -724,6 +739,70 @@ func migrate(conn *sql.DB) error {
 		purged_at       TEXT NOT NULL
 	) WITHOUT ROWID`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_message_tombstones_reply ON message_tombstones(reply_to) WHERE reply_to IS NOT NULL`)
+
+	// Obligations engine (DEC-wraith-obligations-1, slice 1): norms are seeded
+	// templates whose trigger/what/while/bearer are closed Go enums (see
+	// obligations.go), obligations their instances. UNIQUE(norm_id,
+	// bindings_hash) + INSERT OR IGNORE: one instance per circumstance.
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS norms (
+		id                 TEXT PRIMARY KEY,
+		version            INTEGER NOT NULL DEFAULT 1,
+		project            TEXT,
+		subject_kind       TEXT NOT NULL,
+		trigger            TEXT NOT NULL,
+		what               TEXT NOT NULL,
+		while_pred         TEXT NOT NULL,
+		deadline_kind      TEXT NOT NULL,
+		deadline_anchor    TEXT,
+		deadline_setting   TEXT,
+		deadline_default_s INTEGER,
+		deadline_min_s     INTEGER,
+		deadline_max_s     INTEGER,
+		bearer_kind        TEXT NOT NULL,
+		sanction           TEXT NOT NULL,
+		sanction_template  TEXT NOT NULL,
+		on_unfulfilled     TEXT,
+		max_depth          INTEGER NOT NULL DEFAULT 0,
+		irreducible        INTEGER NOT NULL DEFAULT 0,
+		eval_order         INTEGER NOT NULL,
+		enabled            INTEGER NOT NULL DEFAULT 1
+	)`)
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS obligations (
+		id                   TEXT PRIMARY KEY,
+		project              TEXT NOT NULL,
+		norm_id              TEXT NOT NULL,
+		norm_version         INTEGER NOT NULL,
+		bindings_hash        TEXT NOT NULL,
+		subject_kind         TEXT NOT NULL,
+		subject_id           TEXT NOT NULL,
+		bearer_kind          TEXT NOT NULL,
+		bearer               TEXT NOT NULL,
+		state                TEXT NOT NULL,
+		created_at           TEXT NOT NULL,
+		deadline_at          TEXT,
+		closed_at            TEXT,
+		done_at              TEXT,
+		late_by_ms           INTEGER,
+		escalation_depth     INTEGER NOT NULL DEFAULT 0,
+		parent_obligation_id TEXT,
+		discharge_evidence   TEXT,
+		decline_reason_class TEXT,
+		UNIQUE (norm_id, bindings_hash)
+	)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_obligations_active ON obligations(state, deadline_at) WHERE state = 'active'`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_obligations_bearer ON obligations(project, bearer, state)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_obligations_subject ON obligations(subject_kind, subject_id)`)
+	// The two ACK norms reproduce the legacy checker (design §4.1): texts,
+	// settings, clamps and the escalate-before-notify order are the legacy ones.
+	_, _ = conn.Exec(`INSERT OR IGNORE INTO norms (id, subject_kind, trigger, what, while_pred, deadline_kind, deadline_anchor,
+		deadline_setting, deadline_default_s, deadline_min_s, deadline_max_s, bearer_kind, sanction, sanction_template, eval_order)
+		VALUES
+		('ack.escalate', 'task', 'task_pending_unclaimed', 'task_left_pending', 'task_pending_live', 'time', 'dispatched_at',
+		 'ack_escalate_age', 2700, 60, 86400, 'assignee_profile', 'notify_dispatcher_push',
+		 'ESCALATED: Task ''%s'' no ACK for %dmin. Consider re-dispatching.', 1),
+		('ack.notify', 'task', 'task_pending_unclaimed', 'task_left_pending', 'task_pending_live', 'time', 'dispatched_at',
+		 'ack_notify_age', 900, 60, 86400, 'assignee_profile', 'notify_dispatcher_push',
+		 'Task ''%s'' no ACK after %dmin. Profile: %s', 2)`)
 
 	// Backfill deliveries for existing messages
 	migrateDeliveries(conn)
