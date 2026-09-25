@@ -5,12 +5,13 @@ import (
 	"time"
 )
 
-// backdateDispatchedAt pushes a task's dispatched_at into the past so it reads
+// backdateDispatchedAt pushes a task's dispatched_at (and its ACK clock,
+// pending_since, which dispatch stamps equal to it) into the past so it reads
 // as a genuine unacked candidate for GetUnackedTasks.
 func backdateDispatchedAt(t *testing.T, d *DB, taskID string, age time.Duration) {
 	t.Helper()
 	old := time.Now().UTC().Add(-age).Format(memoryTimeFmt)
-	if _, err := d.conn.Exec("UPDATE tasks SET dispatched_at = ? WHERE id = ?", old, taskID); err != nil {
+	if _, err := d.conn.Exec("UPDATE tasks SET dispatched_at = ?, pending_since = ? WHERE id = ?", old, old, taskID); err != nil {
 		t.Fatalf("backdate dispatched_at: %v", err)
 	}
 }

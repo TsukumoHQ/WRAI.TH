@@ -980,6 +980,15 @@ func migrate(conn *sql.DB) error {
 		// The relay stores + serves it opaquely; agentd validates the command shape.
 		"verify_cmd": "TEXT",
 
+		// pending_since is the ACK clock (task c933b2f1): when the task last
+		// entered 'pending'. Stamped = dispatched_at at dispatch and = now on every
+		// transition INTO pending (promote from backlog, unblock, reset), so a task
+		// promoted after weeks in backlog starts its ACK chain at rung 0 instead of
+		// inheriting dispatched_at. Nullable; readers COALESCE to dispatched_at, so
+		// rows written without it (linear mirror, old binaries) keep the old clock.
+		// Kept OUT of taskColumns/scanTask, like trace_id.
+		"pending_since": "TEXT",
+
 		// --- Linear refusal marker (V-lifecycle) — anti-spam for the loud
 		// non-conforming refusal. A Linear issue missing its typed ticket mirrors
 		// as a REFUSED row (status 'refused', never dispatched); this stamps when
@@ -995,6 +1004,9 @@ func migrate(conn *sql.DB) error {
 		// query populates it only where read, never a widened shared column list.
 		"trace_id": "TEXT",
 	})
+	// Backfill the ACK clock for rows that predate pending_since (idempotent:
+	// only NULLs are touched, and a second pass finds none).
+	_, _ = conn.Exec(`UPDATE tasks SET pending_since = dispatched_at WHERE pending_since IS NULL`)
 	// Migrate legacy reply_to_task -> parent_task_id
 	_, _ = conn.Exec(`UPDATE tasks SET parent_task_id = reply_to_task WHERE reply_to_task IS NOT NULL AND parent_task_id IS NULL`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_board ON tasks(board_id)`)

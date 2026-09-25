@@ -1,6 +1,7 @@
 package db
 
 import (
+	"database/sql"
 	"sync"
 	"testing"
 	"time"
@@ -352,4 +353,146 @@ func TestObligations(t *testing.T) {
 			t.Fatalf("idle sweep wrote %d rows, want 0", after-before)
 		}
 	})
+}
+
+// pendingClock reads a task's dispatched_at and pending_since verbatim.
+func pendingClock(t *testing.T, d *DB, taskID string) (dispatchedAt, pendingSince sql.NullString) {
+	t.Helper()
+	if err := d.conn.QueryRow(`SELECT dispatched_at, pending_since FROM tasks WHERE id = ?`, taskID).
+		Scan(&dispatchedAt, &pendingSince); err != nil {
+		t.Fatalf("read clock %s: %v", taskID, err)
+	}
+	return dispatchedAt, pendingSince
+}
+
+// TestAckClockPromoteFromBacklogResets (task c933b2f1 AC1, misfire 27a77033):
+// a task dispatched 30 days ago and promoted from backlog starts its ACK chain
+// at promote time. One minute after the promote nothing is instantiated (no
+// ack.human/ack.manager row); at promote + the rung-0 deadline the chain opens
+// and only rung 0 is due.
+func TestAckClockPromoteFromBacklogResets(t *testing.T) {
+	d := testDB(t)
+	task, err := d.DispatchTask("p1", "dev", "cto", "groomed", "", "P2", nil, nil, TypedTicket{}, false, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	old := time.Now().UTC().Add(-30 * 24 * time.Hour).Format(memoryTimeFmt)
+	if _, err := d.conn.Exec(`UPDATE tasks SET status = 'backlog', dispatched_at = ?, pending_since = ? WHERE id = ?`, old, old, task.ID); err != nil {
+		t.Fatalf("backdate into backlog: %v", err)
+	}
+	if _, changed, err := d.PromoteTask(task.ID, "cto", "p1"); err != nil || !changed {
+		t.Fatalf("promote: changed=%v err=%v", changed, err)
+	}
+	promotedAt := time.Now().UTC()
+	if at, since := pendingClock(t, d, task.ID); at.String != old || !since.Valid || since.String == old {
+		t.Fatalf("after promote dispatched_at=%q pending_since=%v, want dispatched_at kept and pending_since reset", at.String, since)
+	}
+
+	notifyAge := 15 * time.Minute // ack.notify deadline_default_s = 900
+	sweep := func(at time.Time) {
+		t.Helper()
+		if _, err := d.InstantiateTaskAck(at.Add(-notifyAge), at); err != nil {
+			t.Fatalf("instantiate at %s: %v", at, err)
+		}
+	}
+
+	sweep(promotedAt.Add(time.Minute))
+	if n := countRows(t, d, `SELECT COUNT(*) FROM obligations WHERE subject_id = ?`, task.ID); n != 0 {
+		t.Fatalf("promote+1min opened %d obligation(s), want 0", n)
+	}
+
+	at := promotedAt.Add(notifyAge + time.Minute)
+	sweep(at)
+	views, err := d.MyTaskObligations("p1", "someone", "dev")
+	if err != nil {
+		t.Fatalf("my obligations: %v", err)
+	}
+	var due []string
+	for _, v := range views {
+		if v.SubjectID != task.ID {
+			continue
+		}
+		deadline, err := time.Parse(memoryTimeFmt, v.Deadline)
+		if err != nil {
+			t.Fatalf("deadline %q of %s: %v", v.Deadline, v.Norm, err)
+		}
+		if !deadline.After(at) {
+			due = append(due, v.Norm)
+		}
+	}
+	if len(due) != 1 || due[0] != NormAckNotify {
+		t.Fatalf("due at promote+%s = %v, want only %s", notifyAge+time.Minute, due, NormAckNotify)
+	}
+}
+
+// TestAckClockDispatchStampsPendingSince (task c933b2f1 AC2): dispatch stamps
+// pending_since string-equal to dispatched_at, so the ACK clock of a task that
+// never left pending is exactly dispatched_at, as before.
+func TestAckClockDispatchStampsPendingSince(t *testing.T) {
+	d := testDB(t)
+	task, err := d.DispatchTask("p1", "dev", "cto", "fresh", "", "P2", nil, nil, TypedTicket{}, false, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	at, since := pendingClock(t, d, task.ID)
+	if !since.Valid || since.String != at.String {
+		t.Fatalf("pending_since = %v, want %q", since, at.String)
+	}
+
+	aged := time.Now().UTC().Add(-20 * time.Minute).Format(memoryTimeFmt)
+	if _, err := d.conn.Exec(`UPDATE tasks SET dispatched_at = ?, pending_since = ? WHERE id = ?`, aged, aged, task.ID); err != nil {
+		t.Fatalf("age task: %v", err)
+	}
+	instantiate(t, d)
+	if o := activeFor(t, d, task.ID, NormAckNotify); o.DispatchedAt != aged {
+		t.Fatalf("ACK clock = %q, want dispatched_at %q", o.DispatchedAt, aged)
+	}
+}
+
+// TestPendingSinceBackfillEqualsDispatchedAt (task c933b2f1 AC3): a tasks table
+// from before the column gets pending_since = dispatched_at on every row, and a
+// second migration changes nothing.
+func TestPendingSinceBackfillEqualsDispatchedAt(t *testing.T) {
+	d := testDB(t)
+	if _, err := d.conn.Exec(`ALTER TABLE tasks DROP COLUMN pending_since`); err != nil {
+		t.Fatalf("simulate pre-migration table: %v", err)
+	}
+	seedAckTask(t, d, "a", "pending", 20*time.Minute)
+	seedAckTask(t, d, "b", "backlog", 30*24*time.Hour)
+	seedAckTask(t, d, "c", "done", time.Hour)
+
+	snapshot := func() string {
+		t.Helper()
+		rows, err := d.conn.Query(`SELECT id, dispatched_at, COALESCE(pending_since, 'NULL') FROM tasks ORDER BY id`)
+		if err != nil {
+			t.Fatalf("snapshot: %v", err)
+		}
+		defer rows.Close()
+		out := ""
+		for rows.Next() {
+			var id, at, since string
+			if err := rows.Scan(&id, &at, &since); err != nil {
+				t.Fatalf("snapshot scan: %v", err)
+			}
+			if since != at {
+				t.Errorf("task %s pending_since = %q, want dispatched_at %q", id, since, at)
+			}
+			out += id + "|" + at + "|" + since + "\n"
+		}
+		return out
+	}
+
+	if err := migrate(d.conn); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	first := snapshot()
+	if err := migrate(d.conn); err != nil {
+		t.Fatalf("migrate again: %v", err)
+	}
+	if second := snapshot(); second != first {
+		t.Fatalf("second migration changed rows:\nfirst  %s\nsecond %s", first, second)
+	}
+	if n := countRows(t, d, `SELECT COUNT(*) FROM tasks WHERE pending_since IS NULL OR pending_since != dispatched_at`); n != 0 {
+		t.Fatalf("%d task(s) with pending_since unset or != dispatched_at", n)
+	}
 }

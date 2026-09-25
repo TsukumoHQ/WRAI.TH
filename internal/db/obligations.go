@@ -65,9 +65,14 @@ var ackMarkColumn = map[string]string{
 	NormAckNotify:   "ack_notified_at",
 }
 
+// ackClock is when a task's ACK clock started: the last time it entered
+// 'pending' (task c933b2f1), falling back to dispatched_at for rows written
+// without pending_since (linear mirror, pre-migration binaries).
+const ackClock = `COALESCE(t.pending_since, t.dispatched_at)`
+
 // ackCandidate is task_pending_unclaimed / task_pending_live: exactly the
 // GetUnackedTasks predicate the legacy checker reads each tick.
-const ackCandidate = `t.status = 'pending' AND t.archived_at IS NULL AND t.dispatched_at < ?
+const ackCandidate = `t.status = 'pending' AND t.archived_at IS NULL AND ` + ackClock + ` < ?
 	AND (t.run_state IS NULL OR t.run_state = '')`
 
 // TaskObligation is an active ACK obligation joined to the task fields the
@@ -82,7 +87,7 @@ type TaskObligation struct {
 	Title            string
 	ProfileSlug      string
 	DispatchedBy     string
-	DispatchedAt     string
+	DispatchedAt     string // the ACK clock (ackClock), not always tasks.dispatched_at
 
 	// Set by TaskObligationByID only (the tools need them; the sweeper doesn't).
 	State      string
@@ -211,12 +216,12 @@ func (d *DB) InstantiateTaskAck(cutoff, now time.Time) (int, error) {
 // eval_order), so the sweeper fires at most one sanction per task per tick.
 func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
 	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, o.escalation_depth, n.sanction_template, t.id, t.project, COALESCE(t.title, ''),
-			COALESCE(t.profile_slug, ''), t.dispatched_by, t.dispatched_at
+			COALESCE(t.profile_slug, ''), t.dispatched_by, `+ackClock+`
 		FROM obligations o
 		JOIN norms n ON n.id = o.norm_id AND `+ackNormKnown+`
 		JOIN tasks t ON t.id = o.subject_id
 		WHERE o.state = ? AND o.subject_kind = ? AND `+ackCandidate+`
-		ORDER BY t.dispatched_at, t.id, n.eval_order`,
+		ORDER BY `+ackClock+`, t.id, n.eval_order`,
 		ObligationActive, SubjectTask, cutoff.UTC().Format(memoryTimeFmt))
 	if err != nil {
 		return nil, fmt.Errorf("active obligations: %w", err)
@@ -435,7 +440,7 @@ func (d *DB) StampLateDone(now time.Time) (int, error) {
 func (d *DB) TaskObligationByID(project, id string) (*TaskObligation, error) {
 	var o TaskObligation
 	err := d.ro().QueryRow(`SELECT o.id, o.norm_id, o.escalation_depth, n.sanction_template, n.what, t.id, t.project,
-			COALESCE(t.title, ''), COALESCE(t.profile_slug, ''), t.dispatched_by, t.dispatched_at,
+			COALESCE(t.title, ''), COALESCE(t.profile_slug, ''), t.dispatched_by, `+ackClock+`,
 			o.state, o.bearer_kind, o.bearer, COALESCE(t.assigned_to, '')
 		FROM obligations o JOIN norms n ON n.id = o.norm_id JOIN tasks t ON t.id = o.subject_id
 		WHERE o.id = ? AND o.project = ? AND o.subject_kind = ?`, id, project, SubjectTask).
@@ -466,15 +471,15 @@ type ObligationView struct {
 // MyTaskObligations lists the active task obligations agent owes in project:
 // its profile pool (bearer = its name or profile) or, for an assignee_profile
 // bearer, the tasks assigned to it. The deadline is the norm's current setting
-// from dispatched_at, as the sweeper computes it. Read-only.
+// from the ACK clock (ackClock), as the sweeper computes it. Read-only.
 func (d *DB) MyTaskObligations(project, agent, profile string) ([]ObligationView, error) {
 	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, n.what, o.subject_kind, o.subject_id, COALESCE(t.title, ''),
-			o.bearer_kind, o.escalation_depth, t.dispatched_at, COALESCE(n.deadline_setting, ''),
+			o.bearer_kind, o.escalation_depth, `+ackClock+`, COALESCE(n.deadline_setting, ''),
 			COALESCE(n.deadline_default_s, 0), COALESCE(n.deadline_min_s, 0), COALESCE(n.deadline_max_s, 0)
 		FROM obligations o JOIN norms n ON n.id = o.norm_id JOIN tasks t ON t.id = o.subject_id
 		WHERE o.project = ? AND o.state = ? AND o.subject_kind = ?
 		  AND ((o.bearer_kind = ? AND o.bearer IN (?, ?)) OR (o.bearer_kind = ? AND t.assigned_to = ?))
-		ORDER BY t.dispatched_at, o.escalation_depth`,
+		ORDER BY `+ackClock+`, o.escalation_depth`,
 		project, ObligationActive, SubjectTask, BearerProfilePool, agent, profile, BearerAssigneeProfile, agent)
 	if err != nil {
 		return nil, fmt.Errorf("my obligations: %w", err)

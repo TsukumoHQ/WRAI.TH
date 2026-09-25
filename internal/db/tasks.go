@@ -343,10 +343,10 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 	}
 
 	_, err := d.writerExec(
-		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, trace_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, pending_since, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?)`,
 		task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
-		task.Priority, task.Status, task.Project, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
+		task.Priority, task.Status, task.Project, task.DispatchedAt, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
 		task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, tid,
 	)
 	if err != nil {
@@ -664,9 +664,11 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.InReviewAt = nil
 		task.DoneAt = nil
 		task.BlockedPeriods = "[]"
+		// pending_since = now restarts the ACK clock (task c933b2f1): a task
+		// re-entering pending (promote, unblock, reset) is newly unacked.
 		res, err = d.writerExec(
-			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, completed_at = NULL, result = NULL, blocked_reason = NULL, claimed_by = NULL, claimed_at = NULL, in_review_at = NULL, done_at = NULL, blocked_periods = '[]' WHERE id = ? AND project = ? AND status = ?",
-			newStatus, taskID, project, oldStatus,
+			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, completed_at = NULL, result = NULL, blocked_reason = NULL, claimed_by = NULL, claimed_at = NULL, in_review_at = NULL, done_at = NULL, blocked_periods = '[]', pending_since = ? WHERE id = ? AND project = ? AND status = ?",
+			newStatus, now, taskID, project, oldStatus,
 		)
 	case "accepted":
 		// claim → claimed_at + claimed_by (also sets assigned_to + accepted_at)
@@ -971,7 +973,7 @@ func (d *DB) GetUnackedTasks(minAge time.Duration) ([]models.Task, error) {
 	cutoff := time.Now().UTC().Add(-minAge).Format(memoryTimeFmt)
 	rows, err := d.ro().Query(
 		"SELECT "+taskColumns+" FROM tasks WHERE status = 'pending' AND archived_at IS NULL "+
-			"AND dispatched_at < ? AND (run_state IS NULL OR run_state = '')",
+			"AND COALESCE(pending_since, dispatched_at) < ? AND (run_state IS NULL OR run_state = '')",
 		cutoff,
 	)
 	if err != nil {
