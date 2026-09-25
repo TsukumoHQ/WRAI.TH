@@ -817,6 +817,24 @@ func migrate(conn *sql.DB) error {
 		('ack.human', 'task', 'task_pending_unclaimed', 'task_left_pending', 'task_pending_live', 'time', 'dispatched_at',
 		 'ack_human_age', 14400, 60, 172800, 'assignee_profile', 'message',
 		 'Task ''%s'' still no ACK after %dmin; the agent escalation chain did not resolve it.', 3, -1)`)
+	// Answer chain (roadmap item 10, task 044a4876): every direct/team message
+	// tagged ask or decide opens answer.reply on each recipient. Rungs 1/2
+	// (the recipient's role, then the human at max depth) are seeded here and
+	// opened by the breach sweep (slice B). No backfill: only messages sent
+	// after this row exists get obligations.
+	_, _ = conn.Exec(`INSERT OR IGNORE INTO norms (id, subject_kind, trigger, what, while_pred, deadline_kind, deadline_anchor,
+		deadline_setting, deadline_default_s, deadline_min_s, deadline_max_s, bearer_kind, sanction, sanction_template,
+		on_unfulfilled, max_depth, eval_order)
+		VALUES
+		('answer.reply', 'message', 'message_ask', 'message_answered', 'message_open', 'time', 'created_at',
+		 'answer_reply_age', 3600, 60, 86400, 'recipient', 'open_child',
+		 'Unanswered %s from %s to %s after %dmin: %s', 'answer.role', 2, 2),
+		('answer.role', 'message', 'message_ask', 'message_answered', 'message_open', 'time', 'created_at',
+		 'answer_role_age', 7200, 60, 172800, 'recipient_role', 'open_child',
+		 'Unanswered %s from %s to %s after %dmin (escalated to you as %s''s lead): %s', 'answer.human', 2, 1),
+		('answer.human', 'message', 'message_ask', 'message_answered', 'message_open', 'time', 'created_at',
+		 NULL, NULL, NULL, NULL, 'human', 'message',
+		 'Unanswered %s from %s to %s after %dmin; the agent escalation chain did not resolve it: %s', NULL, 2, 0)`)
 
 	// Backfill deliveries for existing messages
 	migrateDeliveries(conn)

@@ -67,8 +67,11 @@ func TestObligations(t *testing.T) {
 				t.Fatalf("migrate %d: %v", i+1, err)
 			}
 		}
-		if n := countRows(t, d, `SELECT COUNT(*) FROM norms`); n != 4 {
-			t.Fatalf("norms after re-migrate = %d, want 4 (seed idempotent)", n)
+		if n := countRows(t, d, `SELECT COUNT(*) FROM norms WHERE id LIKE 'ack.%'`); n != 4 {
+			t.Fatalf("ACK norms after re-migrate = %d, want 4 (seed idempotent)", n)
+		}
+		if n := countRows(t, d, `SELECT COUNT(*) FROM norms WHERE id LIKE 'answer.%'`); n != 3 {
+			t.Fatalf("answer norms after re-migrate = %d, want 3 (seed idempotent)", n)
 		}
 		if n := countRows(t, d, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_obligations_%'`); n != 3 {
 			t.Fatalf("obligation indexes = %d, want 3", n)

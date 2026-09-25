@@ -557,3 +557,299 @@ func (d *DB) DischargeTaskObligation(project, id, by, evidence string, now time.
 	}
 	return true, "", nil
 }
+
+// --- Answer obligations (roadmap item 10, slice A, task 044a4876) ---------
+//
+// A direct or team message tagged ask or decide opens answer.reply on each
+// recipient (subject_kind message). A reply from the bearer whose reply_to
+// chain reaches the ask fulfils it; the bearer can also decline it. The
+// deadline breach, the role child and the sanction are slice B. Every query
+// here is keyed on subject_kind = 'message', so the ACK (task) paths never see
+// these rows.
+
+// Answer chain norm ids and their closed enum values.
+const (
+	NormAnswerReply = "answer.reply" // depth 0: the recipient
+	NormAnswerRole  = "answer.role"  // depth 1: the recipient's role (slice B)
+	NormAnswerHuman = "answer.human" // depth 2 = max_depth: the human (slice B)
+
+	SubjectMessage      = "message"
+	TriggerMessageAsk   = "message_ask"
+	WhatMessageAnswered = "message_answered"
+	WhileMessageOpen    = "message_open"
+	BearerRecipient     = "recipient"
+)
+
+// AnswerActions are the action_required tags that open an answer obligation.
+var AnswerActions = map[string]bool{"ask": true, "decide": true}
+
+// answerReplyHops bounds the reply_to walk from a reply up to the ask.
+const answerReplyHops = 8
+
+// answerNormKnown restricts a query on norms n to the answer chain.
+const answerNormKnown = "n.subject_kind = '" + SubjectMessage + "' AND n.trigger = '" + TriggerMessageAsk +
+	"' AND n.what = '" + WhatMessageAnswered + "' AND n.while_pred = '" + WhileMessageOpen + "' AND n.enabled = 1"
+
+// OpenAnswerObligations opens answer.reply on each recipient of a message
+// whose action_required is ask or decide. Sentinel principals (user, cron,
+// linear) never bear one: the human is only the last rung. Idempotent
+// (UNIQUE norm_id + bindings_hash per message and recipient). Returns how many
+// opened; writes nothing for any other tag.
+func (d *DB) OpenAnswerObligations(project, messageID, actionRequired string, recipients []string, now time.Time) (int, error) {
+	if !AnswerActions[actionRequired] || messageID == "" {
+		return 0, nil
+	}
+	var bearers []string
+	seen := map[string]bool{}
+	for _, r := range recipients {
+		r = strings.ToLower(strings.TrimSpace(r))
+		if r == "" || r == "*" || integritySentinels[r] || seen[r] {
+			continue
+		}
+		seen[r] = true
+		bearers = append(bearers, r)
+	}
+	if len(bearers) == 0 {
+		return 0, nil
+	}
+	var version int
+	var key sql.NullString
+	var def, minS, maxS sql.NullInt64
+	err := d.ro().QueryRow(`SELECT n.version, n.deadline_setting, n.deadline_default_s, n.deadline_min_s, n.deadline_max_s
+		FROM norms n WHERE n.id = ? AND `+answerNormKnown, NormAnswerReply).Scan(&version, &key, &def, &minS, &maxS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil // norm disabled or absent: nothing to open
+	}
+	if err != nil {
+		return 0, fmt.Errorf("answer norm: %w", err)
+	}
+	age := d.SettingDuration(key.String, time.Duration(def.Int64)*time.Second,
+		time.Duration(minS.Int64)*time.Second, time.Duration(maxS.Int64)*time.Second)
+	ts := now.UTC().Format(memoryTimeFmt)
+	deadline := now.Add(age).UTC().Format(memoryTimeFmt)
+
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return 0, fmt.Errorf("answer open begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	opened := 0
+	for _, b := range bearers {
+		res, err := tx.Exec(`INSERT OR IGNORE INTO obligations
+			(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state,
+			 created_at, deadline_at, escalation_depth)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+			uuid.New().String(), project, NormAnswerReply, version,
+			bindingsHash(NormAnswerReply, SubjectMessage, messageID+"|"+b, 0),
+			SubjectMessage, messageID, BearerRecipient, b, ObligationActive, ts, deadline)
+		if err != nil {
+			return 0, fmt.Errorf("answer open: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		opened += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("answer open commit: %w", err)
+	}
+	return opened, nil
+}
+
+// answerChain returns the message ids a reply answers: its reply_to, then that
+// message's reply_to, and so on, read from messages and, for a purged link,
+// from message_tombstones. At most answerReplyHops ids; stops at a cycle or an
+// unknown id.
+func (d *DB) answerChain(project, replyTo string) []string {
+	var ids []string
+	seen := map[string]bool{}
+	for cur := replyTo; cur != "" && len(ids) < answerReplyHops && !seen[cur]; {
+		seen[cur] = true
+		ids = append(ids, cur)
+		var parent sql.NullString
+		err := d.ro().QueryRow(`SELECT reply_to FROM messages WHERE id = ? AND project = ?`, cur, project).Scan(&parent)
+		if errors.Is(err, sql.ErrNoRows) {
+			err = d.ro().QueryRow(`SELECT reply_to FROM message_tombstones WHERE id = ? AND project = ?`, cur, project).Scan(&parent)
+		}
+		if err != nil {
+			break
+		}
+		cur = parent.String
+	}
+	return ids
+}
+
+// FulfilAnswerObligations fulfils the active answer obligations borne by from
+// on any message its reply answers (the reply_to chain, tombstones included).
+// Reads first on the RO pool and opens a writer tx only when something is
+// active, so an ordinary reply costs no write.
+func (d *DB) FulfilAnswerObligations(project, from, replyTo, replyID string, now time.Time) (int, error) {
+	if replyTo == "" || from == "" {
+		return 0, nil
+	}
+	chain := d.answerChain(project, replyTo)
+	if len(chain) == 0 {
+		return 0, nil
+	}
+	ph, args := inPlaceholders(chain)
+	q := `SELECT id FROM obligations WHERE project = ? AND subject_kind = ? AND state = ? AND bearer = ?
+		AND subject_id IN (` + ph + `)`
+	rows, err := d.ro().Query(q, append([]interface{}{project, SubjectMessage, ObligationActive, strings.ToLower(from)}, args...)...)
+	if err != nil {
+		return 0, fmt.Errorf("answer candidates: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return 0, fmt.Errorf("scan answer candidate: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil || len(ids) == 0 {
+		return 0, err
+	}
+
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return 0, fmt.Errorf("answer fulfil begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	ts := now.UTC().Format(memoryTimeFmt)
+	ev, _ := json.Marshal(map[string]string{"reply": replyID, "by": from})
+	fulfilled := 0
+	for _, id := range ids {
+		res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+			ObligationFulfilled, ts, string(ev), id, ObligationActive)
+		if err != nil {
+			return 0, fmt.Errorf("answer fulfil: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		fulfilled += int(n)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("answer fulfil commit: %w", err)
+	}
+	return fulfilled, nil
+}
+
+// AnswerObligation is one message obligation as the obligation tools read it.
+type AnswerObligation struct {
+	ID, NormID, MessageID, Bearer, State, CreatedAt string
+}
+
+// AnswerObligationByID reads one answer obligation in project, whatever its
+// state. (nil, nil) when unknown, in another project, or not a message one.
+func (d *DB) AnswerObligationByID(project, id string) (*AnswerObligation, error) {
+	var o AnswerObligation
+	err := d.ro().QueryRow(`SELECT id, norm_id, subject_id, bearer, state, created_at FROM obligations
+		WHERE id = ? AND project = ? AND subject_kind = ?`, id, project, SubjectMessage).
+		Scan(&o.ID, &o.NormID, &o.MessageID, &o.Bearer, &o.State, &o.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("answer obligation %s: %w", id, err)
+	}
+	return &o, nil
+}
+
+// answeredBy reports whether from sent a message after since whose reply_to
+// chain reaches messageID: the predicate message_answered, re-checked by the
+// relay on discharge instead of trusting the claim.
+func (d *DB) answeredBy(project, from, messageID, since string) (string, bool) {
+	rows, err := d.ro().Query(`SELECT id, reply_to FROM messages
+		WHERE project = ? AND from_agent = ? AND reply_to IS NOT NULL AND reply_to <> '' AND created_at >= ?
+		ORDER BY created_at`, project, from, since)
+	if err != nil {
+		return "", false
+	}
+	type reply struct{ id, replyTo string }
+	var replies []reply
+	for rows.Next() {
+		var r reply
+		if rows.Scan(&r.id, &r.replyTo) == nil {
+			replies = append(replies, r)
+		}
+	}
+	_ = rows.Close()
+	for _, r := range replies {
+		for _, id := range d.answerChain(project, r.replyTo) {
+			if id == messageID {
+				return r.id, true
+			}
+		}
+	}
+	return "", false
+}
+
+// DischargeAnswerObligation fulfils an active answer obligation only if its
+// bearer's reply to the message exists; otherwise nothing changes and reason
+// says why.
+func (d *DB) DischargeAnswerObligation(project, id, by, evidence string, now time.Time) (ok bool, reason string, err error) {
+	o, err := d.AnswerObligationByID(project, id)
+	if err != nil {
+		return false, "", err
+	}
+	switch {
+	case o == nil:
+		return false, "unknown obligation", nil
+	case o.State != ObligationActive:
+		return false, "obligation is " + o.State + ", not active", nil
+	case !strings.EqualFold(o.Bearer, by):
+		return false, "only the obligation's bearer can discharge it", nil
+	}
+	replyID, answered := d.answeredBy(project, o.Bearer, o.MessageID, o.CreatedAt)
+	if !answered {
+		return false, "predicate message_answered is false: no reply from " + o.Bearer + " reaches message " + o.MessageID, nil
+	}
+	ev, _ := json.Marshal(map[string]string{"by": by, "evidence": evidence, "reply": replyID})
+	res, err := d.writerExec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+		ObligationFulfilled, now.UTC().Format(memoryTimeFmt), string(ev), id, ObligationActive)
+	if err != nil {
+		return false, "", fmt.Errorf("answer discharge: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, "obligation moved concurrently", nil
+	}
+	return true, "", nil
+}
+
+// DeclineAnswerObligation is the bearer's early breach: active -> unfulfilled
+// with the reason class stored. The escalation it triggers is slice B.
+func (d *DB) DeclineAnswerObligation(project, id, reasonClass string, now time.Time) (bool, error) {
+	if !DeclineReasons[reasonClass] {
+		return false, fmt.Errorf("decline: %q is not a reason class", reasonClass)
+	}
+	res, err := d.writerExec(`UPDATE obligations SET state = ?, closed_at = ?, decline_reason_class = ?
+		WHERE id = ? AND project = ? AND subject_kind = ? AND state = ?`,
+		ObligationUnfulfilled, now.UTC().Format(memoryTimeFmt), reasonClass, id, project, SubjectMessage, ObligationActive)
+	if err != nil {
+		return false, fmt.Errorf("answer decline: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+// MyAnswerObligations lists the active answer obligations agent bears in
+// project, for obligations_mine. Read-only.
+func (d *DB) MyAnswerObligations(project, agent string) ([]ObligationView, error) {
+	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, n.what, o.subject_kind, o.subject_id,
+			COALESCE(m.subject, ''), o.bearer_kind, o.escalation_depth, COALESCE(o.deadline_at, '')
+		FROM obligations o JOIN norms n ON n.id = o.norm_id LEFT JOIN messages m ON m.id = o.subject_id
+		WHERE o.project = ? AND o.state = ? AND o.subject_kind = ? AND o.bearer = ?
+		ORDER BY o.created_at, o.id`, project, ObligationActive, SubjectMessage, strings.ToLower(agent))
+	if err != nil {
+		return nil, fmt.Errorf("my answer obligations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ObligationView
+	for rows.Next() {
+		var v ObligationView
+		if err := rows.Scan(&v.ID, &v.Norm, &v.What, &v.SubjectKind, &v.SubjectID, &v.Subject, &v.BearerKind, &v.Depth, &v.Deadline); err != nil {
+			return nil, fmt.Errorf("scan answer obligation: %w", err)
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}

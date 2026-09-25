@@ -33,6 +33,11 @@ func (h *Handlers) HandleObligationsMine(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to list obligations: %v", err)), nil
 	}
+	answers, err := h.db.MyAnswerObligations(project, agent)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to list obligations: %v", err)), nil
+	}
+	obs = append(obs, answers...)
 	return h.resultJSONTracked(project, agent, "obligations_mine", map[string]any{"obligations": obs, "count": len(obs)})
 }
 
@@ -46,6 +51,10 @@ func (h *Handlers) HandleObligationDischarge(ctx context.Context, req mcp.CallTo
 		return validationError(CodeInvalidArgument, "id is required"), nil
 	}
 	ok, reason, err := h.db.DischargeTaskObligation(project, id, agent, req.GetString("evidence", ""), h.db.Now())
+	if err == nil && !ok && reason == "unknown obligation" {
+		// Not a task obligation: an answer obligation re-checks the bearer's reply.
+		ok, reason, err = h.db.DischargeAnswerObligation(project, id, agent, req.GetString("evidence", ""), h.db.Now())
+	}
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to discharge: %v", err)), nil
 	}
@@ -78,7 +87,7 @@ func (h *Handlers) HandleObligationDecline(ctx context.Context, req mcp.CallTool
 		return toolResultError(fmt.Sprintf("failed to read obligation: %v", err)), nil
 	}
 	if o == nil {
-		return validationError(CodeNotFound, "unknown obligation"), nil
+		return h.declineAnswerObligation(project, agent, id, reasonClass)
 	}
 	if !o.IsBearer(agent, h.callerProfile(project, agent)) {
 		return permissionError(CodeForbidden, "only the obligation's bearer can decline it"), nil
@@ -108,5 +117,34 @@ func (h *Handlers) HandleObligationDecline(ctx context.Context, req mcp.CallTool
 	sendAckSanction(h.db, h.registry, *o, sn, minutes)
 	return h.resultJSONTracked(project, agent, "obligation_decline", map[string]any{
 		"id": id, "state": db.ObligationUnfulfilled, "reason_class": reasonClass, "escalated_to": sn.target,
+	})
+}
+
+// declineAnswerObligation declines an answer obligation (task 044a4876): only
+// its bearer may, and it closes unfulfilled with the reason class. The role
+// escalation that follows a breach is the sweeper's (slice B).
+func (h *Handlers) declineAnswerObligation(project, agent, id, reasonClass string) (*mcp.CallToolResult, error) {
+	o, err := h.db.AnswerObligationByID(project, id)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to read obligation: %v", err)), nil
+	}
+	if o == nil {
+		return validationError(CodeNotFound, "unknown obligation"), nil
+	}
+	if !strings.EqualFold(o.Bearer, agent) {
+		return permissionError(CodeForbidden, "only the obligation's bearer can decline it"), nil
+	}
+	if o.State != db.ObligationActive {
+		return validationError(CodeInvalidArgument, "obligation is "+o.State+", not active"), nil
+	}
+	ok, err := h.db.DeclineAnswerObligation(project, id, reasonClass, h.db.Now())
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to decline: %v", err)), nil
+	}
+	if !ok {
+		return validationError(CodeInvalidArgument, "not declined: the obligation moved concurrently"), nil
+	}
+	return h.resultJSONTracked(project, agent, "obligation_decline", map[string]any{
+		"id": id, "state": db.ObligationUnfulfilled, "reason_class": reasonClass,
 	})
 }

@@ -233,6 +233,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			for _, member := range recipients {
 				h.registry.Notify(project, member, from, subject, msg.ID)
 			}
+			h.trackAnswerObligations(project, from, msg, recipients, true)
 		}
 
 		return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved))
@@ -255,6 +256,12 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	msg, dedupHit, err := h.db.InsertMessageWithDeliveries(project, from, to, msgType, subject, content, metadata, priority, ttlSeconds, replyTo, conversationID, recipients, actionRequired, idempotencyKey)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to send message: %v", err)), nil
+	}
+
+	// Answer obligations: direct asks open one per recipient; a broadcast or a
+	// conversation message opens none, but any reply can fulfil one.
+	if !dedupHit {
+		h.trackAnswerObligations(project, from, msg, recipients, to != "*" && conversationID == nil)
 	}
 
 	// Push notification. Skipped on a dedup hit — no new message/delivery rows
@@ -966,4 +973,24 @@ func sendResult(msg *models.Message, replyResolved *bool) any {
 		*models.Message
 		ReplyToResolved bool `json:"reply_to_resolved"`
 	}{msg, *replyResolved}
+}
+
+// trackAnswerObligations runs the answer-obligation bookkeeping of a stored
+// send (task 044a4876): a reply fulfils what its sender owed on the thread,
+// and, when open is set, an ask/decide opens one obligation per recipient.
+// Best-effort after the durable write: a failure is logged, never returned,
+// so the message itself is never lost or hidden.
+func (h *Handlers) trackAnswerObligations(project, from string, msg *models.Message, recipients []string, open bool) {
+	now := h.db.Now()
+	if msg.ReplyTo != nil && *msg.ReplyTo != "" {
+		if _, err := h.db.FulfilAnswerObligations(project, from, *msg.ReplyTo, msg.ID, now); err != nil {
+			log.Printf("[obligations] answer fulfil msg=%s: %v", msg.ID, err)
+		}
+	}
+	if !open || msg.ActionRequired == nil {
+		return
+	}
+	if _, err := h.db.OpenAnswerObligations(project, msg.ID, *msg.ActionRequired, recipients, now); err != nil {
+		log.Printf("[obligations] answer open msg=%s: %v", msg.ID, err)
+	}
 }
