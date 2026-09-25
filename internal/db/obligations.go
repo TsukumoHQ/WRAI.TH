@@ -83,6 +83,22 @@ type TaskObligation struct {
 	ProfileSlug      string
 	DispatchedBy     string
 	DispatchedAt     string
+
+	// Set by TaskObligationByID only (the tools need them; the sweeper doesn't).
+	State      string
+	BearerKind string
+	Bearer     string
+	AssignedTo string
+	What       string
+}
+
+// IsBearer reports whether agent (with profile) owes this obligation: its
+// profile pool, or the assignee of the task for an assignee_profile bearer.
+func (o TaskObligation) IsBearer(agent, profile string) bool {
+	if o.BearerKind == BearerProfilePool {
+		return o.Bearer == agent || (profile != "" && o.Bearer == profile)
+	}
+	return o.BearerKind == BearerAssigneeProfile && o.AssignedTo == agent
 }
 
 func bindingsHash(normID, subjectKind, subjectID string, depth int) string {
@@ -225,6 +241,23 @@ func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
 // (rung 2 landing on the founder closes rung 3). If a CAS matches 0 rows
 // nothing lands and ok is false — the caller must not fire the sanction.
 func (d *DB) TransitionTaskAck(obligationID, normID, taskID string, deadline, now time.Time, alsoClose ...string) (ok bool, err error) {
+	return d.transitionTaskAck(obligationID, normID, taskID, "", deadline, now, alsoClose...)
+}
+
+// DeclineTaskAck is the bearer's early breach (slice 2b): the same transition
+// as a due rung firing — unfulfilled, task guard, lower rungs closed — with the
+// decline reason class recorded. The caller then fires the rung's sanction.
+func (d *DB) DeclineTaskAck(obligationID, normID, taskID, reasonClass string, now time.Time, alsoClose ...string) (ok bool, err error) {
+	if !DeclineReasons[reasonClass] {
+		return false, fmt.Errorf("decline: %q is not a reason class", reasonClass)
+	}
+	return d.transitionTaskAck(obligationID, normID, taskID, reasonClass, now, now, alsoClose...)
+}
+
+// DeclineReasons is the closed enum of obligation_decline reason classes.
+var DeclineReasons = map[string]bool{"not_mine": true, "cannot": true, "blocked_by": true, "duplicate": true}
+
+func (d *DB) transitionTaskAck(obligationID, normID, taskID, declineReason string, deadline, now time.Time, alsoClose ...string) (ok bool, err error) {
 	depth, known := AckNormDepth[normID]
 	if !known {
 		return false, fmt.Errorf("transition: %q is not an ACK norm", normID)
@@ -235,8 +268,9 @@ func (d *DB) TransitionTaskAck(obligationID, normID, taskID string, deadline, no
 	}
 	defer func() { _ = tx.Rollback() }()
 	ts := now.UTC().Format(memoryTimeFmt)
-	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, deadline_at = ? WHERE id = ? AND state = ?`,
-		ObligationUnfulfilled, ts, deadline.UTC().Format(memoryTimeFmt), obligationID, ObligationActive)
+	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, deadline_at = ?, decline_reason_class = NULLIF(?, '')
+		WHERE id = ? AND state = ?`,
+		ObligationUnfulfilled, ts, deadline.UTC().Format(memoryTimeFmt), declineReason, obligationID, ObligationActive)
 	if err != nil {
 		return false, fmt.Errorf("transition obligation: %w", err)
 	}
@@ -394,4 +428,127 @@ func (d *DB) StampLateDone(now time.Time) (int, error) {
 		return 0, fmt.Errorf("late-done commit: %w", err)
 	}
 	return stamped, nil
+}
+
+// TaskObligationByID reads one task obligation with its task and norm fields,
+// whatever its state. (nil, nil) when unknown or not in project.
+func (d *DB) TaskObligationByID(project, id string) (*TaskObligation, error) {
+	var o TaskObligation
+	err := d.ro().QueryRow(`SELECT o.id, o.norm_id, o.escalation_depth, n.sanction_template, n.what, t.id, t.project,
+			COALESCE(t.title, ''), COALESCE(t.profile_slug, ''), t.dispatched_by, t.dispatched_at,
+			o.state, o.bearer_kind, o.bearer, COALESCE(t.assigned_to, '')
+		FROM obligations o JOIN norms n ON n.id = o.norm_id JOIN tasks t ON t.id = o.subject_id
+		WHERE o.id = ? AND o.project = ? AND o.subject_kind = ?`, id, project, SubjectTask).
+		Scan(&o.ID, &o.NormID, &o.Depth, &o.SanctionTemplate, &o.What, &o.TaskID, &o.Project, &o.Title, &o.ProfileSlug,
+			&o.DispatchedBy, &o.DispatchedAt, &o.State, &o.BearerKind, &o.Bearer, &o.AssignedTo)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("obligation %s: %w", id, err)
+	}
+	return &o, nil
+}
+
+// ObligationView is one obligation as obligations_mine shows it.
+type ObligationView struct {
+	ID          string `json:"id"`
+	Norm        string `json:"norm"`
+	What        string `json:"what"`
+	SubjectKind string `json:"subject_kind"`
+	SubjectID   string `json:"subject_id"`
+	Subject     string `json:"subject,omitempty"`
+	BearerKind  string `json:"bearer_kind"`
+	Depth       int    `json:"escalation_depth"`
+	Deadline    string `json:"deadline,omitempty"`
+}
+
+// MyTaskObligations lists the active task obligations agent owes in project:
+// its profile pool (bearer = its name or profile) or, for an assignee_profile
+// bearer, the tasks assigned to it. The deadline is the norm's current setting
+// from dispatched_at, as the sweeper computes it. Read-only.
+func (d *DB) MyTaskObligations(project, agent, profile string) ([]ObligationView, error) {
+	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, n.what, o.subject_kind, o.subject_id, COALESCE(t.title, ''),
+			o.bearer_kind, o.escalation_depth, t.dispatched_at, COALESCE(n.deadline_setting, ''),
+			COALESCE(n.deadline_default_s, 0), COALESCE(n.deadline_min_s, 0), COALESCE(n.deadline_max_s, 0)
+		FROM obligations o JOIN norms n ON n.id = o.norm_id JOIN tasks t ON t.id = o.subject_id
+		WHERE o.project = ? AND o.state = ? AND o.subject_kind = ?
+		  AND ((o.bearer_kind = ? AND o.bearer IN (?, ?)) OR (o.bearer_kind = ? AND t.assigned_to = ?))
+		ORDER BY t.dispatched_at, o.escalation_depth`,
+		project, ObligationActive, SubjectTask, BearerProfilePool, agent, profile, BearerAssigneeProfile, agent)
+	if err != nil {
+		return nil, fmt.Errorf("my obligations: %w", err)
+	}
+	type row struct {
+		v                 ObligationView
+		dispatchedAt, key string
+		def, minS, maxS   int64
+	}
+	var raw []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.v.ID, &r.v.Norm, &r.v.What, &r.v.SubjectKind, &r.v.SubjectID, &r.v.Subject,
+			&r.v.BearerKind, &r.v.Depth, &r.dispatchedAt, &r.key, &r.def, &r.minS, &r.maxS); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("scan my obligation: %w", err)
+		}
+		raw = append(raw, r)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]ObligationView, 0, len(raw))
+	for _, r := range raw {
+		if at, err := time.Parse(memoryTimeFmt, r.dispatchedAt); err == nil && r.key != "" {
+			age := d.SettingDuration(r.key, time.Duration(r.def)*time.Second, time.Duration(r.minS)*time.Second, time.Duration(r.maxS)*time.Second)
+			r.v.Deadline = at.Add(age).UTC().Format(memoryTimeFmt)
+		}
+		out = append(out, r.v)
+	}
+	return out, nil
+}
+
+// DischargeTaskObligation moves an active obligation to fulfilled only if the
+// relay itself sees its what hold — for task_left_pending, the task was taken
+// up (left pending, not cancelled). The claim alone is never trusted: when the
+// predicate is false nothing changes and reason says why.
+func (d *DB) DischargeTaskObligation(project, id, by, evidence string, now time.Time) (ok bool, reason string, err error) {
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return false, "", fmt.Errorf("discharge begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var state, what string
+	var status sql.NullString
+	err = tx.QueryRow(`SELECT o.state, n.what, t.status FROM obligations o JOIN norms n ON n.id = o.norm_id
+		LEFT JOIN tasks t ON t.id = o.subject_id WHERE o.id = ? AND o.project = ? AND o.subject_kind = ?`,
+		id, project, SubjectTask).Scan(&state, &what, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "unknown obligation", nil
+	}
+	if err != nil {
+		return false, "", fmt.Errorf("discharge read: %w", err)
+	}
+	switch {
+	case state != ObligationActive:
+		return false, "obligation is " + state + ", not active", nil
+	case what != WhatTaskLeftPending:
+		return false, "the relay cannot verify " + what, nil
+	case !status.Valid || status.String == "pending" || status.String == "cancelled":
+		return false, "predicate task_left_pending is false: the task is " + status.String, nil
+	}
+	ev, _ := json.Marshal(map[string]string{"by": by, "evidence": evidence, "task_status": status.String})
+	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+		ObligationFulfilled, now.UTC().Format(memoryTimeFmt), string(ev), id, ObligationActive)
+	if err != nil {
+		return false, "", fmt.Errorf("discharge: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, "obligation moved concurrently", nil
+	}
+	if err := tx.Commit(); err != nil {
+		return false, "", fmt.Errorf("discharge commit: %w", err)
+	}
+	return true, "", nil
 }

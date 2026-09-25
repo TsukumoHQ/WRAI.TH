@@ -401,31 +401,9 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 		}
 		// Branch taken: a refused CAS below still consumes this task's tick.
 		sanctioned[o.TaskID] = true
-		minutes := int(age.Minutes())
+		sn := ackSanction(database, o, int(age.Minutes()))
 
-		target, msgType, priority, action := o.DispatchedBy, "notification", "P1", "do"
-		var text string
-		var alsoClose []string
-		switch o.NormID {
-		case db.NormAckNotify:
-			msgType, priority, action = "fyi", "P2", "none"
-			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes, o.ProfileSlug)
-		case db.NormAckEscalate:
-			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes)
-		case db.NormAckManager:
-			var rule string
-			target, rule = resolveAckRung2(database, o.Project, o.DispatchedBy)
-			log.Printf("[obligations] rung=2 task=%s rule=%s target=%s", o.TaskID, rule, target)
-			if target == ackFounder {
-				alsoClose = []string{db.NormAckHuman} // the human is reached: rung 3 never fires
-			}
-			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes, o.DispatchedBy)
-		case db.NormAckHuman:
-			target = ackFounder
-			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes)
-		}
-
-		ok, err := database.TransitionTaskAck(o.ID, o.NormID, o.TaskID, dispatchedAt.Add(threshold), now, alsoClose...)
+		ok, err := database.TransitionTaskAck(o.ID, o.NormID, o.TaskID, dispatchedAt.Add(threshold), now, sn.alsoClose...)
 		if err != nil {
 			log.Printf("ACK %s mark error: task %s: %v", o.NormID, o.TaskID, err)
 			continue
@@ -433,16 +411,54 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 		if !ok {
 			continue
 		}
-		meta := fmt.Sprintf(`{"task_id":%q,"obligation_id":%q,"norm":%q}`, o.TaskID, o.ID, o.NormID)
-		msg, _, err := database.InsertMessageWithDeliveries(o.Project, "relay", target, msgType, text, text, meta,
-			priority, -1, nil, nil, []string{target}, action)
-		if err != nil {
-			log.Printf("ACK %s message error: task %s: %v", o.NormID, o.TaskID, err)
-			continue
-		}
-		notifier.Notify(o.Project, target, "relay", text, msg.ID)
-		log.Printf("ACK %s: task %s (%s) -> %s — %dmin", o.NormID, o.TaskID, o.Title, target, minutes)
+		sendAckSanction(database, notifier, o, sn)
 	}
+}
+
+// ackRungSanction is who a fired ACK rung tells, and how.
+type ackRungSanction struct {
+	target, msgType, priority, action, text string
+	alsoClose                               []string
+}
+
+// ackSanction words and routes the sanction of one ACK rung: rung 0 a fyi P2
+// no-wake to the dispatcher, rung 1 a P1 to the dispatcher, rung 2 the
+// resolved reports_to / executive / founder (closing rung 3 when it is the
+// founder), rung 3 the human.
+func ackSanction(database *db.DB, o db.TaskObligation, minutes int) ackRungSanction {
+	sn := ackRungSanction{target: o.DispatchedBy, msgType: "notification", priority: "P1", action: "do"}
+	switch o.NormID {
+	case db.NormAckNotify:
+		sn.msgType, sn.priority, sn.action = "fyi", "P2", "none"
+		sn.text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes, o.ProfileSlug)
+	case db.NormAckEscalate:
+		sn.text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes)
+	case db.NormAckManager:
+		var rule string
+		sn.target, rule = resolveAckRung2(database, o.Project, o.DispatchedBy)
+		log.Printf("[obligations] rung=2 task=%s rule=%s target=%s", o.TaskID, rule, sn.target)
+		if sn.target == ackFounder {
+			sn.alsoClose = []string{db.NormAckHuman} // the human is reached: rung 3 never fires
+		}
+		sn.text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes, o.DispatchedBy)
+	case db.NormAckHuman:
+		sn.target = ackFounder
+		sn.text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes)
+	}
+	return sn
+}
+
+// sendAckSanction persists the rung's notice (durable, Q2) and pushes it live.
+func sendAckSanction(database *db.DB, notifier ackNotifier, o db.TaskObligation, sn ackRungSanction) {
+	meta := fmt.Sprintf(`{"task_id":%q,"obligation_id":%q,"norm":%q}`, o.TaskID, o.ID, o.NormID)
+	msg, _, err := database.InsertMessageWithDeliveries(o.Project, "relay", sn.target, sn.msgType, sn.text, sn.text, meta,
+		sn.priority, -1, nil, nil, []string{sn.target}, sn.action)
+	if err != nil {
+		log.Printf("ACK %s message error: task %s: %v", o.NormID, o.TaskID, err)
+		return
+	}
+	notifier.Notify(o.Project, sn.target, "relay", sn.text, msg.ID)
+	log.Printf("ACK %s: task %s (%s) -> %s", o.NormID, o.TaskID, o.Title, sn.target)
 }
 
 // ackFounder is the human end of the ACK chain: the operator inbox.

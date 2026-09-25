@@ -487,6 +487,38 @@ func claimTaskTool() mcp.Tool {
 	)
 }
 
+func obligationsMineTool() mcp.Tool {
+	return mcp.NewTool(
+		"obligations_mine",
+		mcp.WithDescription("Your active obligations (your profile pool or tasks assigned to you): subject, what, deadline, escalation depth."),
+		asParam,
+		projectParam,
+	)
+}
+
+func obligationDischargeTool() mcp.Tool {
+	return mcp.NewTool(
+		"obligation_discharge",
+		mcp.WithDescription("Mark an obligation fulfilled. The relay re-checks it (e.g. task claimed); refused if not true."),
+		asParam,
+		projectParam,
+		mcp.WithString("id", mcp.Description("Obligation id"), mcp.Required()),
+		mcp.WithString("evidence", mcp.Description("Optional note")),
+	)
+}
+
+func obligationDeclineTool() mcp.Tool {
+	return mcp.NewTool(
+		"obligation_decline",
+		mcp.WithDescription("Decline an obligation you owe: it escalates now to the next person, with your reason."),
+		asParam,
+		projectParam,
+		mcp.WithString("id", mcp.Description("Obligation id"), mcp.Required()),
+		mcp.WithString("reason_class", mcp.Required(), mcp.Enum("not_mine", "cannot", "blocked_by", "duplicate")),
+		mcp.WithString("reason", mcp.Description("Optional detail")),
+	)
+}
+
 func promoteTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"promote_task",
