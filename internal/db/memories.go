@@ -16,13 +16,51 @@ import (
 
 const memoryTimeFmt = "2006-01-02T15:04:05.000000Z"
 
+// SetMemoryOpts carries the optional causal context of a memory write
+// (DEC-wraith-memory-causal-1).
+type SetMemoryOpts struct {
+	// BasedOn is the memory id the writer read before writing ("" = no causal
+	// context, legacy last-writer-wins; BasedOnNew = "I expect no live value").
+	// When it names anything other than the live row, a differing value is
+	// written as a live SIBLING (conflict_with = live row) instead of archiving
+	// the live row — a writer that read an older version never silently
+	// replaces a newer one.
+	BasedOn string
+}
+
+// BasedOnNew is the SetMemoryOpts.BasedOn value for a create-only write.
+const BasedOnNew = "new"
+
+// ErrBasedOnMismatch is returned (nothing written) when based_on names a row
+// that is not a version of the same project/scope/key.
+var ErrBasedOnMismatch = errors.New("based_on does not match key/scope")
+
 // SetMemory creates or versions a memory. If upsert is true, overwrites
 // existing values silently (archives old version). If false, flags a conflict.
+// It is SetMemoryWith without causal context.
 func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confidence, layer string, upsert ...bool) (*models.Memory, error) {
 	doUpsert := true
 	if len(upsert) > 0 {
 		doUpsert = upsert[0]
 	}
+	return d.SetMemoryWith(project, agentName, key, value, tagsJSON, scope, confidence, layer, doUpsert, SetMemoryOpts{})
+}
+
+// SetMemoryWith is SetMemory with causal context. Decision table, evaluated in
+// one writer tx against the live row (current):
+//   - no live row: fresh version 1.
+//   - same value, same tags/confidence/layer: touch updated_at only.
+//   - same value, different tags/confidence/layer: supersede (new version with
+//     the new metadata; the old metadata stays in history).
+//   - different value, upsert=false: conflict mode (unchanged).
+//   - different value, based_on "" or == current.id: supersede (as before).
+//   - different value, based_on names another version or BasedOnNew: sibling —
+//     current stays live, the new row has conflict_with=current and
+//     supersedes=based_on (nil for BasedOnNew).
+//
+// Every supersede closes the predecessor's validity window where the
+// successor's opens (valid_until = now unless an earlier one is set).
+func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, confidence, layer string, upsert bool, opts SetMemoryOpts) (*models.Memory, error) {
 	value = normalize.JSONKeys(value)
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	if confidence == "" {
@@ -38,121 +76,27 @@ func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confiden
 	// Wrap the read-modify-write in a BEGIN IMMEDIATE transaction so SQLite
 	// acquires the write lock before the SELECT. Without this, concurrent
 	// writers on the same key can both read the same max version and both
-	// insert as version+1, breaking the supersedes chain.
+	// insert as version+1, breaking the supersedes chain. It also makes the
+	// based_on compare-and-write atomic.
 	tx, err := d.beginWriterTx()
 	if err != nil {
 		return nil, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if opts.BasedOn != "" && opts.BasedOn != BasedOnNew {
+		if err := checkBasedOnTx(tx.Tx, opts.BasedOn, project, scope, agentName, key); err != nil {
+			return nil, err
+		}
+	}
+
 	existing, err := d.findActiveMemoryTx(tx.Tx, project, scope, agentName, key)
 	if err != nil {
 		return nil, err
 	}
 
-	id := uuid.New().String()
-
-	if existing != nil {
-		if existing.Value == value {
-			// Same value — just update timestamp
-			_, err := tx.Exec(
-				`UPDATE memories SET updated_at = ?, tags = ?, confidence = ? WHERE id = ?`,
-				now, tagsJSON, confidence, existing.ID,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("update memory: %w", err)
-			}
-			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("commit memory noop: %w", err)
-			}
-			existing.UpdatedAt = now
-			existing.Tags = tagsJSON
-			existing.Confidence = confidence
-			return existing, nil
-		}
-
-		if doUpsert {
-			// Upsert mode — archive old version and insert new one silently.
-			// Tombstone: archived_by="upsert" (why), status=archived, reason set.
-			_, archErr := tx.Exec(
-				`UPDATE memories SET archived_at = ?, archived_by = ?, status = 'archived', archived_reason = ? WHERE id = ?`,
-				now, "upsert", "superseded", existing.ID,
-			)
-			if archErr != nil {
-				return nil, fmt.Errorf("archive old memory: %w", archErr)
-			}
-			mem := &models.Memory{
-				ID:         id,
-				Key:        key,
-				Value:      value,
-				Tags:       tagsJSON,
-				Scope:      scope,
-				Project:    project,
-				AgentName:  agentName,
-				Confidence: confidence,
-				Version:    existing.Version + 1,
-				Supersedes: &existing.ID,
-				CreatedAt:  now,
-				UpdatedAt:  now,
-				Layer:      layer,
-				ValidFrom:  &now,
-				Status:     "live",
-			}
-			_, err := tx.Exec(
-				`INSERT INTO memories (id, key, value, tags, scope, project, agent_name, confidence, version, supersedes, created_at, updated_at, layer, valid_from, status)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live')`,
-				mem.ID, mem.Key, mem.Value, mem.Tags, mem.Scope, mem.Project,
-				mem.AgentName, mem.Confidence, mem.Version, mem.Supersedes,
-				mem.CreatedAt, mem.UpdatedAt, mem.Layer, now,
-			)
-			if err != nil {
-				return nil, fmt.Errorf("insert upserted memory: %w", err)
-			}
-			if err := tx.Commit(); err != nil {
-				return nil, fmt.Errorf("commit upsert: %w", err)
-			}
-			return mem, nil
-		}
-
-		// Conflict mode — create new version, flag conflict
-		mem := &models.Memory{
-			ID:           id,
-			Key:          key,
-			Value:        value,
-			Tags:         tagsJSON,
-			Scope:        scope,
-			Project:      project,
-			AgentName:    agentName,
-			Confidence:   confidence,
-			Version:      existing.Version + 1,
-			Supersedes:   &existing.ID,
-			ConflictWith: &existing.ID,
-			CreatedAt:    now,
-			UpdatedAt:    now,
-			Layer:        layer,
-			ValidFrom:    &now,
-			Status:       "live",
-		}
-
-		_, err := tx.Exec(
-			`INSERT INTO memories (id, key, value, tags, scope, project, agent_name, confidence, version, supersedes, conflict_with, created_at, updated_at, layer, valid_from, status)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live')`,
-			mem.ID, mem.Key, mem.Value, mem.Tags, mem.Scope, mem.Project,
-			mem.AgentName, mem.Confidence, mem.Version, mem.Supersedes, mem.ConflictWith,
-			mem.CreatedAt, mem.UpdatedAt, mem.Layer, now,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("insert conflicting memory: %w", err)
-		}
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit conflict: %w", err)
-		}
-		return mem, nil
-	}
-
-	// No existing memory — create fresh
 	mem := &models.Memory{
-		ID:         id,
+		ID:         uuid.New().String(),
 		Key:        key,
 		Value:      value,
 		Tags:       tagsJSON,
@@ -168,19 +112,96 @@ func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confiden
 		Status:     "live",
 	}
 
-	_, err = tx.Exec(
-		`INSERT INTO memories (id, key, value, tags, scope, project, agent_name, confidence, version, created_at, updated_at, layer, valid_from, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live')`,
+	switch {
+	case existing == nil:
+		// No live memory — create fresh.
+
+	case existing.Value == value && existing.Tags == tagsJSON && existing.Confidence == confidence && existing.Layer == layer:
+		// Convergent write — just update the timestamp.
+		if _, err := tx.Exec(`UPDATE memories SET updated_at = ? WHERE id = ?`, now, existing.ID); err != nil {
+			return nil, fmt.Errorf("update memory: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit memory noop: %w", err)
+		}
+		existing.UpdatedAt = now
+		return existing, nil
+
+	case existing.Value != value && !upsert:
+		// Conflict mode — create new version, flag conflict.
+		mem.Version = existing.Version + 1
+		mem.Supersedes = &existing.ID
+		mem.ConflictWith = &existing.ID
+
+	case existing.Value != value && opts.BasedOn != "" && opts.BasedOn != existing.ID:
+		// The writer read something other than the live row: keep both live.
+		mem.Version = existing.Version + 1
+		mem.ConflictWith = &existing.ID
+		if opts.BasedOn != BasedOnNew {
+			basedOn := opts.BasedOn
+			mem.Supersedes = &basedOn
+		}
+
+	default:
+		// Supersede: a different value (no causal context, or based on the
+		// live row), or the same value with new tags/confidence/layer.
+		// Tombstone: archived_by="upsert" (why), status=archived, reason set.
+		if _, err := tx.Exec(
+			`UPDATE memories SET archived_at = ?, archived_by = ?, status = 'archived', archived_reason = ?, `+closeValidityClause+` WHERE id = ?`,
+			now, "upsert", "superseded", now, now, existing.ID,
+		); err != nil {
+			return nil, fmt.Errorf("archive old memory: %w", err)
+		}
+		mem.Version = existing.Version + 1
+		mem.Supersedes = &existing.ID
+	}
+
+	if _, err := tx.Exec(
+		`INSERT INTO memories (id, key, value, tags, scope, project, agent_name, confidence, version, supersedes, conflict_with, created_at, updated_at, layer, valid_from, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live')`,
 		mem.ID, mem.Key, mem.Value, mem.Tags, mem.Scope, mem.Project,
-		mem.AgentName, mem.Confidence, mem.Version, mem.CreatedAt, mem.UpdatedAt, mem.Layer, now,
-	)
-	if err != nil {
+		mem.AgentName, mem.Confidence, mem.Version, mem.Supersedes, mem.ConflictWith,
+		mem.CreatedAt, mem.UpdatedAt, mem.Layer, now,
+	); err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit insert: %w", err)
+		return nil, fmt.Errorf("commit memory: %w", err)
 	}
 	return mem, nil
+}
+
+// closeValidityClause closes an archived row's validity window at the archive
+// instant (two args: now, now) unless the row already expires earlier. Applied
+// going forward only; historical rows are never rewritten.
+const closeValidityClause = `valid_until = CASE WHEN valid_until IS NULL OR valid_until > ? THEN ? ELSE valid_until END`
+
+// checkBasedOnTx verifies that basedOn names a version (live or archived) of
+// the same project/scope/key — and, for agent scope, the same agent.
+func checkBasedOnTx(tx *sql.Tx, basedOn, project, scope, agentName, key string) error {
+	var gotProject, gotScope, gotAgent, gotKey string
+	err := tx.QueryRow(`SELECT project, scope, agent_name, key FROM memories WHERE id = ?`, basedOn).
+		Scan(&gotProject, &gotScope, &gotAgent, &gotKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrBasedOnMismatch
+	}
+	if err != nil {
+		return fmt.Errorf("read based_on: %w", err)
+	}
+	if gotKey != key || gotScope != scope {
+		return ErrBasedOnMismatch
+	}
+	switch scope {
+	case "agent":
+		if gotProject != project || gotAgent != agentName {
+			return ErrBasedOnMismatch
+		}
+	case "project":
+		if gotProject != project {
+			return ErrBasedOnMismatch
+		}
+	}
+	return nil
 }
 
 // findActiveMemoryTx finds the newest active memory version through an open
@@ -662,8 +683,8 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 	// Archive all losers
 	for _, l := range losers {
 		_, err := tx.Exec(
-			`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived' WHERE id = ?`,
-			now, "conflict_resolution", l.ID,
+			`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived', `+closeValidityClause+` WHERE id = ?`,
+			now, "conflict_resolution", now, now, l.ID,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("archive loser: %w", err)
@@ -686,8 +707,8 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 		for _, m := range memories {
 			if m.ArchivedAt == nil { // not already archived above
 				_, err := tx.Exec(
-					`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived' WHERE id = ?`,
-					now, "conflict_resolution", m.ID,
+					`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived', `+closeValidityClause+` WHERE id = ?`,
+					now, "conflict_resolution", now, now, m.ID,
 				)
 				if err != nil {
 					return nil, fmt.Errorf("archive for resolution: %w", err)
