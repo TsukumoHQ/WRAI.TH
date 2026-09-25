@@ -989,6 +989,11 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 	}
 
 	replyTo := optionalString(body.ReplyTo)
+	replyResolved, errMsg := resolveReplyTo(r.DB, body.Project, "human", replyTo)
+	if errMsg != "" {
+		http.Error(w, `{"error":"reply_to is not a well-formed message id"}`, http.StatusBadRequest)
+		return
+	}
 
 	msg, dedupHit, err := r.DB.InsertMessageWithDeliveries(body.Project, "human", body.To, "response", "User response", body.Content, "{}", "P1", 3600, replyTo, nil, []string{body.To}, "")
 	if err != nil {
@@ -1005,7 +1010,11 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 		r.Registry.Notify(body.Project, body.To, "human", "User response", msg.ID)
 	}
 
-	writeJSON(w, map[string]any{"ok": true, "message_id": msg.ID})
+	resp := map[string]any{"ok": true, "message_id": msg.ID}
+	if replyResolved != nil {
+		resp["reply_to_resolved"] = *replyResolved
+	}
+	writeJSON(w, resp)
 }
 
 // --- Memory API endpoints ---

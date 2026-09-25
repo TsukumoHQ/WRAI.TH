@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
+	"github.com/google/uuid"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -30,6 +32,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	ttlSeconds := req.GetInt("ttl_seconds", 14400)
 	targetProject := NormalizeProject(req.GetString("target_project", ""))
 	idempotencyKey := req.GetString("idempotency_key", "")
+	taskIDArg := req.GetString("task_id", "")
 
 	// Comms-discipline action tag (DEC-relay-comms-discipline-1). Optional: ""
 	// lets the DB derive it from (type, reply_to). 'none' routes no-wake.
@@ -68,6 +71,9 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// "@peer" suffix.
 	if h.federation.Enabled() {
 		if name, peerLabel, ok := splitPeerAddr(to); ok {
+			if taskIDArg != "" {
+				return validationError(CodeInvalidArgument, "task_id is not supported on federated sends"), nil
+			}
 			return h.sendFederated(ctx, project, from, peerLabel, name, msgType, subject, content, priority, ttlSeconds, replyTo)
 		}
 	}
@@ -82,7 +88,24 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		if to == "*" || strings.HasPrefix(to, "team:") || conversationID != nil {
 			return toolResultError("cross-project messaging is limited to direct DMs (no broadcast, no team:, no conversation_id)"), nil
 		}
+		if taskIDArg != "" {
+			return validationError(CodeInvalidArgument, "task_id is not supported on cross-project sends"), nil
+		}
 		return h.sendCrossProject(ctx, project, from, targetProject, to, msgType, subject, content, metadata, replyTo, priority, ttlSeconds)
+	}
+
+	// Linkage (DEC-wraith-linkage-1 slice B): a declared task_id is validated
+	// and merged into metadata, where the DB layer promotes it to task_id.
+	if taskIDArg != "" {
+		merged, errMsg := mergeTaskIDIntoMetadata(h.db, project, taskIDArg, metadata)
+		if errMsg != "" {
+			return validationError(CodeInvalidArgument, errMsg), nil
+		}
+		metadata = merged
+	}
+	replyResolved, errMsg := resolveReplyTo(h.db, project, from, replyTo)
+	if errMsg != "" {
+		return validationError(CodeInvalidArgument, errMsg), nil
 	}
 
 	// Support "to": "conversation:<id>" shorthand
@@ -212,7 +235,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			}
 		}
 
-		return h.resultJSONTracked(project, from, "send_message", msg)
+		return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved))
 	}
 
 	// Broadcast permission: when teams exist, only admin team members can broadcast
@@ -268,7 +291,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: subject, Priority: priority, MsgType: msgType})
 	}
 
-	return h.resultJSONTracked(project, from, "send_message", msg)
+	return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved))
 }
 
 // HandleSendStatus posts a typed-status report (DEC-relay-comms-discipline-1
@@ -884,4 +907,60 @@ func (h *Handlers) HandleAddNotifyChannel(ctx context.Context, req mcp.CallToolR
 		"target": target,
 		"added":  true,
 	})
+}
+
+// mergeTaskIDIntoMetadata validates a sender-declared task_id (DEC-wraith-linkage-1)
+// and writes it into metadata.task_id, where the DB layer promotes it. It must
+// name a task in the project and agree with any metadata.task_id already set;
+// otherwise the send is refused before anything is written.
+func mergeTaskIDIntoMetadata(d *db.DB, project, taskID, metadata string) (string, string) {
+	meta := map[string]any{}
+	if strings.TrimSpace(metadata) != "" {
+		if err := json.Unmarshal([]byte(metadata), &meta); err != nil || meta == nil {
+			return "", "metadata must be a JSON object when task_id is set"
+		}
+	}
+	if existing, ok := meta["task_id"].(string); ok && existing != "" && existing != taskID {
+		return "", "task_id conflicts with metadata.task_id"
+	}
+	if task, err := d.GetTask(taskID, project); err != nil || task == nil {
+		return "", fmt.Sprintf("unknown task_id %q in project %q", taskID, project)
+	}
+	meta["task_id"] = taskID
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return "", fmt.Sprintf("metadata: %v", err)
+	}
+	return string(b), ""
+}
+
+// resolveReplyTo applies the soft reply_to rule (DEC-wraith-linkage-1, OQ1
+// amended): a malformed id is refused; a well-formed id whose parent is absent
+// from the project is accepted as given (the TTL sweep purges parents),
+// reported unresolved and journalled. Returns nil when no reply_to was sent.
+func resolveReplyTo(d *db.DB, project, from string, replyTo *string) (*bool, string) {
+	if replyTo == nil {
+		return nil, ""
+	}
+	if _, err := uuid.Parse(*replyTo); err != nil || len(*replyTo) != 36 {
+		return nil, fmt.Sprintf("reply_to %q is not a well-formed message id", *replyTo)
+	}
+	parent, err := d.GetMessage(*replyTo)
+	resolved := err == nil && parent != nil && parent.Project == project
+	if !resolved {
+		log.Printf("[linkage] reply_to %s unresolved in project %s (from %s): parent absent, stored as given", *replyTo, project, from)
+	}
+	return &resolved, ""
+}
+
+// sendResult adds reply_to_resolved to the send result only when a reply_to
+// was sent, so a plain send keeps its exact prior shape.
+func sendResult(msg *models.Message, replyResolved *bool) any {
+	if replyResolved == nil || msg == nil {
+		return msg
+	}
+	return struct {
+		*models.Message
+		ReplyToResolved bool `json:"reply_to_resolved"`
+	}{msg, *replyResolved}
 }
