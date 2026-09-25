@@ -690,9 +690,22 @@ func (d *DB) FulfilAnswerObligations(project, from, replyTo, replyID string, now
 		return 0, nil
 	}
 	ph, args := inPlaceholders(chain)
-	q := `SELECT id FROM obligations WHERE project = ? AND subject_kind = ? AND state = ? AND bearer = ?
-		AND subject_id IN (` + ph + `)`
-	rows, err := d.ro().Query(q, append([]interface{}{project, SubjectMessage, ObligationActive, strings.ToLower(from)}, args...)...)
+	// The bearer's own active obligation, plus the active escalation rungs
+	// (child, grandchild) opened for it: a late answer from the original
+	// recipient ends the chain it started (task a01d0b87).
+	q := `SELECT id FROM obligations WHERE project = ? AND subject_kind = ? AND state = ? AND subject_id IN (` + ph + `)
+		AND (bearer = ?
+		  OR parent_obligation_id IN (SELECT r.id FROM obligations r WHERE r.bearer = ? AND r.subject_id IN (` + ph + `))
+		  OR parent_obligation_id IN (SELECT c.id FROM obligations c JOIN obligations r ON r.id = c.parent_obligation_id
+		       WHERE r.bearer = ? AND r.subject_id IN (` + ph + `)))`
+	who := strings.ToLower(from)
+	qargs := []interface{}{project, SubjectMessage, ObligationActive}
+	qargs = append(qargs, args...)
+	qargs = append(qargs, who, who)
+	qargs = append(qargs, args...)
+	qargs = append(qargs, who)
+	qargs = append(qargs, args...)
+	rows, err := d.ro().Query(q, qargs...)
 	if err != nil {
 		return 0, fmt.Errorf("answer candidates: %w", err)
 	}
@@ -850,6 +863,161 @@ func (d *DB) MyAnswerObligations(project, agent string) ([]ObligationView, error
 			return nil, fmt.Errorf("scan answer obligation: %w", err)
 		}
 		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// --- Answer escalation (roadmap item 10, slice B, task a01d0b87) ----------
+//
+// A due answer obligation (deadline_at passed, still active) breaches: it
+// closes unfulfilled and, in the same writer tx, opens its norm's
+// on_unfulfilled child on the next bearer (parent_obligation_id set, depth
+// + 1). answer.human has no deadline, so the chain stops at the human. The
+// original message and its deliveries are never touched.
+
+// AnswerDue is one breached answer obligation with what its sanction needs.
+type AnswerDue struct {
+	ID, NormID, MessageID, Bearer string
+	Depth                         int
+	NextNorm                      string // the norm's on_unfulfilled ("" = none)
+	Project                       string
+	Recipient                     string // the ask's original recipient (root bearer)
+	Asker, Action, Subject, Body  string // the ask; Body is "" when purged
+	AskedAt                       string
+}
+
+// DueAnswerObligations lists the active answer obligations whose deadline has
+// passed at now, oldest first. Read-only.
+func (d *DB) DueAnswerObligations(now time.Time) ([]AnswerDue, error) {
+	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, o.subject_id, o.bearer, o.escalation_depth, COALESCE(n.on_unfulfilled, ''),
+			o.project, CASE WHEN p.id IS NULL THEN o.bearer ELSE p.bearer END,
+			COALESCE(m.from_agent, t.from_agent, ''), COALESCE(m.action_required, t.action_required, ''),
+			COALESCE(m.subject, ''), COALESCE(m.content, ''), COALESCE(m.created_at, t.created_at, o.created_at)
+		FROM obligations o JOIN norms n ON n.id = o.norm_id AND `+answerNormKnown+`
+		LEFT JOIN obligations p ON p.id = o.parent_obligation_id
+		LEFT JOIN messages m ON m.id = o.subject_id AND m.project = o.project
+		LEFT JOIN message_tombstones t ON t.id = o.subject_id AND t.project = o.project
+		WHERE o.state = ? AND o.subject_kind = ? AND o.deadline_at IS NOT NULL AND o.deadline_at <= ?
+		ORDER BY o.deadline_at, o.id`,
+		ObligationActive, SubjectMessage, now.UTC().Format(memoryTimeFmt))
+	if err != nil {
+		return nil, fmt.Errorf("due answer obligations: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []AnswerDue
+	for rows.Next() {
+		var a AnswerDue
+		if err := rows.Scan(&a.ID, &a.NormID, &a.MessageID, &a.Bearer, &a.Depth, &a.NextNorm, &a.Project, &a.Recipient,
+			&a.Asker, &a.Action, &a.Subject, &a.Body, &a.AskedAt); err != nil {
+			return nil, fmt.Errorf("scan due answer obligation: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// AnswerChild is the obligation a breach opened.
+type AnswerChild struct {
+	ID, NormID, Bearer, SanctionTemplate string
+	Depth                                int
+}
+
+// BreachAnswerObligation closes a due answer obligation unfulfilled and opens
+// childNorm on bearer, in one writer tx. ok is false (nothing written) when the
+// obligation is no longer active, i.e. another writer or a reply won. childNorm
+// "" breaches without a child. The caller picks childNorm and bearer: the
+// human bearer only on the max-depth norm.
+func (d *DB) BreachAnswerObligation(due AnswerDue, childNorm, bearer string, now time.Time) (*AnswerChild, bool, error) {
+	var child *AnswerChild
+	var version int
+	var bearerKind string
+	var key sql.NullString
+	var def, minS, maxS sql.NullInt64
+	if childNorm != "" {
+		child = &AnswerChild{NormID: childNorm, Bearer: bearer}
+		err := d.ro().QueryRow(`SELECT n.version, n.bearer_kind, n.sanction_template, n.max_depth, n.deadline_setting,
+				n.deadline_default_s, n.deadline_min_s, n.deadline_max_s
+			FROM norms n WHERE n.id = ? AND `+answerNormKnown, childNorm).
+			Scan(&version, &bearerKind, &child.SanctionTemplate, &child.Depth, &key, &def, &minS, &maxS)
+		if err != nil {
+			return nil, false, fmt.Errorf("answer child norm %s: %w", childNorm, err)
+		}
+		// Depth is the rung's place in the chain; max_depth only caps it.
+		if childNorm != NormAnswerHuman {
+			child.Depth = due.Depth + 1
+		}
+	}
+	ts := now.UTC().Format(memoryTimeFmt)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, false, fmt.Errorf("answer breach begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ? WHERE id = ? AND state = ?`,
+		ObligationUnfulfilled, ts, due.ID, ObligationActive)
+	if err != nil {
+		return nil, false, fmt.Errorf("answer breach: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, false, nil
+	}
+	if child != nil {
+		var deadline sql.NullString
+		if key.Valid && key.String != "" {
+			age := d.SettingDuration(key.String, time.Duration(def.Int64)*time.Second,
+				time.Duration(minS.Int64)*time.Second, time.Duration(maxS.Int64)*time.Second)
+			deadline = sql.NullString{String: now.Add(age).UTC().Format(memoryTimeFmt), Valid: true}
+		}
+		child.ID = uuid.New().String()
+		res, err := tx.Exec(`INSERT OR IGNORE INTO obligations
+			(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state,
+			 created_at, deadline_at, escalation_depth, parent_obligation_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			child.ID, due.Project, childNorm, version,
+			bindingsHash(childNorm, SubjectMessage, due.MessageID+"|"+due.Recipient, child.Depth),
+			SubjectMessage, due.MessageID, bearerKind, strings.ToLower(bearer), ObligationActive, ts, deadline, child.Depth, due.ID)
+		if err != nil {
+			return nil, false, fmt.Errorf("answer child: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			child = nil // already opened for this ask and recipient: no second sanction
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, fmt.Errorf("answer breach commit: %w", err)
+	}
+	return child, true, nil
+}
+
+// UnansweredAsk is one recipient's count of answer obligations left
+// unanswered in a window: still open (active) or breached (unfulfilled).
+type UnansweredAsk struct {
+	Recipient   string `json:"recipient"`
+	Active      int    `json:"active"`
+	Unfulfilled int    `json:"unfulfilled"`
+}
+
+// UnansweredAsks counts, per bearer, the answer obligations created since
+// since that are active or unfulfilled, most unanswered first. Read-only.
+func (d *DB) UnansweredAsks(project string, since time.Time) ([]UnansweredAsk, error) {
+	rows, err := d.ro().Query(`SELECT bearer,
+			SUM(CASE WHEN state = ? THEN 1 ELSE 0 END), SUM(CASE WHEN state = ? THEN 1 ELSE 0 END)
+		FROM obligations
+		WHERE project = ? AND subject_kind = ? AND norm_id LIKE 'answer.%' AND created_at >= ? AND state IN (?, ?)
+		GROUP BY bearer ORDER BY COUNT(*) DESC, bearer`,
+		ObligationActive, ObligationUnfulfilled, project, SubjectMessage, since.UTC().Format(memoryTimeFmt),
+		ObligationActive, ObligationUnfulfilled)
+	if err != nil {
+		return nil, fmt.Errorf("unanswered asks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []UnansweredAsk
+	for rows.Next() {
+		var u UnansweredAsk
+		if err := rows.Scan(&u.Recipient, &u.Active, &u.Unfulfilled); err != nil {
+			return nil, fmt.Errorf("scan unanswered asks: %w", err)
+		}
+		out = append(out, u)
 	}
 	return out, rows.Err()
 }

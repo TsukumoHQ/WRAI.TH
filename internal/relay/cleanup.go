@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -356,6 +357,10 @@ type ackNotifier interface {
 // fires, at most one per tick, and firing it closes the lower rungs (no notify
 // after an escalate). Messages are durable (Q2) and also pushed live.
 func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
+	// Answer chain (task a01d0b87): its own message branch, first so an ACK
+	// early return never skips it. ACK code below stays task-only.
+	evaluateAnswerObligations(database, notifier, now)
+
 	// Read the ack knobs at check time so a PUT takes effect on the next ACK
 	// tick without restart (const default, D2 bounds clamp).
 	notifyAge := database.SettingDuration("ack_notify_age", ACKNotifyAge, time.Minute, 24*time.Hour)
@@ -482,4 +487,88 @@ func resolveAckRung2(database *db.DB, project, dispatcher string) (target, rule 
 		}
 	}
 	return ackFounder, "founder"
+}
+
+// evaluateAnswerObligations breaches every answer obligation past its deadline
+// (task a01d0b87): the obligation closes unfulfilled and the next rung opens
+// in the same tx. answer.reply escalates to the recipient's role (reports_to,
+// else an active executive), answer.role to the human. A role that resolves to
+// nobody but the founder skips straight to answer.human: the human is only
+// ever the max-depth rung. Each opened rung sends one P1 message to its bearer
+// quoting the ask, as a reply to it so the bearer's answer fulfils the rung.
+// The original message and its deliveries are never touched.
+func evaluateAnswerObligations(database *db.DB, notifier ackNotifier, now time.Time) {
+	due, err := database.DueAnswerObligations(now)
+	if err != nil {
+		log.Printf("[obligations] answer due error: %v", err)
+		return
+	}
+	for _, a := range due {
+		childNorm, bearer := a.NextNorm, ""
+		switch childNorm {
+		case db.NormAnswerRole:
+			var rule string
+			bearer, rule = resolveAckRung2(database, a.Project, a.Recipient)
+			if bearer == ackFounder || strings.EqualFold(bearer, a.Recipient) {
+				childNorm, bearer = db.NormAnswerHuman, ackFounder
+			}
+			log.Printf("[obligations] answer rung=1 msg=%s recipient=%s rule=%s target=%s", a.MessageID, a.Recipient, rule, bearer)
+		case db.NormAnswerHuman:
+			bearer = ackFounder
+		}
+		child, ok, err := database.BreachAnswerObligation(a, childNorm, bearer, now)
+		if err != nil {
+			log.Printf("[obligations] answer breach %s: %v", a.ID, err)
+			continue
+		}
+		if !ok || child == nil {
+			continue
+		}
+		sendAnswerSanction(database, notifier, a, child, now)
+	}
+}
+
+// answerQuote is the ask as the sanction quotes it: subject and the first
+// 300 characters of the body, or a note when the message was purged.
+func answerQuote(a db.AnswerDue) string {
+	body := strings.TrimSpace(a.Body)
+	if body == "" {
+		return fmt.Sprintf("%q (message %s purged; its tombstone keeps the thread)", a.Subject, a.MessageID)
+	}
+	if r := []rune(body); len(r) > 300 {
+		body = string(r[:300]) + "…"
+	}
+	if a.Subject != "" {
+		return fmt.Sprintf("%q: %s", a.Subject, body)
+	}
+	return body
+}
+
+// sendAnswerSanction persists the opened rung's notice to its bearer (P1,
+// action do, reply_to = the ask) and pushes it live.
+func sendAnswerSanction(database *db.DB, notifier ackNotifier, a db.AnswerDue, child *db.AnswerChild, now time.Time) {
+	minutes := 0
+	if at, err := time.Parse("2006-01-02T15:04:05.000000Z", a.AskedAt); err == nil {
+		minutes = int(now.Sub(at).Minutes())
+	}
+	action := a.Action
+	if action == "" {
+		action = "ask"
+	}
+	var text string
+	if child.NormID == db.NormAnswerRole {
+		text = fmt.Sprintf(child.SanctionTemplate, action, a.Asker, a.Recipient, minutes, a.Recipient, answerQuote(a))
+	} else {
+		text = fmt.Sprintf(child.SanctionTemplate, action, a.Asker, a.Recipient, minutes, answerQuote(a))
+	}
+	meta := fmt.Sprintf(`{"obligation_id":%q,"norm":%q,"message_id":%q}`, child.ID, child.NormID, a.MessageID)
+	replyTo := a.MessageID
+	msg, _, err := database.InsertMessageWithDeliveries(a.Project, "relay", child.Bearer, "notification", text, text, meta,
+		"P1", -1, &replyTo, nil, []string{child.Bearer}, "do")
+	if err != nil {
+		log.Printf("[obligations] answer sanction %s: %v", child.ID, err)
+		return
+	}
+	notifier.Notify(a.Project, child.Bearer, "relay", text, msg.ID)
+	log.Printf("[obligations] answer %s: msg %s (%s -> %s) -> %s", child.NormID, a.MessageID, a.Asker, a.Recipient, child.Bearer)
 }
