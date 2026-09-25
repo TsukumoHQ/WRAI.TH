@@ -401,7 +401,8 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 		}
 		// Branch taken: a refused CAS below still consumes this task's tick.
 		sanctioned[o.TaskID] = true
-		sn := ackSanction(database, o, int(age.Minutes()))
+		minutes := int(age.Minutes())
+		sn := ackSanction(database, o, minutes)
 
 		ok, err := database.TransitionTaskAck(o.ID, o.NormID, o.TaskID, dispatchedAt.Add(threshold), now, sn.alsoClose...)
 		if err != nil {
@@ -411,7 +412,7 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 		if !ok {
 			continue
 		}
-		sendAckSanction(database, notifier, o, sn)
+		sendAckSanction(database, notifier, o, sn, minutes)
 	}
 }
 
@@ -449,7 +450,7 @@ func ackSanction(database *db.DB, o db.TaskObligation, minutes int) ackRungSanct
 }
 
 // sendAckSanction persists the rung's notice (durable, Q2) and pushes it live.
-func sendAckSanction(database *db.DB, notifier ackNotifier, o db.TaskObligation, sn ackRungSanction) {
+func sendAckSanction(database *db.DB, notifier ackNotifier, o db.TaskObligation, sn ackRungSanction, minutes int) {
 	meta := fmt.Sprintf(`{"task_id":%q,"obligation_id":%q,"norm":%q}`, o.TaskID, o.ID, o.NormID)
 	msg, _, err := database.InsertMessageWithDeliveries(o.Project, "relay", sn.target, sn.msgType, sn.text, sn.text, meta,
 		sn.priority, -1, nil, nil, []string{sn.target}, sn.action)
@@ -458,7 +459,7 @@ func sendAckSanction(database *db.DB, notifier ackNotifier, o db.TaskObligation,
 		return
 	}
 	notifier.Notify(o.Project, sn.target, "relay", sn.text, msg.ID)
-	log.Printf("ACK %s: task %s (%s) -> %s", o.NormID, o.TaskID, o.Title, sn.target)
+	log.Printf("ACK %s: task %s (%s) -> %s — %dmin", o.NormID, o.TaskID, o.Title, sn.target, minutes)
 }
 
 // ackFounder is the human end of the ACK chain: the operator inbox.

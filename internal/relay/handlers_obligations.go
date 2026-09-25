@@ -105,7 +105,7 @@ func (h *Handlers) HandleObligationDecline(ctx context.Context, req mcp.CallTool
 		detail += ": " + reason
 	}
 	sn.text += fmt.Sprintf(" Declined by %s (%s).", agent, detail)
-	sendAckSanction(h.db, h.registry, *o, sn)
+	sendAckSanction(h.db, h.registry, *o, sn, minutes)
 	return h.resultJSONTracked(project, agent, "obligation_decline", map[string]any{
 		"id": id, "state": db.ObligationUnfulfilled, "reason_class": reasonClass, "escalated_to": sn.target,
 	})

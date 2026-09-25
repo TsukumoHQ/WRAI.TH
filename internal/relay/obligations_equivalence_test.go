@@ -319,6 +319,24 @@ func TestACKEquivalenceCoversBothSanctions(t *testing.T) {
 	}
 }
 
+// TestACKSanctionLogCarriesMinutes (task 904e024d): the sweeper's sanction log
+// line ends with the task age as '<N>min', the suffix the legacy
+// 'ACK notify/escalated: task ... — %dmin' lines carried.
+func TestACKSanctionLogCarriesMinutes(t *testing.T) {
+	w := newTwin(t, "logmin")
+	seedTask("n", "pending", ago(20*time.Minute))(t, w)
+	seedTask("e", "pending", ago(50*time.Minute))(t, w)
+	got := captureLog(func() { evaluateObligations(w.d, w.rec, time.Now().UTC()) })
+	for _, want := range []string{
+		"ACK ack.notify: task n (title n) -> cto — 20min\n",
+		"ACK ack.escalate: task e (title e) -> cto — 50min\n",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log missing %q, got:\n%s", want, got)
+		}
+	}
+}
+
 // TestObligationsOneSanctionPerTick: a task past both thresholds gets exactly
 // one sanction per tick (the escalate), never two in the same tick (Q3). Since
 // slice 2a the late notify of Q1 is retired, so later ticks stay silent.
