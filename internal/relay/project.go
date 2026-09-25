@@ -312,6 +312,33 @@ func projectMessages(msgs []models.Message, maxBytes int, agent string) []Messag
 	return out
 }
 
+// projectPolicies projects unacked policy messages (task adefc1f4) into their
+// own session_context block. They bypass the soft unread budget but stop at
+// room (the hard ceiling left after the unread block); like the first P0, the
+// first policy always surfaces. One "[budget]" journal line with
+// path=session_context_policy marks every candidate as a policy item.
+func projectPolicies(msgs []models.Message, room int, agent string) []MessageSummary {
+	journal := budgetJournal{Path: "session_context_policy", Agent: agent, BudgetMax: room}
+	defer func() { journal.emit() }()
+	out := []MessageSummary{}
+	used := 0
+	for _, m := range msgs {
+		s := summarizeMessage(m)
+		b := messageSummaryBytes(s)
+		journal.Candidates = append(journal.Candidates, m.ID)
+		journal.Scores = append(journal.Scores, budgetScore{ID: m.ID, Priority: m.Priority, Bytes: b, HasTask: m.TaskID != nil && *m.TaskID != ""})
+		if used+b > room && len(out) > 0 {
+			journal.Omitted = append(journal.Omitted, m.ID)
+			continue
+		}
+		out = append(out, s)
+		used += b
+		journal.Selected = append(journal.Selected, m.ID)
+	}
+	journal.BudgetUsed = used
+	return out
+}
+
 // TaskSummary is the projected form of models.Task injected into session_context.
 // Heavy fields (description, result, blocked_reason) are dropped or truncated;
 // the full task is reachable via get_task(id).

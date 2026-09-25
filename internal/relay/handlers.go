@@ -882,10 +882,28 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	if err != nil || unread == nil {
 		unread = []models.Message{}
 	}
-	projected := projectMessages(unread, sessionUnreadBudget, agentName)
+	// Policy messages get their own block (below); keep them out of the
+	// soft-budgeted unread list so non-policy selection is unchanged.
+	nonPolicy := make([]models.Message, 0, len(unread))
+	for _, m := range unread {
+		if m.Type != db.PolicyType {
+			nonPolicy = append(nonPolicy, m)
+		}
+	}
+	projected := projectMessages(nonPolicy, sessionUnreadBudget, agentName)
 	result["unread_messages"] = projected
-	if len(projected) < len(unread) {
-		result["unread_omitted"] = len(unread) - len(projected)
+	if len(projected) < len(nonPolicy) {
+		result["unread_omitted"] = len(nonPolicy) - len(projected)
+	}
+
+	// Unacked policies (task adefc1f4): outside the soft unread budget, inside
+	// the hard ceiling that the unread block already partly used.
+	if policies, err := h.db.UnackedPolicies(project, agentName); err == nil && len(policies) > 0 {
+		used := 0
+		for _, s := range projected {
+			used += messageSummaryBytes(s)
+		}
+		result["policies"] = projectPolicies(policies, sessionUnreadBudget*budgetHardMultiplier-used, agentName)
 	}
 
 	// Cross-project unread rollup (T4): a multi-project/executive agent gets a

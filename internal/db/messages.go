@@ -56,6 +56,20 @@ func (d *DB) ResolveMessageRef(project, id string) string {
 	return RefUnknown
 }
 
+// PolicyType is the doctrine message type (task adefc1f4): it never expires,
+// so it is never deadlettered or purged, and it stays in the recipient's boot
+// payload until the delivery is acknowledged.
+const PolicyType = "policy"
+
+// normalizeMessageTTL is normalizeTTL plus the type rule: a policy message is
+// forced to ttl=0 whatever the caller passed, like P0.
+func normalizeMessageTTL(msgType, priority string, ttlSeconds int) int {
+	if msgType == PolicyType {
+		return 0
+	}
+	return normalizeTTL(priority, ttlSeconds)
+}
+
 // deriveActionRequired computes the effective comms-discipline action tag
 // (DEC-relay-comms-discipline-1) when the caller omits it. Wake-eligible:
 // task->do, question/user_question->ask. No-wake reports:
@@ -66,7 +80,7 @@ func (d *DB) ResolveMessageRef(project, id string) string {
 // The parent read uses the RO pool and never fails the insert.
 func (d *DB) deriveActionRequired(msgType string, replyTo *string, project string) string {
 	switch msgType {
-	case "task":
+	case "task", PolicyType:
 		return "do"
 	case "question", "user_question":
 		return "ask"
@@ -185,7 +199,7 @@ func (d *DB) InsertMessage(project, from, to, msgType, subject, content, metadat
 	if priority == "" {
 		priority = "P2"
 	}
-	ttlSeconds = normalizeTTL(priority, ttlSeconds)
+	ttlSeconds = normalizeMessageTTL(msgType, priority, ttlSeconds)
 	actionRequired := d.deriveActionRequired(msgType, replyTo, project)
 	normalizedMetadata := normalize.JSONKeys(metadata)
 	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
@@ -255,7 +269,7 @@ func (d *DB) InsertMessageWithDeliveries(project, from, to, msgType, subject, co
 	if priority == "" {
 		priority = "P2"
 	}
-	ttlSeconds = normalizeTTL(priority, ttlSeconds)
+	ttlSeconds = normalizeMessageTTL(msgType, priority, ttlSeconds)
 	effTag := d.effectiveActionRequired(actionRequired, msgType, replyTo, project)
 	normalizedMetadata := normalize.JSONKeys(metadata)
 	traceID := d.deriveTraceID(normalizedMetadata, replyTo, project)
@@ -553,6 +567,19 @@ func (d *DB) MarkRead(messageIDs []string, agentName, project string) (int, erro
 	}
 
 	return count, nil
+}
+
+// UnackedPolicies lists the policy messages whose delivery to agent is not
+// acknowledged (queued or surfaced), oldest first. Read-only: unlike GetInbox
+// it never flips a delivery to surfaced.
+func (d *DB) UnackedPolicies(project, agent string) ([]models.Message, error) {
+	return d.queryMessages(
+		`SELECT m.id, m.from_agent, m.to_agent, m.reply_to, m.type, m.subject, m.content, m.metadata, m.created_at, m.read_at, m.conversation_id, m.project, m.task_id, m.priority, m.ttl_seconds, m.expired_at
+		 FROM deliveries d JOIN messages m ON m.id = d.message_id
+		 WHERE d.to_agent = ? AND d.project = ? AND d.state IN ('queued', 'surfaced') AND m.type = ?
+		 ORDER BY m.created_at ASC`,
+		agent, project, PolicyType,
+	)
 }
 
 func (d *DB) GetMessage(id string) (*models.Message, error) {
