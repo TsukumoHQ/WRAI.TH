@@ -3,6 +3,48 @@
 All notable changes to wrai.th are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.22.0] — 2026-09-25
+
+Obligations become first-class relay data: the ACK checker now runs on a norms/obligations engine with an escalation chain agents can see, discharge or decline, questions sent to agents become tracked obligations that escalate when unanswered, while messages keep their task links and reply chains after retention, and memory writes stop losing concurrent updates.
+
+### Added
+- Obligation tools for agents: `obligations_mine` lists what you owe (your profile pool plus tasks assigned to you, with deadline and escalation depth), `obligation_discharge` marks one fulfilled after the relay re-checks it, and `obligation_decline` hands it up the chain immediately with a reason class (`not_mine`, `cannot`, `blocked_by`, `duplicate`) (79f48b9e, d1361bf)
+- `send_message` takes an optional `task_id`, stored as the message's task link; an unknown id or one that contradicts `metadata.task_id` is refused before anything is written, and so is a malformed `reply_to`. A well-formed `reply_to` whose parent is missing is still accepted, and the result now reports `reply_to_resolved` (fde40c25, b8f3d88)
+- Messages are linked to their task at insert: `messages.task_id` is filled from `metadata.task_id` or inherited from the `reply_to` parent in the same project, and older rows are backfilled on start (da1945d5, c2051b3)
+- Message tombstones: the retention purge leaves one content-free row per deleted message (ids, routing, priority, no subject or body) in the same transaction, so a purged id can still be told apart from a mistyped one (f53b2160, c6add48)
+- New `policy` message type for standing doctrine: it never expires, is never dead-lettered or purged, and is shown in its own `policies` block at every boot until the agent acks it (adefc1f4, 0571352)
+- `set_memory` takes an optional `based_on` (the memory id you read, auto-filled from your last `get_memory`). If someone wrote a newer version in between, both stay live as siblings, the result names the conflict, and the other author is told (1a031d43, da972fc)
+- Answer obligations: a direct or team message sent with `action_required` `ask` or `decide` now opens one obligation per recipient, fulfilled automatically when that recipient replies (the reply chain is followed through purged messages too). Recipients see them in `obligations_mine` and can discharge or decline them. Broadcast asks and conversation messages are excluded, and only messages sent after the upgrade are covered (044a4876, 038d089)
+- Unanswered questions escalate: an answer obligation still open after `answer_reply_age` (1 h) is marked missed and passes to the recipient's manager (their `reports_to`, else an active executive), and after a further `answer_role_age` (2 h) to the human, who is only ever the last step. Each step sends one P1 message quoting the question, as a reply to it, so answering that message counts; a late answer from the original recipient closes the steps opened for it. The original message is never touched (a01d0b87, 5e48a6e)
+- Boot selection journal: `get_session_context` logs one `[budget]` line per boot with the candidate, selected and omitted message ids, so the inbox budget can be replayed from logs. The boot payload itself is unchanged (409fb2e8, 6b3441c)
+
+### Changed
+- The ACK checker runs on a new norms/obligations engine instead of hard-coded checks. Behaviour is identical to v1.21, proven by an equivalence test against the old checker (f77efe18, 266a026)
+- ACK escalation is now a chain: a task left unclaimed notifies its dispatcher at 15 min, escalates at 45 min, goes to the dispatcher's manager (else an executive, else the founder) at 90 min, and reaches the human operator only at 4 h. Notices are stored messages instead of push-only, so an offline dispatcher still gets them, and a notify can no longer arrive after an escalation. Tasks already escalated before the upgrade send nothing new (6b4369f0, d215a0c)
+- Integrity scan: a slow scan log line now names the slowest phase and check, `orphan_agent_profile` only flags active agents, and a task on a missing board with no re-home target is recorded once instead of being logged on every sweep (27a77033, 52a9abf)
+
+### Fixed
+- A task promoted from backlog, unblocked or reset no longer fires the whole ACK chain at once: the ACK clock restarts each time a task becomes pending (new `tasks.pending_since`) instead of counting from its original dispatch (c933b2f1, c5288ca)
+- The ACK clock also restarts when a task goes back to pending through a watchdog requeue, an expired lease, or the deactivation of the agent holding it (58ece5e2, cef0f87)
+- The ACK sanction log line again ends with the task age in minutes, lost when the sanction code was shared with `obligation_decline` (904e024d, 81ba213)
+- A memory writer working from an old version no longer silently archives a newer concurrent write; a superseded version now gets its `valid_until` closed, and re-saving the same value with a new layer is no longer dropped (df33d619, c4956f8)
+- Replies to a purged message keep their parent's trace and action instead of waking the recipient as a new task, and `reply_to` checks treat a tombstoned parent as resolved (93b6f1cf, 5845c2f)
+- Inbox budget scoring: an unknown priority no longer scores as P0, an unparseable or future `created_at` no longer counts as the freshest, and agents without tags can reach a full score. `apply_budget` is still off by default, so this was latent (1f190795, 8978751)
+- Test suite: the token-usage flusher is stopped before a test closes its database, which removes a data race on captured logs. No change in production (d230b752, 4cbaa4c)
+
+### Upgrade notes
+All schema changes are additive and applied automatically on first start. Older binaries ignore the new tables and column, so rolling back is safe.
+- New table `message_tombstones` with index `idx_message_tombstones_reply`.
+- New tables `norms` and `obligations` with indexes `idx_obligations_active`, `idx_obligations_bearer`, `idx_obligations_subject`. Seven norms are seeded if absent: `ack.notify`, `ack.escalate`, `ack.manager`, `ack.human`, `answer.reply`, `answer.role`, `answer.human`.
+- New column `tasks.pending_since`, backfilled to `dispatched_at` for existing tasks.
+- `messages.task_id` already existed; it is now written on every insert, and rows whose `metadata.task_id` names a task in the same project are backfilled on each start (a no-op after the first).
+- New settings `ack_manager_age` (default 90 min) and `ack_human_age` (default 4 h), each clamped to 1 min to 48 h. The existing `ack_notify_age` and `ack_escalate_age` are unchanged.
+- New settings `answer_reply_age` (default 60 min, clamped to 1 min to 24 h), the deadline recorded on each answer obligation, and `answer_role_age` (default 2 h, clamped to 1 min to 48 h), the time the manager gets before the question reaches the human.
+- Only questions sent after the upgrade get answer obligations, so the first sweep sends nothing to the human for older messages.
+- The first integrity scan after the upgrade closes open `orphan_agent_profile` rows that belong to inactive or deleted agents.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.21.1...v1.22.0
+
 ## [0.7.0] — 2026-04-19
 
 ### Added — new subsystems
