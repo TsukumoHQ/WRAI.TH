@@ -270,10 +270,10 @@ func runCleanupTick(database *db.DB, st *cleanupState) {
 	// Hard-reclaim soft-expired messages (+ their deliveries/reads) and
 	// stale audit rows so the tables stay bounded (TSU-127).
 	messageRetention := database.SettingDuration("message_retention", MessageRetention, 24*time.Hour, 90*24*time.Hour)
-	if purged, err := database.PurgeExpiredMessages(messageRetention); err != nil {
+	if purged, tombstoned, err := database.PurgeExpiredMessagesWithTombstones(messageRetention); err != nil {
 		log.Printf("purge expired messages error: %v", err)
 	} else if purged > 0 {
-		log.Printf("purged %d expired message(s)", purged)
+		log.Printf("purged %d expired message(s), %d tombstone(s) written", purged, tombstoned)
 	}
 	auditRetention := database.SettingDuration("audit_log_retention", AuditLogRetention, 7*24*time.Hour, 365*24*time.Hour)
 	if purged, err := database.PurgeOldAuditLog(auditRetention); err != nil {

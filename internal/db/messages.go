@@ -610,28 +610,49 @@ func (d *DB) ExpireMessages() (int, error) {
 // fleet operation. Messages with ttl_seconds=0 (never expire) are never purged.
 // Runs in one transaction on the single writer; returns the message count.
 func (d *DB) PurgeExpiredMessages(grace time.Duration) (int64, error) {
-	cutoff := time.Now().UTC().Add(-grace).Format("2006-01-02T15:04:05.000000Z")
+	purged, _, err := d.PurgeExpiredMessagesWithTombstones(grace)
+	return purged, err
+}
+
+// PurgeExpiredMessagesWithTombstones is PurgeExpiredMessages that also reports
+// how many message_tombstones rows it wrote. Each purged message leaves one
+// content-free tombstone, inserted in the same tx before the delete: both land
+// or neither does (DEC-wraith-tombstones-1).
+func (d *DB) PurgeExpiredMessagesWithTombstones(grace time.Duration) (purged, tombstoned int64, err error) {
+	now := time.Now().UTC()
+	cutoff := now.Add(-grace).Format("2006-01-02T15:04:05.000000Z")
 	const sel = `SELECT id FROM messages WHERE expired_at IS NOT NULL AND datetime(expired_at) < datetime(?)`
 
 	tx, err := d.beginWriterTx()
 	if err != nil {
-		return 0, fmt.Errorf("purge messages begin: %w", err)
+		return 0, 0, fmt.Errorf("purge messages begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Tombstones first, same predicate: OR IGNORE keeps a re-run idempotent.
+	tres, err := tx.Exec(`INSERT OR IGNORE INTO message_tombstones
+		(id, project, from_agent, to_agent, type, reply_to, task_id, trace_id, action_required, priority, created_at, purged_at)
+		SELECT id, project, from_agent, to_agent, type, reply_to, task_id, trace_id, action_required, priority, created_at, ?
+		FROM messages WHERE expired_at IS NOT NULL AND datetime(expired_at) < datetime(?)`,
+		now.Format("2006-01-02T15:04:05.000000Z"), cutoff)
+	if err != nil {
+		return 0, 0, fmt.Errorf("purge tombstones: %w", err)
+	}
 	// Children first (sqlite FK cascade is off by default).
 	if _, err := tx.Exec(`DELETE FROM deliveries WHERE message_id IN (`+sel+`)`, cutoff); err != nil {
-		return 0, fmt.Errorf("purge deliveries: %w", err)
+		return 0, 0, fmt.Errorf("purge deliveries: %w", err)
 	}
 	if _, err := tx.Exec(`DELETE FROM message_reads WHERE message_id IN (`+sel+`)`, cutoff); err != nil {
-		return 0, fmt.Errorf("purge message_reads: %w", err)
+		return 0, 0, fmt.Errorf("purge message_reads: %w", err)
 	}
 	res, err := tx.Exec(`DELETE FROM messages WHERE expired_at IS NOT NULL AND datetime(expired_at) < datetime(?)`, cutoff)
 	if err != nil {
-		return 0, fmt.Errorf("purge messages: %w", err)
+		return 0, 0, fmt.Errorf("purge messages: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("purge messages commit: %w", err)
+		return 0, 0, fmt.Errorf("purge messages commit: %w", err)
 	}
-	return res.RowsAffected()
+	purged, _ = res.RowsAffected()
+	tombstoned, _ = tres.RowsAffected()
+	return purged, tombstoned, nil
 }

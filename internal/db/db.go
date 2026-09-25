@@ -705,6 +705,26 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_deadletter_agent ON deadletter(to_agent, project, expired_at)`)
 
+	// Message tombstones (DEC-wraith-tombstones-1): PurgeExpiredMessages leaves
+	// one content-free row per hard-deleted message, written in the purge tx, so
+	// a purged id stays resolvable for reply_to and replay. Graph + routing
+	// facts only — never subject/content/metadata. Never read by inbox/wake.
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS message_tombstones (
+		id              TEXT PRIMARY KEY,
+		project         TEXT NOT NULL,
+		from_agent      TEXT NOT NULL,
+		to_agent        TEXT NOT NULL,
+		type            TEXT NOT NULL,
+		reply_to        TEXT,
+		task_id         TEXT,
+		trace_id        TEXT,
+		action_required TEXT,
+		priority        TEXT,
+		created_at      TEXT NOT NULL,
+		purged_at       TEXT NOT NULL
+	) WITHOUT ROWID`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_message_tombstones_reply ON message_tombstones(reply_to) WHERE reply_to IS NOT NULL`)
+
 	// Backfill deliveries for existing messages
 	migrateDeliveries(conn)
 
