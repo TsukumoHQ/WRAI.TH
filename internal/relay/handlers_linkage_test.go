@@ -133,7 +133,7 @@ func TestSendLinkage(t *testing.T) {
 		if _, ok := res["task_id"]; ok {
 			t.Fatalf("nothing may be derived from a dangling parent, got task_id %v", res["task_id"])
 		}
-		if n := strings.Count(out, "[linkage] reply_to "+purged+" unresolved"); n != 1 {
+		if n := strings.Count(out, "[linkage] reply_to="+purged+" state=unknown"); n != 1 {
 			t.Fatalf("want exactly 1 [linkage] line, got %d: %q", n, out)
 		}
 	})

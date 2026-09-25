@@ -945,11 +945,14 @@ func resolveReplyTo(d *db.DB, project, from string, replyTo *string) (*bool, str
 	if _, err := uuid.Parse(*replyTo); err != nil || len(*replyTo) != 36 {
 		return nil, fmt.Sprintf("reply_to %q is not a well-formed message id", *replyTo)
 	}
-	parent, err := d.GetMessage(*replyTo)
-	resolved := err == nil && parent != nil && parent.Project == project
-	if !resolved {
-		log.Printf("[linkage] reply_to %s unresolved in project %s (from %s): parent absent, stored as given", *replyTo, project, from)
+	// Log-only probe (DEC-wraith-tombstones-1 T2): a purged parent with a
+	// tombstone counts as resolved; every non-live ref is journalled so
+	// reject-on-unknown can be decided on data. Never rejects.
+	state := d.ResolveMessageRef(project, *replyTo)
+	if state != db.RefLive {
+		log.Printf("[linkage] reply_to=%s state=%s project=%s from=%s", *replyTo, state, project, from)
 	}
+	resolved := state != db.RefUnknown
 	return &resolved, ""
 }
 

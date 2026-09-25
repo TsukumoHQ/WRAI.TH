@@ -34,6 +34,28 @@ func normalizeTTL(priority string, ttlSeconds int) int {
 	return ttlSeconds
 }
 
+// Message reference states returned by ResolveMessageRef.
+const (
+	RefLive       = "live"
+	RefTombstoned = "tombstoned"
+	RefUnknown    = "unknown"
+)
+
+// ResolveMessageRef reports whether a message id is live, purged with a
+// tombstone, or unknown in project (DEC-wraith-tombstones-1). An id that lives
+// in another project is unknown. Reads the RO pool; a lookup error reads as
+// unknown.
+func (d *DB) ResolveMessageRef(project, id string) string {
+	var one int
+	if d.ro().QueryRow("SELECT 1 FROM messages WHERE id = ? AND project = ?", id, project).Scan(&one) == nil {
+		return RefLive
+	}
+	if d.ro().QueryRow("SELECT 1 FROM message_tombstones WHERE id = ? AND project = ?", id, project).Scan(&one) == nil {
+		return RefTombstoned
+	}
+	return RefUnknown
+}
+
 // deriveActionRequired computes the effective comms-discipline action tag
 // (DEC-relay-comms-discipline-1) when the caller omits it. Wake-eligible:
 // task->do, question/user_question->ask. No-wake reports:
@@ -53,10 +75,17 @@ func (d *DB) deriveActionRequired(msgType string, replyTo *string, project strin
 			return "none"
 		}
 		var parent sql.NullString
-		_ = d.ro().QueryRow(
+		err := d.ro().QueryRow(
 			"SELECT action_required FROM messages WHERE id = ? AND project = ?",
 			*replyTo, project,
 		).Scan(&parent)
+		if err == sql.ErrNoRows {
+			// Parent purged: its tombstone keeps the tag (DEC-wraith-tombstones-1).
+			_ = d.ro().QueryRow(
+				"SELECT action_required FROM message_tombstones WHERE id = ? AND project = ?",
+				*replyTo, project,
+			).Scan(&parent)
+		}
 		if parent.Valid && parent.String != "" {
 			return parent.String
 		}
@@ -90,7 +119,9 @@ func (d *DB) effectiveActionRequired(declared, msgType string, replyTo *string, 
 func (d *DB) deriveTraceID(metadata string, replyTo *string, project string) *string {
 	if replyTo != nil && *replyTo != "" {
 		var t sql.NullString
-		_ = d.ro().QueryRow("SELECT trace_id FROM messages WHERE id = ? AND project = ?", *replyTo, project).Scan(&t)
+		if err := d.ro().QueryRow("SELECT trace_id FROM messages WHERE id = ? AND project = ?", *replyTo, project).Scan(&t); err == sql.ErrNoRows {
+			_ = d.ro().QueryRow("SELECT trace_id FROM message_tombstones WHERE id = ? AND project = ?", *replyTo, project).Scan(&t)
+		}
 		if t.Valid && t.String != "" {
 			v := t.String
 			return &v
