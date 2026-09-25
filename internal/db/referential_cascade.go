@@ -75,9 +75,9 @@ func (d *DB) CascadeAgentDeactivation(project, name string) (*AgentCascade, erro
 	for _, c := range leased {
 		res, err := d.writerExec(
 			`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
-			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?
+			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?, pending_since=?
 			 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,
-			now, c.id, c.project, c.holder, c.status,
+			now, now, c.id, c.project, c.holder, c.status,
 		)
 		if err != nil {
 			continue // best-effort; the lease sweep is the backstop

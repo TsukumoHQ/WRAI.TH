@@ -148,9 +148,9 @@ func (d *DB) RequeueTask(taskID, project, reason string) (*models.Task, error) {
 		`UPDATE tasks SET status = 'pending', assigned_to = NULL, accepted_at = NULL,
 		   started_at = NULL, in_review_at = NULL, claimed_by = NULL, claimed_at = NULL,
 		   lease_holder = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL,
-		   last_activity_at = ?
+		   last_activity_at = ?, pending_since = ?
 		 WHERE id = ? AND project = ? AND status = ?`,
-		now, taskID, project, oldStatus,
+		now, now, taskID, project, oldStatus,
 	)
 	if err != nil {
 		return nil, err
