@@ -38,6 +38,12 @@ const (
 	ACKNotifyAge = 15 * time.Minute
 	// ACKEscalateAge is when to escalate the no-ACK notification.
 	ACKEscalateAge = 45 * time.Minute
+	// ACKManagerAge is when the ACK chain climbs to rung 2 (reports_to /
+	// executive / founder), setting ack_manager_age (slice 2a).
+	ACKManagerAge = 90 * time.Minute
+	// ACKHumanAge is when the ACK chain reaches the human (rung 3, last),
+	// setting ack_human_age.
+	ACKHumanAge = 4 * time.Hour
 	// BackupInterval is how often a rotated DB snapshot is written.
 	BackupInterval = time.Hour
 	// DefaultBackupKeep is how many rotated snapshots to retain by default. Each
@@ -340,17 +346,26 @@ type ackNotifier interface {
 	Notify(project, agentName, from, subject, messageID string)
 }
 
-// evaluateObligations is the ACK checker on the obligations engine. It keeps
-// the legacy checkUnackedTasks behaviour byte-for-byte (same settings, clamps,
-// candidates, texts, CAS marks and quirks Q1-Q4): per task, the escalate norm
-// is weighed before the notify norm and at most one sanction fires per tick,
-// which is the legacy if / else-if. TestACKEquivalence proves it against the
-// legacy checker kept verbatim as an oracle.
+// evaluateObligations is the ACK checker on the obligations engine: an
+// escalation chain of four rungs per unclaimed pending task
+// (DEC-wraith-obligations-1 slice 2a). Rung 0 (ack_notify_age) tells the
+// dispatcher with a durable fyi P2 no-wake message; rung 1 (ack_escalate_age)
+// a P1 message; rung 2 (ack_manager_age) goes to the dispatcher's reports_to,
+// else the project's executive, else the founder; rung 3 (ack_human_age) to
+// the human, unless rung 2 already reached them. Per task the highest due rung
+// fires, at most one per tick, and firing it closes the lower rungs (no notify
+// after an escalate). Messages are durable (Q2) and also pushed live.
 func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 	// Read the ack knobs at check time so a PUT takes effect on the next ACK
 	// tick without restart (const default, D2 bounds clamp).
 	notifyAge := database.SettingDuration("ack_notify_age", ACKNotifyAge, time.Minute, 24*time.Hour)
 	escalateAge := database.SettingDuration("ack_escalate_age", ACKEscalateAge, time.Minute, 24*time.Hour)
+	thresholds := map[string]time.Duration{
+		db.NormAckNotify:   notifyAge,
+		db.NormAckEscalate: escalateAge,
+		db.NormAckManager:  database.SettingDuration("ack_manager_age", ACKManagerAge, time.Minute, 48*time.Hour),
+		db.NormAckHuman:    database.SettingDuration("ack_human_age", ACKHumanAge, time.Minute, 48*time.Hour),
+	}
 	cutoff := now.Add(-notifyAge)
 
 	// Close first so a task claimed in the gap reads fulfilled, not breached.
@@ -370,7 +385,7 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 		return
 	}
 
-	sanctioned := map[string]bool{} // one sanction branch per task per tick (Q3)
+	sanctioned := map[string]bool{} // one rung per task per tick
 	for _, o := range obligations {
 		if sanctioned[o.TaskID] {
 			continue
@@ -380,23 +395,37 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 			continue
 		}
 		age := now.Sub(dispatchedAt)
-
-		var threshold time.Duration
-		switch o.NormID {
-		case db.NormAckEscalate:
-			threshold = escalateAge
-		case db.NormAckNotify:
-			threshold = notifyAge
-		default:
+		threshold, known := thresholds[o.NormID]
+		if !known || age < threshold {
 			continue
 		}
-		if age < threshold {
-			continue
-		}
-		// Branch taken: like the legacy if/else-if, a failed CAS below still
-		// consumes this task's tick (no notify after a refused escalate).
+		// Branch taken: a refused CAS below still consumes this task's tick.
 		sanctioned[o.TaskID] = true
-		ok, err := database.TransitionTaskAck(o.ID, o.NormID, o.TaskID, dispatchedAt.Add(threshold), now)
+		minutes := int(age.Minutes())
+
+		target, msgType, priority, action := o.DispatchedBy, "notification", "P1", "do"
+		var text string
+		var alsoClose []string
+		switch o.NormID {
+		case db.NormAckNotify:
+			msgType, priority, action = "fyi", "P2", "none"
+			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes, o.ProfileSlug)
+		case db.NormAckEscalate:
+			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes)
+		case db.NormAckManager:
+			var rule string
+			target, rule = resolveAckRung2(database, o.Project, o.DispatchedBy)
+			log.Printf("[obligations] rung=2 task=%s rule=%s target=%s", o.TaskID, rule, target)
+			if target == ackFounder {
+				alsoClose = []string{db.NormAckHuman} // the human is reached: rung 3 never fires
+			}
+			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes, o.DispatchedBy)
+		case db.NormAckHuman:
+			target = ackFounder
+			text = fmt.Sprintf(o.SanctionTemplate, o.Title, minutes)
+		}
+
+		ok, err := database.TransitionTaskAck(o.ID, o.NormID, o.TaskID, dispatchedAt.Add(threshold), now, alsoClose...)
 		if err != nil {
 			log.Printf("ACK %s mark error: task %s: %v", o.NormID, o.TaskID, err)
 			continue
@@ -404,14 +433,36 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 		if !ok {
 			continue
 		}
-		if o.NormID == db.NormAckEscalate {
-			notifier.Notify(o.Project, o.DispatchedBy, "relay",
-				fmt.Sprintf(o.SanctionTemplate, o.Title, int(age.Minutes())), o.TaskID)
-			log.Printf("ACK escalated: task %s (%s) — %dmin", o.TaskID, o.Title, int(age.Minutes()))
-		} else {
-			notifier.Notify(o.Project, o.DispatchedBy, "relay",
-				fmt.Sprintf(o.SanctionTemplate, o.Title, int(age.Minutes()), o.ProfileSlug), o.TaskID)
-			log.Printf("ACK notify: task %s (%s) — %dmin", o.TaskID, o.Title, int(age.Minutes()))
+		meta := fmt.Sprintf(`{"task_id":%q,"obligation_id":%q,"norm":%q}`, o.TaskID, o.ID, o.NormID)
+		msg, _, err := database.InsertMessageWithDeliveries(o.Project, "relay", target, msgType, text, text, meta,
+			priority, -1, nil, nil, []string{target}, action)
+		if err != nil {
+			log.Printf("ACK %s message error: task %s: %v", o.NormID, o.TaskID, err)
+			continue
+		}
+		notifier.Notify(o.Project, target, "relay", text, msg.ID)
+		log.Printf("ACK %s: task %s (%s) -> %s — %dmin", o.NormID, o.TaskID, o.Title, target, minutes)
+	}
+}
+
+// ackFounder is the human end of the ACK chain: the operator inbox.
+const ackFounder = "user"
+
+// resolveAckRung2 picks the rung-2 target: the dispatcher's reports_to when
+// that agent is active, else the project's first active executive (not the
+// dispatcher), else the founder. rule names which fired, for the journal.
+func resolveAckRung2(database *db.DB, project, dispatcher string) (target, rule string) {
+	if d, err := database.GetAgent(project, dispatcher); err == nil && d != nil && d.ReportsTo != nil && *d.ReportsTo != "" {
+		if m, err := database.GetAgent(project, *d.ReportsTo); err == nil && m != nil && m.Status == "active" {
+			return m.Name, "reports_to"
 		}
 	}
+	if agents, err := database.ListAgents(project); err == nil {
+		for _, a := range agents {
+			if a.IsExecutive && a.Status == "active" && a.Name != dispatcher {
+				return a.Name, "executive"
+			}
+		}
+	}
+	return ackFounder, "founder"
 }

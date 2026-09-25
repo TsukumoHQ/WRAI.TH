@@ -55,8 +55,8 @@ func instantiate(t *testing.T, d *DB) int {
 func TestObligations(t *testing.T) {
 	t.Run("SchemaAndOldDBMigrates", func(t *testing.T) {
 		d := retentionTestDB(t)
-		if n := countRows(t, d, `SELECT COUNT(*) FROM norms WHERE id IN ('ack.notify', 'ack.escalate')`); n != 2 {
-			t.Fatalf("seeded ACK norms = %d, want 2", n)
+		if n := countRows(t, d, `SELECT COUNT(*) FROM norms WHERE id IN ('ack.notify', 'ack.escalate', 'ack.manager', 'ack.human')`); n != 4 {
+			t.Fatalf("seeded ACK chain norms = %d, want 4", n)
 		}
 		if _, err := d.conn.Exec(`DROP TABLE obligations; DROP TABLE norms`); err != nil {
 			t.Fatalf("drop: %v", err)
@@ -66,19 +66,35 @@ func TestObligations(t *testing.T) {
 				t.Fatalf("migrate %d: %v", i+1, err)
 			}
 		}
-		if n := countRows(t, d, `SELECT COUNT(*) FROM norms`); n != 2 {
-			t.Fatalf("norms after re-migrate = %d, want 2 (seed idempotent)", n)
+		if n := countRows(t, d, `SELECT COUNT(*) FROM norms`); n != 4 {
+			t.Fatalf("norms after re-migrate = %d, want 4 (seed idempotent)", n)
 		}
 		if n := countRows(t, d, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_obligations_%'`); n != 3 {
 			t.Fatalf("obligation indexes = %d, want 3", n)
 		}
 	})
 
+	t.Run("SliceOneDepthBackfilled", func(t *testing.T) {
+		d := retentionTestDB(t)
+		if _, err := d.conn.Exec(`INSERT INTO obligations (id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state, created_at)
+			VALUES ('s1', 'p1', 'ack.escalate', 1, 'h', 'task', 't1', 'assignee_profile', 'dev', 'unfulfilled', '2026-09-25T00:00:00.000000Z')`); err != nil {
+			t.Fatalf("seed slice-1 row: %v", err)
+		}
+		for i := 0; i < 2; i++ {
+			if err := migrate(d.conn); err != nil {
+				t.Fatalf("migrate: %v", err)
+			}
+		}
+		if n := countRows(t, d, `SELECT COUNT(*) FROM obligations WHERE id = 's1' AND escalation_depth = 1`); n != 1 {
+			t.Fatalf("slice-1 escalate row depth not backfilled to 1")
+		}
+	})
+
 	t.Run("DedupOnNormBindings", func(t *testing.T) {
 		d := retentionTestDB(t)
 		seedAckTask(t, d, "t1", "pending", 20*time.Minute)
-		if n := instantiate(t, d); n != 2 {
-			t.Fatalf("first instantiate opened %d, want 2 (notify + escalate)", n)
+		if n := instantiate(t, d); n != 4 {
+			t.Fatalf("first instantiate opened %d, want 4 (the ACK chain rungs)", n)
 		}
 		if n := instantiate(t, d); n != 0 {
 			t.Fatalf("re-instantiate opened %d, want 0", n)
@@ -107,8 +123,8 @@ func TestObligations(t *testing.T) {
 			}
 		}
 		seedAckTask(t, d, "t1", "pending", 20*time.Minute)
-		if n := instantiate(t, d); n != 2 {
-			t.Fatalf("opened %d obligations, want only the 2 ACK norms", n)
+		if n := instantiate(t, d); n != 4 {
+			t.Fatalf("opened %d obligations, want only the 4 ACK chain norms", n)
 		}
 		if _, err := d.conn.Exec(`INSERT INTO obligations (id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state, created_at)
 			VALUES ('r1', 'p1', 'rogue.what', 1, 'h', 'task', 't1', 'assignee_profile', 'dev', 'active', '2026-01-01T00:00:00.000000Z')`); err != nil {
@@ -119,12 +135,12 @@ func TestObligations(t *testing.T) {
 			t.Fatalf("active: %v", err)
 		}
 		for _, o := range obs {
-			if o.NormID != NormAckNotify && o.NormID != NormAckEscalate {
+			if _, ack := AckNormDepth[o.NormID]; !ack {
 				t.Fatalf("rogue norm %s evaluated", o.NormID)
 			}
 		}
-		if len(obs) != 2 {
-			t.Fatalf("active = %d, want the 2 ACK obligations", len(obs))
+		if len(obs) != 4 {
+			t.Fatalf("active = %d, want the 4 ACK chain obligations", len(obs))
 		}
 	})
 
@@ -270,11 +286,11 @@ func TestObligations(t *testing.T) {
 				t.Fatalf("%s: %v", q, err)
 			}
 		}
-		if n, err := d.CloseMootTaskObligations(time.Now().UTC()); err != nil || n != 8 {
-			t.Fatalf("closed %d (err %v), want 8", n, err)
+		if n, err := d.CloseMootTaskObligations(time.Now().UTC()); err != nil || n != 16 {
+			t.Fatalf("closed %d (err %v), want 16 (4 tasks x 4 rungs)", n, err)
 		}
-		if n := countRows(t, d, `SELECT COUNT(*) FROM obligations WHERE state = 'inactive'`); n != 8 {
-			t.Fatalf("inactive = %d, want 8", n)
+		if n := countRows(t, d, `SELECT COUNT(*) FROM obligations WHERE state = 'inactive'`); n != 16 {
+			t.Fatalf("inactive = %d, want 16", n)
 		}
 	})
 

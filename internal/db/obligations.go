@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -17,11 +19,18 @@ import (
 // Slice 1 carries only the two ACK norms and reproduces the legacy ACK checker
 // byte-for-byte, quirks Q1-Q4 included.
 
-// Norm ids seeded by migrate.
+// Norm ids seeded by migrate: the ACK escalation chain, rungs 0..3
+// (DEC-wraith-obligations-1 slice 2a, max_depth 3).
 const (
-	NormAckEscalate = "ack.escalate"
-	NormAckNotify   = "ack.notify"
+	NormAckNotify   = "ack.notify"   // rung 0: dispatcher, fyi P2 no-wake
+	NormAckEscalate = "ack.escalate" // rung 1: dispatcher, P1
+	NormAckManager  = "ack.manager"  // rung 2: reports_to / executive / founder
+	NormAckHuman    = "ack.human"    // rung 3: the human, last rung only
 )
+
+// AckNormDepth is each ACK norm's escalation depth. Firing a rung closes every
+// lower rung still active (Q1 retired: no notify after an escalate).
+var AckNormDepth = map[string]int{NormAckNotify: 0, NormAckEscalate: 1, NormAckManager: 2, NormAckHuman: 3}
 
 // Closed enums (slice 1 values only; a new value is a code change + review).
 // The engine runs a norm only when every one of its trigger / what / while /
@@ -32,6 +41,7 @@ const (
 	WhatTaskLeftPending       = "task_left_pending"
 	WhileTaskPendingLive      = "task_pending_live"
 	BearerAssigneeProfile     = "assignee_profile"
+	BearerProfilePool         = "profile_pool" // unassigned: any agent of the profile discharges
 )
 
 // ackNormKnown restricts a query on norms n to the closed-enum ACK shape.
@@ -47,8 +57,9 @@ const (
 	ObligationInactive    = "inactive"
 )
 
-// ackMarkColumn maps an ACK norm to the legacy tasks column its transition
-// CASes. Whitelist: the column name is spliced into SQL.
+// ackMarkColumn maps the rung-0/1 ACK norms to the legacy tasks column their
+// transition also CASes (kept for UI/back-compat). Whitelist: the column name
+// is spliced into SQL. Rungs 2/3 have no legacy column.
 var ackMarkColumn = map[string]string{
 	NormAckEscalate: "ack_escalated_at",
 	NormAckNotify:   "ack_notified_at",
@@ -64,6 +75,7 @@ const ackCandidate = `t.status = 'pending' AND t.archived_at IS NULL AND t.dispa
 type TaskObligation struct {
 	ID               string
 	NormID           string
+	Depth            int
 	SanctionTemplate string
 	TaskID           string
 	Project          string
@@ -81,33 +93,60 @@ func bindingsHash(normID, subjectKind, subjectID string, depth int) string {
 // InstantiateTaskAck opens the ACK obligations of every task the legacy
 // checker would read at this cutoff (now - ack_notify_age) that has none yet.
 // A norm whose legacy mark is already set opens pre-closed as unfulfilled, so
-// historical marks never re-fire. Writes only when a task is newly eligible.
+// historical marks never re-fire; a chain rung (depth >= 2) of a task that was
+// already escalated opens pre-closed as inactive, so tasks escalated before the
+// chain existed never mass-fire it. The bearer is the assignee profile, or the
+// profile pool when nobody is assigned. Writes only when a task is newly
+// eligible.
 func (d *DB) InstantiateTaskAck(cutoff, now time.Time) (int, error) {
-	rows, err := d.ro().Query(`SELECT n.id, n.version, n.bearer_kind, t.id, t.project, COALESCE(t.profile_slug, ''),
-			t.ack_notified_at, t.ack_escalated_at
+	rows, err := d.ro().Query(`SELECT n.id, n.version, t.id, t.project, COALESCE(t.profile_slug, ''),
+			COALESCE(t.assigned_to, '') <> '', t.ack_notified_at, t.ack_escalated_at,
+			COALESCE((SELECT group_concat(e.norm_id) FROM obligations e
+				WHERE e.subject_kind = ? AND e.subject_id = t.id AND e.state = ?), '')
 		FROM tasks t JOIN norms n ON `+ackNormKnown+` AND (n.project IS NULL OR n.project = t.project)
 		WHERE `+ackCandidate+`
 		  AND NOT EXISTS (SELECT 1 FROM obligations o WHERE o.norm_id = n.id AND o.subject_kind = ? AND o.subject_id = t.id)`,
-		cutoff.UTC().Format(memoryTimeFmt), SubjectTask)
+		SubjectTask, ObligationUnfulfilled, cutoff.UTC().Format(memoryTimeFmt), SubjectTask)
 	if err != nil {
 		return 0, fmt.Errorf("obligation candidates: %w", err)
 	}
 	type pending struct {
 		normID, bearerKind, taskID, project, profile string
 		version                                      int
-		mark                                         sql.NullString
+		preState, preReason                          string
+		preClosedAt                                  sql.NullString
 	}
 	var todo []pending
 	for rows.Next() {
 		var p pending
+		var assigned bool
 		var notified, escalated sql.NullString
-		if err := rows.Scan(&p.normID, &p.version, &p.bearerKind, &p.taskID, &p.project, &p.profile, &notified, &escalated); err != nil {
+		var fired string // norms of this task already fired (unfulfilled)
+		if err := rows.Scan(&p.normID, &p.version, &p.taskID, &p.project, &p.profile, &assigned,
+			&notified, &escalated, &fired); err != nil {
 			_ = rows.Close()
 			return 0, fmt.Errorf("scan obligation candidate: %w", err)
 		}
-		p.mark = notified
-		if p.normID == NormAckEscalate {
-			p.mark = escalated
+		p.bearerKind = BearerProfilePool
+		if assigned {
+			p.bearerKind = BearerAssigneeProfile
+		}
+		highestFired := -1
+		for _, n := range strings.Split(fired, ",") {
+			if d, ok := AckNormDepth[n]; ok && d > highestFired {
+				highestFired = d
+			}
+		}
+		depth := AckNormDepth[p.normID]
+		switch {
+		case p.normID == NormAckNotify && notified.Valid:
+			p.preState, p.preClosedAt = ObligationUnfulfilled, notified
+		case p.normID == NormAckEscalate && escalated.Valid:
+			p.preState, p.preClosedAt = ObligationUnfulfilled, escalated
+		case depth >= 2 && (escalated.Valid || highestFired >= AckNormDepth[NormAckEscalate]):
+			p.preState, p.preReason = ObligationInactive, "escalated before chain"
+		case highestFired > depth:
+			p.preState, p.preReason = ObligationInactive, "superseded by a fired higher rung"
 		}
 		todo = append(todo, p)
 	}
@@ -124,15 +163,21 @@ func (d *DB) InstantiateTaskAck(cutoff, now time.Time) (int, error) {
 	ts := now.UTC().Format(memoryTimeFmt)
 	opened := 0
 	for _, p := range todo {
-		state, closedAt := ObligationActive, sql.NullString{}
-		if p.mark.Valid {
-			state, closedAt = ObligationUnfulfilled, p.mark
+		state, closedAt, evidence := ObligationActive, p.preClosedAt, sql.NullString{}
+		if p.preState != "" {
+			state = p.preState
 		}
+		if state == ObligationInactive {
+			closedAt = sql.NullString{String: ts, Valid: true}
+			evidence = sql.NullString{String: fmt.Sprintf(`{"reason":%q}`, p.preReason), Valid: true}
+		}
+		depth := AckNormDepth[p.normID]
 		res, err := tx.Exec(`INSERT OR IGNORE INTO obligations
-			(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state, created_at, closed_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			uuid.New().String(), p.project, p.normID, p.version, bindingsHash(p.normID, SubjectTask, p.taskID, 0),
-			SubjectTask, p.taskID, p.bearerKind, p.profile, state, ts, closedAt)
+			(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state, created_at, closed_at,
+			 escalation_depth, discharge_evidence)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			uuid.New().String(), p.project, p.normID, p.version, bindingsHash(p.normID, SubjectTask, p.taskID, depth),
+			SubjectTask, p.taskID, p.bearerKind, p.profile, state, ts, closedAt, depth, evidence)
 		if err != nil {
 			return 0, fmt.Errorf("insert obligation: %w", err)
 		}
@@ -146,10 +191,10 @@ func (d *DB) InstantiateTaskAck(cutoff, now time.Time) (int, error) {
 }
 
 // ActiveTaskObligations lists the active ACK obligations of the tasks the
-// legacy checker would read at this cutoff, per task in norm eval_order, so
-// the sweeper can reproduce its if/else-if (one sanction per task per tick).
+// legacy checker would read at this cutoff, per task highest rung first (norm
+// eval_order), so the sweeper fires at most one sanction per task per tick.
 func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
-	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, n.sanction_template, t.id, t.project, COALESCE(t.title, ''),
+	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, o.escalation_depth, n.sanction_template, t.id, t.project, COALESCE(t.title, ''),
 			COALESCE(t.profile_slug, ''), t.dispatched_by, t.dispatched_at
 		FROM obligations o
 		JOIN norms n ON n.id = o.norm_id AND `+ackNormKnown+`
@@ -164,7 +209,7 @@ func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
 	var out []TaskObligation
 	for rows.Next() {
 		var o TaskObligation
-		if err := rows.Scan(&o.ID, &o.NormID, &o.SanctionTemplate, &o.TaskID, &o.Project, &o.Title,
+		if err := rows.Scan(&o.ID, &o.NormID, &o.Depth, &o.SanctionTemplate, &o.TaskID, &o.Project, &o.Title,
 			&o.ProfileSlug, &o.DispatchedBy, &o.DispatchedAt); err != nil {
 			return nil, fmt.Errorf("scan active obligation: %w", err)
 		}
@@ -173,13 +218,14 @@ func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
 	return out, rows.Err()
 }
 
-// TransitionTaskAck moves an active ACK obligation to unfulfilled and sets its
-// legacy tasks mark, in one writer tx. Both are CASes: the obligation must
-// still be active, and the task must pass the exact legacy guard (pending, not
-// a run container, mark unset). If either matches 0 rows nothing lands and ok
-// is false — the caller must not fire the sanction.
-func (d *DB) TransitionTaskAck(obligationID, normID, taskID string, deadline, now time.Time) (ok bool, err error) {
-	col, known := ackMarkColumn[normID]
+// TransitionTaskAck fires one ACK rung, in one writer tx: the obligation CAS
+// (active -> unfulfilled), the task guard (still pending, not a run container;
+// for rungs 0/1 the exact legacy tasks.ack_*_at CAS), then every lower rung of
+// the task still active closes inactive (Q1 retired), as do the alsoClose norms
+// (rung 2 landing on the founder closes rung 3). If a CAS matches 0 rows
+// nothing lands and ok is false — the caller must not fire the sanction.
+func (d *DB) TransitionTaskAck(obligationID, normID, taskID string, deadline, now time.Time, alsoClose ...string) (ok bool, err error) {
+	depth, known := AckNormDepth[normID]
 	if !known {
 		return false, fmt.Errorf("transition: %q is not an ACK norm", normID)
 	}
@@ -197,13 +243,39 @@ func (d *DB) TransitionTaskAck(obligationID, normID, taskID string, deadline, no
 	if n, _ := res.RowsAffected(); n == 0 {
 		return false, nil
 	}
-	res, err = tx.Exec(`UPDATE tasks SET `+col+` = ? WHERE id = ? AND status = 'pending'
-		AND (run_state IS NULL OR run_state = '') AND `+col+` IS NULL`, ts, taskID)
-	if err != nil {
-		return false, fmt.Errorf("transition legacy mark: %w", err)
+	if col, legacy := ackMarkColumn[normID]; legacy {
+		res, err = tx.Exec(`UPDATE tasks SET `+col+` = ? WHERE id = ? AND status = 'pending'
+			AND (run_state IS NULL OR run_state = '') AND `+col+` IS NULL`, ts, taskID)
+		if err != nil {
+			return false, fmt.Errorf("transition legacy mark: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return false, nil
+		}
+	} else {
+		// No legacy column: re-check the task under the writer lock instead.
+		var live int
+		err := tx.QueryRow(`SELECT 1 FROM tasks WHERE id = ? AND status = 'pending'
+			AND (run_state IS NULL OR run_state = '') AND archived_at IS NULL`, taskID).Scan(&live)
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("transition task guard: %w", err)
+		}
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return false, nil
+	evidence := fmt.Sprintf(`{"superseded_by":%q}`, normID)
+	if _, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ?
+		WHERE subject_kind = ? AND subject_id = ? AND state = ? AND escalation_depth < ?`,
+		ObligationInactive, ts, evidence, SubjectTask, taskID, ObligationActive, depth); err != nil {
+		return false, fmt.Errorf("close lower rungs: %w", err)
+	}
+	for _, other := range alsoClose {
+		if _, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ?
+			WHERE subject_kind = ? AND subject_id = ? AND norm_id = ? AND state = ?`,
+			ObligationInactive, ts, evidence, SubjectTask, taskID, other, ObligationActive); err != nil {
+			return false, fmt.Errorf("close %s: %w", other, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("transition commit: %w", err)

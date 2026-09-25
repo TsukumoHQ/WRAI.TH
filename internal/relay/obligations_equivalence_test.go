@@ -23,6 +23,12 @@ import (
 // ack_notified_at / ack_escalated_at values on every task, quirks Q1-Q4
 // included. It is part of the default `go test` run on purpose: every PR that
 // touches obligations runs it until slice 2 retires a quirk explicitly.
+//
+// Slice 2a (task 6b4369f0) retired Q1/Q2/Q4. Notices are compared without the
+// message id (the engine now pushes the durable message's id, the legacy push
+// carried the task id), and exactly one expected difference is applied to the
+// oracle: a legacy notify that follows an escalate for the same task (Q1) is
+// dropped, together with the ack_notified_at mark it set.
 
 // --- oracle: legacy checkUnackedTasks from main 5845c2f, verbatim ---
 
@@ -105,6 +111,37 @@ func (r *recordingNotifier) drain() []string {
 	return out
 }
 
+// withoutMessageID strips the trailing message id from recorded notices.
+func withoutMessageID(notices []string) []string {
+	out := make([]string, len(notices))
+	for i, n := range notices {
+		out[i] = n[:strings.LastIndex(n, "|")]
+	}
+	return out
+}
+
+// retireQ1 applies the one expected slice-2a difference to the oracle's tick:
+// it drops a legacy notify for a task already escalated on an earlier tick,
+// and records the task so its ack_notified_at is not compared. escalated holds
+// the task ids the oracle escalated so far (its push carries the task id).
+func retireQ1(notices []string, escalated, retired map[string]bool) []string {
+	var kept []string
+	for _, n := range notices {
+		taskID := n[strings.LastIndex(n, "|")+1:]
+		if strings.Contains(n, "|Task '") && escalated[taskID] {
+			retired[taskID] = true
+			continue
+		}
+		kept = append(kept, n)
+	}
+	for _, n := range notices {
+		if strings.Contains(n, "|ESCALATED: ") {
+			escalated[n[strings.LastIndex(n, "|")+1:]] = true
+		}
+	}
+	return kept
+}
+
 // twin is one side of the comparison: a relay DB plus a raw handle for test
 // fixtures (backdating, run_state, settings) that the DB API does not expose.
 type twin struct {
@@ -135,7 +172,7 @@ func (w *twin) exec(t *testing.T, q string, args ...any) {
 	}
 }
 
-func (w *twin) marks(t *testing.T) string {
+func (w *twin) marks(t *testing.T, retiredQ1 map[string]bool) string {
 	t.Helper()
 	rows, err := w.raw.Query(`SELECT id, COALESCE(ack_notified_at, '-'), COALESCE(ack_escalated_at, '-') FROM tasks ORDER BY id`)
 	if err != nil {
@@ -147,6 +184,9 @@ func (w *twin) marks(t *testing.T) string {
 		var id, n, e string
 		if err := rows.Scan(&id, &n, &e); err != nil {
 			t.Fatalf("scan marks: %v", err)
+		}
+		if retiredQ1[id] {
+			n = "(Q1 retired)"
 		}
 		fmt.Fprintf(&b, "%s:notified=%s,escalated=%s;", id, n, e)
 	}
@@ -238,6 +278,7 @@ func TestACKEquivalence(t *testing.T) {
 	for _, sc := range scenarios {
 		t.Run(sc.name, func(t *testing.T) {
 			legacy, engine := newTwin(t, "legacy"), newTwin(t, "engine")
+			escalated, retired := map[string]bool{}, map[string]bool{}
 			for i, steps := range sc.ticks {
 				for _, s := range steps {
 					s(t, legacy)
@@ -251,11 +292,12 @@ func TestACKEquivalence(t *testing.T) {
 				legacyCheckUnackedTasks(legacy.d, legacy.rec)
 				evaluateObligations(engine.d, engine.rec, tick)
 
-				ln, en := legacy.rec.drain(), engine.rec.drain()
+				ln := withoutMessageID(retireQ1(legacy.rec.drain(), escalated, retired))
+				en := withoutMessageID(engine.rec.drain())
 				if strings.Join(ln, "\n") != strings.Join(en, "\n") {
 					t.Fatalf("tick %d notices differ:\nlegacy %q\nengine %q", i+1, ln, en)
 				}
-				if lm, em := legacy.marks(t), engine.marks(t); lm != em {
+				if lm, em := legacy.marks(t, retired), engine.marks(t, retired); lm != em {
 					t.Fatalf("tick %d marks differ:\nlegacy %s\nengine %s", i+1, lm, em)
 				}
 			}
@@ -271,15 +313,15 @@ func TestACKEquivalenceCoversBothSanctions(t *testing.T) {
 	seedTask("e", "pending", ago(50*time.Minute))(t, w)
 	evaluateObligations(w.d, w.rec, time.Now().UTC())
 	got := strings.Join(w.rec.drain(), "\n")
-	if !strings.Contains(got, "p1|cto|relay|Task 'title n' no ACK after 20min. Profile: dev|n") ||
-		!strings.Contains(got, "p1|cto|relay|ESCALATED: Task 'title e' no ACK for 50min. Consider re-dispatching.|e") {
+	if !strings.Contains(got, "p1|cto|relay|Task 'title n' no ACK after 20min. Profile: dev|") ||
+		!strings.Contains(got, "p1|cto|relay|ESCALATED: Task 'title e' no ACK for 50min. Consider re-dispatching.|") {
 		t.Fatalf("expected one notify and one escalate, got:\n%s", got)
 	}
 }
 
 // TestObligationsOneSanctionPerTick: a task past both thresholds gets exactly
-// one sanction per tick (escalate first, the late notify on the next tick),
-// never two in the same tick — the legacy if/else-if (Q1/Q3).
+// one sanction per tick (the escalate), never two in the same tick (Q3). Since
+// slice 2a the late notify of Q1 is retired, so later ticks stay silent.
 func TestObligationsOneSanctionPerTick(t *testing.T) {
 	w := newTwin(t, "one")
 	seedTask("t1", "pending", ago(50*time.Minute))(t, w)
@@ -291,10 +333,7 @@ func TestObligationsOneSanctionPerTick(t *testing.T) {
 	if len(perTick[0]) != 1 || !strings.Contains(perTick[0][0], "ESCALATED") {
 		t.Fatalf("tick 1 = %q, want exactly the escalate", perTick[0])
 	}
-	if len(perTick[1]) != 1 || !strings.Contains(perTick[1][0], "no ACK after") {
-		t.Fatalf("tick 2 = %q, want exactly the late notify (Q1)", perTick[1])
-	}
-	if len(perTick[2]) != 0 {
-		t.Fatalf("tick 3 = %q, want nothing", perTick[2])
+	if len(perTick[1]) != 0 || len(perTick[2]) != 0 {
+		t.Fatalf("ticks 2-3 = %q / %q, want nothing (Q1 retired)", perTick[1], perTick[2])
 	}
 }

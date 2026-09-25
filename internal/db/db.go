@@ -803,6 +803,20 @@ func migrate(conn *sql.DB) error {
 		('ack.notify', 'task', 'task_pending_unclaimed', 'task_left_pending', 'task_pending_live', 'time', 'dispatched_at',
 		 'ack_notify_age', 900, 60, 86400, 'assignee_profile', 'notify_dispatcher_push',
 		 'Task ''%s'' no ACK after %dmin. Profile: %s', 2)`)
+	// Slice 1 stored escalation_depth 0 on every ACK obligation; the chain's
+	// lower-rung close relies on the real depth. Idempotent backfill.
+	_, _ = conn.Exec(`UPDATE obligations SET escalation_depth = 1 WHERE norm_id = 'ack.escalate' AND escalation_depth = 0`)
+	// Rungs 2/3 of the ACK chain (slice 2a): a resolvable agent before the
+	// human, the human only last. Own settings, independent of the 1/2 ages.
+	_, _ = conn.Exec(`INSERT OR IGNORE INTO norms (id, subject_kind, trigger, what, while_pred, deadline_kind, deadline_anchor,
+		deadline_setting, deadline_default_s, deadline_min_s, deadline_max_s, bearer_kind, sanction, sanction_template, max_depth, eval_order)
+		VALUES
+		('ack.manager', 'task', 'task_pending_unclaimed', 'task_left_pending', 'task_pending_live', 'time', 'dispatched_at',
+		 'ack_manager_age', 5400, 60, 172800, 'assignee_profile', 'message',
+		 'Task ''%s'' still no ACK after %dmin; dispatcher %s has not re-dispatched it.', 3, 0),
+		('ack.human', 'task', 'task_pending_unclaimed', 'task_left_pending', 'task_pending_live', 'time', 'dispatched_at',
+		 'ack_human_age', 14400, 60, 172800, 'assignee_profile', 'message',
+		 'Task ''%s'' still no ACK after %dmin; the agent escalation chain did not resolve it.', 3, -1)`)
 
 	// Backfill deliveries for existing messages
 	migrateDeliveries(conn)
