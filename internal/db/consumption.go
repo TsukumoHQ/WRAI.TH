@@ -376,6 +376,9 @@ type Consumer struct {
 	Since    string `json:"since"`
 	Basis    string `json:"basis"`
 	Active   bool   `json:"active"`
+	// ActiveTasks are the agent's non-terminal tasks whose claim stamp's
+	// basis (head or recall) holds a version of the key.
+	ActiveTasks []string `json:"active_tasks"`
 }
 
 // WhoConsumed lists the agents whose current head (or a recall snapshot that
@@ -461,7 +464,138 @@ func (d *DB) WhoConsumed(project, key, scope string, activeOnly bool) ([]Consume
 		seen[k] = len(out)
 		out = append(out, c)
 	}
-	return out, crow.Err()
+	if err := crow.Err(); err != nil {
+		return nil, err
+	}
+	_ = crow.Close()
+	for i := range out {
+		tasks, err := d.activeTasksHolding(out[i].Project, out[i].Agent, ph, ids)
+		if err != nil {
+			return nil, err
+		}
+		out[i].ActiveTasks = tasks
+	}
+	return out, nil
+}
+
+// activeTasksHolding lists the agent's non-terminal tasks whose claim stamp
+// (head snapshot or recall_through) holds one of the given memory ids.
+func (d *DB) activeTasksHolding(project, agent, ph string, ids []any) ([]string, error) {
+	args := append([]any{project, agent}, ids...)
+	rows, err := d.ro().Query(`SELECT DISTINCT tb.task_id FROM task_basis tb JOIN tasks t ON t.id = tb.task_id
+		WHERE tb.project = ? AND tb.agent_name = ? AND tb.event = 'claim'
+		  AND t.status NOT IN ('done', 'cancelled') AND t.archived_at IS NULL
+		  AND EXISTS (SELECT 1 FROM context_snapshots s JOIN consumption_edges e ON e.set_hash = s.set_hash
+		              WHERE s.id IN (tb.snapshot_id, tb.recall_through) AND e.memory_id IN (`+ph+`))
+		ORDER BY tb.task_id`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("who_consumed tasks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
+// Task basis events (task_basis.event).
+const (
+	BasisClaim    = "claim"
+	BasisComplete = "complete"
+)
+
+// StampTaskBasis records the knowledge basis an agent ran taskIDs on, for
+// event (claim | complete), in ONE writer tx (design 54e529d8 §4.3, ruling
+// f97023b7 OQ3: its own tx, after the transition). recallIDs are the agent's
+// drained buffered recalls: those not already in its head become one recall
+// snapshot first, so recall_through is exact at stamp time. Returns the basis
+// token "<knowledge_rev>:<head id8>" ("none" as the id when the agent never
+// booted with capture on).
+func (d *DB) StampTaskBasis(project, agent, event string, taskIDs, recallIDs []string) (string, error) {
+	if len(taskIDs) == 0 {
+		return "", nil
+	}
+	head, err := d.GetContextHead(project, agent)
+	if err != nil {
+		return "", fmt.Errorf("stamp head: %w", err)
+	}
+	ids := dedupIDs(recallIDs)
+	headID := ""
+	if head != nil {
+		headID = head.SnapshotID
+		held, err := d.setMembers(head.SetHash)
+		if err != nil {
+			return "", err
+		}
+		kept := ids[:0]
+		for _, id := range ids {
+			if !held[id] {
+				kept = append(kept, id)
+			}
+		}
+		ids = kept
+	}
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return "", fmt.Errorf("stamp begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	rev := knowledgeRevQ(tx)
+	var parent any
+	if headID != "" {
+		parent = headID
+	}
+	recallThrough := ""
+	if len(ids) > 0 {
+		setHash := ContextSetHash(ids)
+		if err := insertSetTx(tx, setHash, ids, now); err != nil {
+			return "", err
+		}
+		recallThrough = uuid.New().String()
+		if _, err := tx.Exec(`INSERT INTO context_snapshots (id, project, agent_name, kind, set_hash, parent_id, knowledge_rev, created_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, recallThrough, project, agent, SnapshotRecall, setHash, parent, rev, now); err != nil {
+			return "", fmt.Errorf("stamp recall snapshot: %w", err)
+		}
+	} else {
+		// The latest recall extending the current head (or head-less recalls).
+		q := `SELECT id FROM context_snapshots WHERE project = ? AND agent_name = ? AND kind = 'recall' AND parent_id IS NULL
+			ORDER BY created_at DESC, id DESC LIMIT 1`
+		args := []any{project, agent}
+		if headID != "" {
+			q = `SELECT id FROM context_snapshots WHERE project = ? AND agent_name = ? AND kind = 'recall' AND parent_id = ?
+				ORDER BY created_at DESC, id DESC LIMIT 1`
+			args = append(args, headID)
+		}
+		if err := tx.QueryRow(q, args...).Scan(&recallThrough); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("stamp recall_through: %w", err)
+		}
+	}
+	var snap, through any
+	if headID != "" {
+		snap = headID
+	}
+	if recallThrough != "" {
+		through = recallThrough
+	}
+	for _, taskID := range taskIDs {
+		if _, err := tx.Exec(`INSERT INTO task_basis (task_id, event, project, agent_name, snapshot_id, recall_through, knowledge_rev, stamped_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, taskID, event, project, agent, snap, through, rev, now); err != nil {
+			return "", fmt.Errorf("stamp task_basis: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("stamp commit: %w", err)
+	}
+	if headID == "" {
+		headID = "none"
+	}
+	return Basis(rev, headID), nil
 }
 
 // BasisMemory is one memory in an agent's context basis.

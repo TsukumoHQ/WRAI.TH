@@ -212,6 +212,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: rememberTool(), Handler: h.HandleRemember}, "memory"},
 		{server.ServerTool{Tool: recallDecisionsTool(), Handler: h.HandleRecallDecisions}, "memory"},
 		{server.ServerTool{Tool: knowledgeDeltaTool(), Handler: h.HandleKnowledgeDelta}, "memory"},
+		{server.ServerTool{Tool: whoConsumedTool(), Handler: h.HandleWhoConsumed}, "memory"},
 
 		{server.ServerTool{Tool: registerProfileTool(), Handler: h.HandleRegisterProfile}, "profiles"},
 		{server.ServerTool{Tool: getProfileTool(), Handler: h.HandleGetProfile}, "profiles"},

@@ -295,7 +295,9 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
 	pushStatusAsync(h.getConnector(), task, "accepted", nil)
-	return h.resultJSONTracked(project, agent, "claim_task", task)
+	// Basis stamp in its own tx after the transition (design 54e529d8 §4.3).
+	basis := h.stampBasis(project, agent, db.BasisClaim, []string{task.ID})
+	return h.resultJSONTracked(project, agent, "claim_task", withBasis(task, basis))
 }
 
 // HandlePromoteTask lifts a groomed 'backlog' task to 'pending' (claimable) and
@@ -378,6 +380,11 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 		return toolResultError(err.Error()), nil
 	}
 
+	// start_task from pending is an implicit claim: it gets a claim stamp.
+	fromPending := false
+	if prev, _ := h.db.GetTask(taskID, project); prev != nil && prev.Status == "pending" {
+		fromPending = true
+	}
 	task, err := h.db.StartTask(taskID, agent, project)
 	if err != nil {
 		return taskOpError(err, "failed to start task: %v", err), nil
@@ -385,6 +392,10 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 	h.events.Emit(MCPEvent{Type: "task", Action: "start", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.in_progress", "start", project, task)
 	pushStatusAsync(h.getConnector(), task, "in-progress", nil)
+	if fromPending {
+		basis := h.stampBasis(project, agent, db.BasisClaim, []string{task.ID})
+		return h.resultJSONTracked(project, agent, "start_task", withBasis(task, basis))
+	}
 	return h.resultJSONTracked(project, agent, "start_task", task)
 }
 
@@ -768,7 +779,8 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 		}
 	}
 
-	return h.resultJSONTracked(project, agent, "complete_task", task)
+	basis := h.stampBasis(project, agent, db.BasisComplete, []string{task.ID})
+	return h.resultJSONTracked(project, agent, "complete_task", withBasis(task, basis))
 }
 
 func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1279,10 +1291,13 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 		h.events.Emit(MCPEvent{Type: "task", Action: "complete", Agent: agent, Project: project, Label: task.Title})
 	}
 
+	// One stamp tx for the whole batch.
+	basis := h.stampBasis(project, agent, db.BasisComplete, completed)
 	return h.resultJSONTracked(project, agent, "batch_complete_tasks", map[string]any{
 		"completed": completed,
 		"errors":    errors,
 		"total":     len(items),
+		"basis":     basis,
 	})
 }
 
