@@ -293,3 +293,59 @@ func TestTaskGraph(t *testing.T) {
 
 // result drops a handler's (always nil) error so a call nests in parseJSON.
 func result(res *mcp.CallToolResult, _ error) *mcp.CallToolResult { return res }
+
+// TestReleaseTaskOverMCP: claim_task release=true hands an accepted task back
+// to pending and re-announces it to the profile (not to the releaser); a
+// bystander is FORBIDDEN and a started task is a TASK_STATE_CONFLICT.
+func TestReleaseTaskOverMCP(t *testing.T) {
+	h := testHandlers(t)
+	prof := "dev"
+	for _, name := range []string{"w1", "w2"} {
+		if _, _, err := h.db.RegisterAgent("p1", name, "worker", "", nil, &prof, false, nil, "[]", 0, db.RegisterOptions{ProfileSlugSet: true}); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	res, _ := h.HandleDispatchTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "profile": "dev", "title": "hand me back"}))
+	id := parseJSON(t, res)["task"].(map[string]any)["id"].(string)
+	parseJSON(t, result(h.HandleClaimTask(ctx, call(map[string]any{"project": "p1", "as": "w1", "task_id": id}))))
+
+	announced := func() int {
+		n := 0
+		for _, ev := range h.events.Recent("p1", 0) {
+			if ev.Type == "task.dispatched" && ev.Semantic["task_id"] == id {
+				n++
+			}
+		}
+		return n
+	}
+	unread := func(agent string) int {
+		n, err := h.db.UnreadCountForAgent("p1", agent)
+		if err != nil {
+			t.Fatalf("unread %s: %v", agent, err)
+		}
+		return n
+	}
+
+	denied, _ := h.HandleClaimTask(ctx, call(map[string]any{"project": "p1", "as": "w2", "task_id": id, "release": true}))
+	if msg := expectError(t, denied); !strings.Contains(msg, CodeForbidden) {
+		t.Fatalf("bystander release: %s, want a FORBIDDEN error", msg)
+	}
+
+	before, beforeW1, beforeW2 := announced(), unread("w1"), unread("w2")
+	got := parseJSON(t, result(h.HandleClaimTask(ctx, call(map[string]any{"project": "p1", "as": "w1", "task_id": id, "release": true}))))
+	if got["status"] != "pending" || got["claimed_by"] != nil {
+		t.Fatalf("released task = status %v claimed_by %v, want pending/nil", got["status"], got["claimed_by"])
+	}
+	if n := announced() - before; n != 1 {
+		t.Fatalf("release emitted %d task.dispatched, want 1", n)
+	}
+	if d1, d2 := unread("w1")-beforeW1, unread("w2")-beforeW2; d1 != 0 || d2 != 1 {
+		t.Fatalf("deliveries w1=%d w2=%d, want 0 to the releaser and 1 to the other profile agent", d1, d2)
+	}
+
+	parseJSON(t, result(h.HandleStartTask(ctx, call(map[string]any{"project": "p1", "as": "w2", "task_id": id}))))
+	started, _ := h.HandleClaimTask(ctx, call(map[string]any{"project": "p1", "as": "w2", "task_id": id, "release": true}))
+	if msg := expectError(t, started); !strings.Contains(msg, db.CodeTaskStateConflict) {
+		t.Fatalf("release of an in-progress task: %s, want TASK_STATE_CONFLICT", msg)
+	}
+}

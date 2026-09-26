@@ -342,7 +342,8 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
-	if req.GetBool("next", false) && taskID == "" {
+	release := req.GetBool("release", false)
+	if req.GetBool("next", false) && taskID == "" && !release {
 		return h.claimNext(project, agent, req.GetString("sort", db.SortPriority))
 	}
 	if taskID == "" {
@@ -351,6 +352,9 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
 		return toolResultError(err.Error()), nil
+	}
+	if release {
+		return h.releaseTask(project, agent, taskID)
 	}
 
 	// Readiness is a projection, not a gate (ruling b3a6ab43 OQ3): a claim of a
@@ -363,6 +367,32 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 		return taskOpError(err, "failed to claim task: %v", err), nil
 	}
 	return h.claimed(project, agent, task, blockers)
+}
+
+// releaseTask hands an accepted, not-started task back to pending
+// (claim_task release=true): holder or dispatcher only. The task re-enters the
+// claimable pool, so it is announced like a fresh dispatch unless a
+// prerequisite still holds it (the release then comes with the hold).
+func (h *Handlers) releaseTask(project, agent, taskID string) (*mcp.CallToolResult, error) {
+	task, err := h.db.ReleaseTask(taskID, agent, project)
+	if errors.Is(err, db.ErrTaskReleaseForbidden) {
+		return validationError(CodeForbidden, err.Error()), nil
+	}
+	if err != nil {
+		return taskOpError(err, "failed to release task: %v", err), nil
+	}
+	if task.LeaseTransfer != nil {
+		emitTaskEvent(h.events, "task.lease_transferred", "release", project, task, map[string]any{
+			"from":   task.LeaseTransfer.From,
+			"to":     task.LeaseTransfer.To,
+			"reason": task.LeaseTransfer.Reason,
+		})
+	}
+	pushStatusAsync(h.getConnector(), task, "pending", nil)
+	if !h.db.TaskHeld(project, task.ID) {
+		h.announceClaimable(project, agent, task.ProfileSlug, task.Title, task.Description, task.Priority, task)
+	}
+	return h.resultJSONTracked(project, agent, "claim_task", task)
 }
 
 // claimed emits the claim signals and renders the claim_task response, with

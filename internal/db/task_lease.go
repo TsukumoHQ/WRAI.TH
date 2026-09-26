@@ -2,7 +2,9 @@ package db
 
 import (
 	"agent-relay/internal/models"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -153,6 +155,66 @@ func (d *DB) ReclaimTask(taskID, newAgent, project string) (*models.Task, error)
 	fresh, err := d.GetTask(taskID, project)
 	if err != nil || fresh == nil {
 		return nil, fmt.Errorf("reclaim task: reload: %w", err)
+	}
+	fresh.LeaseTransfer = transfer
+	return fresh, nil
+}
+
+// ErrTaskReleaseForbidden: release_task by an agent that is neither the task's
+// holder nor its dispatcher. Nothing is written.
+var ErrTaskReleaseForbidden = errors.New("only the task's holder or its dispatcher can release it")
+
+// ReleaseTask hands a claimed-but-not-started task back: accepted → pending,
+// claim + lease cleared, pending_since = now so the ACK clock restarts (task
+// c933b2f1 semantics). Only the holder (claimed_by) or the dispatcher may
+// release; any other status is TASK_STATE_CONFLICT (an in-progress task is
+// work under way, not a handback).
+//
+// Atomicity: one UPDATE, CAS-guarded on (id, project, status='accepted',
+// claimed_by) as read, so a start_task or a second release racing this one
+// sees 0 rows and gets TASK_STATE_CONFLICT; exactly one of them wins. The
+// returned task carries LeaseTransfer{from: holder, to: "", reason: released}.
+func (d *DB) ReleaseTask(taskID, agent, project string) (*models.Task, error) {
+	task, err := d.GetTask(taskID, project)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil {
+		return nil, newTaskError(CodeTaskNotFound, "task not found: %s", taskID)
+	}
+	if task.Source == "linear" {
+		return nil, errLinearReadOnly
+	}
+	if task.Status != "accepted" {
+		return nil, newTaskError(CodeTaskStateConflict,
+			"task %s is %q; only an accepted (claimed, not started) task can be released", taskID, task.Status)
+	}
+	holder := strVal(task.ClaimedBy)
+	if !strings.EqualFold(agent, holder) && !strings.EqualFold(agent, task.DispatchedBy) {
+		return nil, fmt.Errorf("release task %s: %w", taskID, ErrTaskReleaseForbidden)
+	}
+
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	res, err := d.writerExec(
+		`UPDATE tasks SET status = 'pending', assigned_to = NULL, accepted_at = NULL, claimed_by = NULL, claimed_at = NULL,
+		   lease_holder = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL, pending_since = ?, last_activity_at = ?
+		 WHERE id = ? AND project = ? AND status = 'accepted' AND COALESCE(claimed_by,'') = ?`,
+		now, now, taskID, project, holder,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("release task: %w", err)
+	}
+	if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
+		return nil, newTaskError(CodeTaskStateConflict,
+			"task %s changed before release by %q could apply", taskID, agent)
+	}
+
+	transfer := &models.LeaseTransfer{From: holder, To: "", Reason: "released"}
+	d.auditLeaseTransfer(project, taskID, agent, transfer)
+
+	fresh, err := d.GetTask(taskID, project)
+	if err != nil || fresh == nil {
+		return nil, fmt.Errorf("release task: reload: %w", err)
 	}
 	fresh.LeaseTransfer = transfer
 	return fresh, nil

@@ -502,6 +502,7 @@ func claimTaskTool() mcp.Tool {
 		mcp.WithString("task_id", mcp.Description("Task ID, or next")),
 		mcp.WithBoolean("next", mcp.Description("Claim your profile's next ready task")),
 		mcp.WithString("sort", mcp.Enum("priority", "oldest", "unblock_impact")),
+		mcp.WithBoolean("release", mcp.Description("Give back an accepted task")),
 	)
 }
 

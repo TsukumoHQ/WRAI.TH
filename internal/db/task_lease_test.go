@@ -1,6 +1,7 @@
 package db
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -278,4 +279,144 @@ func TestDoubleClaimTypedConflict(t *testing.T) {
 	if !ok || te.Code != CodeTaskStateConflict {
 		t.Fatalf("want typed %s, got %v", CodeTaskStateConflict, err)
 	}
+}
+
+// releaseState reads the columns a release must clear, straight from the row.
+func releaseState(t *testing.T, d *DB, id string) (status, claimedBy, assignedTo, holder, pendingSince string) {
+	t.Helper()
+	if err := d.conn.QueryRow(`SELECT status, COALESCE(claimed_by,''), COALESCE(assigned_to,''),
+		COALESCE(lease_holder,''), COALESCE(pending_since,'') FROM tasks WHERE id = ?`, id).
+		Scan(&status, &claimedBy, &assignedTo, &holder, &pendingSince); err != nil {
+		t.Fatalf("read %s: %v", id, err)
+	}
+	return
+}
+
+func releaseAudits(t *testing.T, d *DB, id, actor string) int {
+	t.Helper()
+	var n int
+	if err := d.conn.QueryRow(`SELECT count(*) FROM audit_log WHERE resource_id = ? AND action = 'lease_transferred'
+		AND reason = 'released' AND actor = ?`, id, actor).Scan(&n); err != nil {
+		t.Fatalf("count audits: %v", err)
+	}
+	return n
+}
+
+// TestReleaseTask covers claim_task release=true at the db layer: holder or
+// dispatcher only, accepted only, everything cleared and audited, CAS-safe.
+func TestReleaseTask(t *testing.T) {
+	const project, holder = "p1", "worker-a"
+
+	t.Run("ReleaseByHolderReturnsToPending", func(t *testing.T) {
+		d := testDB(t)
+		id := dispatchClaimed(t, d, project, holder)
+		before := time.Now().UTC().Format(memoryTimeFmt)
+		got, err := d.ReleaseTask(id, holder, project)
+		if err != nil {
+			t.Fatalf("release: %v", err)
+		}
+		status, claimedBy, assignedTo, lease, pendingSince := releaseState(t, d, id)
+		if status != "pending" || claimedBy != "" || assignedTo != "" || lease != "" {
+			t.Fatalf("status=%s claimed_by=%q assigned_to=%q lease=%q, want pending and all cleared", status, claimedBy, assignedTo, lease)
+		}
+		if pendingSince < before {
+			t.Errorf("pending_since=%s, want reset to >= %s (ACK clock restarts)", pendingSince, before)
+		}
+		if got.LeaseTransfer == nil || got.LeaseTransfer.From != holder || got.LeaseTransfer.Reason != "released" {
+			t.Errorf("LeaseTransfer = %+v, want from %s reason released", got.LeaseTransfer, holder)
+		}
+		if n := releaseAudits(t, d, id, holder); n != 1 {
+			t.Errorf("release audit rows naming %s = %d, want 1", holder, n)
+		}
+	})
+
+	t.Run("ReleaseByDispatcher", func(t *testing.T) {
+		d := testDB(t)
+		id := dispatchClaimed(t, d, project, holder)
+		if _, err := d.ReleaseTask(id, "dispatcher", project); err != nil {
+			t.Fatalf("release by dispatcher: %v", err)
+		}
+		if status, _, _, _, _ := releaseState(t, d, id); status != "pending" {
+			t.Fatalf("status=%s, want pending", status)
+		}
+		if n := releaseAudits(t, d, id, "dispatcher"); n != 1 {
+			t.Errorf("release audit rows naming dispatcher = %d, want 1", n)
+		}
+	})
+
+	t.Run("ReleaseByOtherRefused", func(t *testing.T) {
+		d := testDB(t)
+		id := dispatchClaimed(t, d, project, holder)
+		_, err := d.ReleaseTask(id, "bystander", project)
+		if !errors.Is(err, ErrTaskReleaseForbidden) {
+			t.Fatalf("err = %v, want ErrTaskReleaseForbidden", err)
+		}
+		status, claimedBy, _, lease, _ := releaseState(t, d, id)
+		if status != "accepted" || claimedBy != holder || lease != holder {
+			t.Fatalf("status=%s claimed_by=%q lease=%q, want accepted/%s/%s unchanged", status, claimedBy, lease, holder, holder)
+		}
+		if n := releaseAudits(t, d, id, "bystander"); n != 0 {
+			t.Errorf("audit rows = %d, want 0", n)
+		}
+	})
+
+	t.Run("ReleaseRefusedUnlessAccepted", func(t *testing.T) {
+		d := testDB(t)
+		started := dispatchClaimed(t, d, project, holder)
+		if _, err := d.StartTask(started, holder, project); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		done := dispatchClaimed(t, d, project, holder)
+		if _, err := d.CompleteTask(done, holder, project, nil); err != nil {
+			t.Fatalf("complete: %v", err)
+		}
+		pending, err := d.DispatchTask(project, "", "dispatcher", "never claimed", "", "P2", nil, nil, TypedTicket{}, false, nil)
+		if err != nil {
+			t.Fatalf("dispatch: %v", err)
+		}
+		for want, id := range map[string]string{"in-progress": started, "done": done, "pending": pending.ID} {
+			before, cb, _, lease, ps := releaseState(t, d, id)
+			_, err := d.ReleaseTask(id, "dispatcher", project)
+			var te *TaskError
+			if !errors.As(err, &te) || te.Code != CodeTaskStateConflict {
+				t.Errorf("%s: err = %v, want TASK_STATE_CONFLICT", want, err)
+			}
+			after, cb2, _, lease2, ps2 := releaseState(t, d, id)
+			if before != want || after != want || cb != cb2 || lease != lease2 || ps != ps2 {
+				t.Errorf("%s: row changed by a refused release (%s/%s/%s -> %s/%s/%s)", want, before, cb, lease, after, cb2, lease2)
+			}
+		}
+	})
+
+	t.Run("ReleaseStartRace", func(t *testing.T) {
+		d := testDB(t)
+		for i := 0; i < 25; i++ {
+			id := dispatchClaimed(t, d, project, holder)
+			var wg sync.WaitGroup
+			var relErr, startErr error
+			start := make(chan struct{})
+			wg.Add(2)
+			go func() { defer wg.Done(); <-start; _, relErr = d.ReleaseTask(id, "dispatcher", project) }()
+			go func() { defer wg.Done(); <-start; _, startErr = d.StartTask(id, holder, project) }()
+			close(start)
+			wg.Wait()
+			status, claimedBy, assignedTo, lease, _ := releaseState(t, d, id)
+			switch {
+			case relErr != nil && startErr != nil:
+				t.Fatalf("iter %d: both lost (release %v, start %v)", i, relErr, startErr)
+			case relErr == nil && startErr != nil:
+				// Release won: nothing of the claim survives.
+				if status != "pending" || claimedBy != "" || assignedTo != "" || lease != "" {
+					t.Fatalf("iter %d: release won but row is %s/%q/%q/%q", i, status, claimedBy, assignedTo, lease)
+				}
+			default:
+				// Start won the CAS (release refused), or ran after a completed
+				// release as a fresh implicit claim from pending: either way the
+				// row is a coherent in-progress task held by the starter.
+				if status != "in-progress" || assignedTo != holder || lease != holder {
+					t.Fatalf("iter %d: start succeeded but row is %s/%q/%q (release err %v)", i, status, assignedTo, lease, relErr)
+				}
+			}
+		}
+	})
 }
