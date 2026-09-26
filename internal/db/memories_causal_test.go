@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -29,6 +30,27 @@ func memCount(t *testing.T, d *DB, key string) int {
 		t.Fatalf("count: %v", err)
 	}
 	return n
+}
+
+// siblingOf is the live row an open sibling conflict pairs id with ("" when
+// id is in none): since T2 (design 8d107daa §4.4) a sibling is tracked in
+// knowledge_conflicts instead of memories.conflict_with.
+func siblingOf(t *testing.T, d *DB, id string) string {
+	t.Helper()
+	var members string
+	err := d.ro().QueryRow(`SELECT members FROM knowledge_conflicts WHERE kind = 'sibling' AND state IN ('detected', 'claimed')
+		AND EXISTS (SELECT 1 FROM json_each(members) WHERE value = ?)`, id).Scan(&members)
+	if err != nil {
+		return ""
+	}
+	var ids []string
+	_ = json.Unmarshal([]byte(members), &ids)
+	for _, m := range ids {
+		if m != id {
+			return m
+		}
+	}
+	return ""
 }
 
 func deref(p *string) string {
@@ -60,9 +82,11 @@ func TestCausal(t *testing.T) {
 			t.Fatalf("v2 was archived by a stale writer: status=%s archived_at=%s", got.Status, deref(got.ArchivedAt))
 		}
 		got := memRow(t, d, v3.ID)
-		if deref(got.ConflictWith) != v2.ID || deref(got.Supersedes) != v1.ID || got.Version != v2.Version+1 {
-			t.Fatalf("sibling = conflict_with %s supersedes %s version %d; want %s / %s / %d",
-				deref(got.ConflictWith), deref(got.Supersedes), got.Version, v2.ID, v1.ID, v2.Version+1)
+		if siblingOf(t, d, v3.ID) != v2.ID || got.ConflictWith != nil || deref(v3.ConflictWith) != v2.ID ||
+			deref(got.Supersedes) != v1.ID || got.Version != v2.Version+1 {
+			t.Fatalf("sibling = paired with %s (row conflict_with %s, result %s) supersedes %s version %d; want %s / <nil> / %s / %s / %d",
+				siblingOf(t, d, v3.ID), deref(got.ConflictWith), deref(v3.ConflictWith), deref(got.Supersedes), got.Version,
+				v2.ID, v2.ID, v1.ID, v2.Version+1)
 		}
 		live, err := d.GetMemory("p1", "a", "auth-policy", "project")
 		if err != nil || len(live) != 2 {
@@ -78,9 +102,9 @@ func TestCausal(t *testing.T) {
 			t.Fatal("create-only write archived the live row")
 		}
 		got := memRow(t, d, sib.ID)
-		if deref(got.ConflictWith) != cur.ID || got.Supersedes != nil {
-			t.Fatalf("create-only sibling = conflict_with %s supersedes %s; want %s / <nil>",
-				deref(got.ConflictWith), deref(got.Supersedes), cur.ID)
+		if siblingOf(t, d, sib.ID) != cur.ID || deref(sib.ConflictWith) != cur.ID || got.Supersedes != nil {
+			t.Fatalf("create-only sibling = paired with %s (result conflict_with %s) supersedes %s; want %s / <nil>",
+				siblingOf(t, d, sib.ID), deref(sib.ConflictWith), deref(got.Supersedes), cur.ID)
 		}
 		// BasedOnNew on an empty key is a plain create.
 		fresh := mustSet(t, d, "a", "empty", "v", SetMemoryOpts{BasedOn: BasedOnNew})
@@ -147,8 +171,9 @@ func TestCausal(t *testing.T) {
 			t.Fatal("conflict mode archived the live row")
 		}
 		got := memRow(t, d, v2.ID)
-		if deref(got.ConflictWith) != v1.ID || deref(got.Supersedes) != v1.ID || got.Version != 2 {
-			t.Fatalf("conflict row = conflict_with %s supersedes %s version %d", deref(got.ConflictWith), deref(got.Supersedes), got.Version)
+		if siblingOf(t, d, v2.ID) != v1.ID || deref(v2.ConflictWith) != v1.ID || deref(got.Supersedes) != v1.ID || got.Version != 2 {
+			t.Fatalf("conflict row = paired with %s (result conflict_with %s) supersedes %s version %d",
+				siblingOf(t, d, v2.ID), deref(v2.ConflictWith), deref(got.Supersedes), got.Version)
 		}
 		// based_on is ignored in explicit conflict mode.
 		v3, err := d.SetMemoryWith("p1", "c", "k", "three", "[]", "project", "stated", "behavior", false, SetMemoryOpts{BasedOn: v2.ID})

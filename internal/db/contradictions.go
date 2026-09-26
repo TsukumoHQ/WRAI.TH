@@ -1019,3 +1019,793 @@ func (d *DB) escalateConflicts(now string) (int, error) {
 	}
 	return n, nil
 }
+
+// --- resolution, reversal and sampled audits (T2, §4.3-§5) ---------------------
+
+// Conflict kinds.
+const (
+	ConflictKindCandidate = "candidate"
+	ConflictKindSibling   = "sibling"
+)
+
+// Resolutions (§4.3). merge, supersede and reject_new archive; the rest
+// archive nothing.
+const (
+	ResolutionMerge             = "merge"
+	ResolutionSupersede         = "supersede"
+	ResolutionRejectNew         = "reject_new"
+	ResolutionScopeSplit        = "scope_split"
+	ResolutionBothValidTemporal = "both_valid_temporal"
+	ResolutionOverrideDeclared  = "override_declared"
+	ResolutionNotAConflict      = "not_a_conflict"
+)
+
+var resolutions = map[string]bool{
+	ResolutionMerge: true, ResolutionSupersede: true, ResolutionRejectNew: true, ResolutionScopeSplit: true,
+	ResolutionBothValidTemporal: true, ResolutionOverrideDeclared: true, ResolutionNotAConflict: true,
+}
+
+func archivingResolution(r string) bool {
+	return r == ResolutionMerge || r == ResolutionSupersede || r == ResolutionRejectNew
+}
+
+// Audit outcomes (§5), in knowledge_conflicts.audit and gate_evidence.audits.
+const (
+	AuditSampled  = "sampled"
+	AuditUpheld   = "upheld"
+	AuditReverted = "reverted"
+)
+
+const (
+	settingAuditRate    = "contradiction_audit_rate"
+	settingPrecisionMin = "contradiction_precision_min"
+	settingArchiveSeq   = "contradiction_archive_seq"
+	// Sampling: 1 in auditRateEarly while fewer than auditEarlyUntil audits
+	// have an outcome, then 1 in auditRateLate.
+	auditRateEarly  = 3
+	auditRateLate   = 10
+	auditEarlyUntil = 30
+	// The precision gate: below precisionMinDefault over >= precisionMinAudits
+	// audits in precisionWindow, a (profile, layer)'s archiving resolutions
+	// need a second agent's concurrence.
+	precisionMinDefault = 0.8
+	precisionMinAudits  = 5
+	precisionWindow     = 90 * 24 * time.Hour
+)
+
+// Refusals. Nothing is written when one is returned.
+var (
+	ErrConflictUnknown     = errors.New("unknown conflict")
+	ErrConflictNotHeld     = errors.New("you do not hold this conflict's lease: claim it first")
+	ErrConflictResolution  = errors.New("invalid resolution or keep for this conflict")
+	ErrConflictNotResolved = errors.New("conflict is not resolved")
+	ErrRevertNotAllowed    = errors.New("revert is for the resolver's lead, an executive, or the auditor")
+	ErrConcurrenceSelf     = errors.New("a proposal needs a second agent's concurrence, not the proposer's")
+)
+
+// ConflictMember is one member of a conflict as list shows it.
+type ConflictMember struct {
+	ID      string `json:"id"`
+	Key     string `json:"key"`
+	Scope   string `json:"scope"`
+	Layer   string `json:"layer"`
+	Agent   string `json:"agent_name"`
+	Preview string `json:"value_preview"`
+	Live    bool   `json:"live"`
+}
+
+// ConflictView is one conflict row as list and resolve return it.
+type ConflictView struct {
+	ID           string           `json:"id"`
+	Project      string           `json:"project"`
+	Kind         string           `json:"kind"`
+	State        string           `json:"state"`
+	Members      []ConflictMember `json:"members"`
+	LeaseHolder  string           `json:"lease_holder,omitempty"`
+	FailedClaims int              `json:"failed_claims,omitempty"`
+	Resolution   string           `json:"resolution,omitempty"`
+	ResolvedBy   string           `json:"resolved_by,omitempty"`
+	Audit        string           `json:"audit,omitempty"`
+	Proposal     map[string]any   `json:"proposal,omitempty"`
+	CreatedAt    string           `json:"created_at"`
+}
+
+// conflictPreviewLen bounds a member's value preview in list results.
+const conflictPreviewLen = 160
+
+// ListConflicts returns project's conflicts (its own and '*'), open ones
+// (detected, claimed) unless state names one, oldest first. Read-only.
+func (d *DB) ListConflicts(project, state string, limit int) ([]ConflictView, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	where := `state IN ('detected', 'claimed')`
+	args := []any{project}
+	if state != "" {
+		where = `state = ?`
+		args = []any{state, project}
+	}
+	rows, err := d.ro().Query(`SELECT id, project, kind, state, members, COALESCE(lease_holder, ''), failed_claims,
+			COALESCE(resolution, ''), COALESCE(resolved_by, ''), COALESCE(audit, ''), gate_evidence, created_at
+		FROM knowledge_conflicts WHERE `+where+` AND project IN (?, '*') ORDER BY created_at, id LIMIT ?`, append(args, limit)...)
+	if err != nil {
+		return nil, fmt.Errorf("list conflicts: %w", err)
+	}
+	var out []ConflictView
+	var membersJSON []string
+	for rows.Next() {
+		var v ConflictView
+		var mj, ev string
+		if err := rows.Scan(&v.ID, &v.Project, &v.Kind, &v.State, &mj, &v.LeaseHolder, &v.FailedClaims,
+			&v.Resolution, &v.ResolvedBy, &v.Audit, &ev, &v.CreatedAt); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if p, ok := parseEvidence(ev)["proposal"].(map[string]any); ok {
+			v.Proposal = p
+		}
+		out = append(out, v)
+		membersJSON = append(membersJSON, mj)
+	}
+	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		var ids []string
+		_ = json.Unmarshal([]byte(membersJSON[i]), &ids)
+		for _, id := range ids {
+			m := ConflictMember{ID: id}
+			var value string
+			var archived sql.NullString
+			if err := d.ro().QueryRow(`SELECT key, scope, layer, agent_name, value, archived_at FROM memories WHERE id = ?`, id).
+				Scan(&m.Key, &m.Scope, &m.Layer, &m.Agent, &value, &archived); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			m.Live = !archived.Valid && m.Key != ""
+			if r := []rune(value); len(r) > conflictPreviewLen {
+				value = string(r[:conflictPreviewLen]) + "…"
+			}
+			m.Preview = value
+			out[i].Members = append(out[i].Members, m)
+		}
+	}
+	return out, nil
+}
+
+// OpenConflictKinds maps each of ids that is a member of an open conflict
+// (detected or claimed) to that conflict's kind (sibling wins over
+// candidate). One read-only query; nil for no ids.
+func (d *DB) OpenConflictKinds(ids []string) map[string]string {
+	if len(ids) == 0 {
+		return nil
+	}
+	ph, args := inPlaceholders(ids)
+	rows, err := d.ro().Query(`SELECT j.value, c.kind FROM knowledge_conflicts c, json_each(c.members) j
+		WHERE c.state IN ('detected', 'claimed') AND j.value IN (`+ph+`)`, args...)
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]string{}
+	for rows.Next() {
+		var id, kind string
+		if rows.Scan(&id, &kind) == nil && out[id] != ConflictKindSibling {
+			out[id] = kind
+		}
+	}
+	return out
+}
+
+func parseEvidence(s string) map[string]any {
+	ev := map[string]any{}
+	_ = json.Unmarshal([]byte(s), &ev)
+	return ev
+}
+
+func evidenceString(ev map[string]any, k string) string {
+	s, _ := ev[k].(string)
+	return s
+}
+
+// conflictMem is a member row as a resolution reads it on the writer tx.
+type conflictMem struct {
+	ID, Project, Scope, Key, Agent, Layer, Status string
+	ValidFrom, ValidUntil, ArchivedBy, Reason     sql.NullString
+	CreatedAt                                     string
+	Live                                          bool
+}
+
+func loadConflictMembers(q excQ, ids []string) ([]conflictMem, error) {
+	var out []conflictMem
+	for _, id := range ids {
+		var m conflictMem
+		var archivedAt sql.NullString
+		err := q.QueryRow(`SELECT id, project, scope, key, agent_name, layer, status, valid_from, valid_until, archived_by,
+				archived_reason, created_at, archived_at FROM memories WHERE id = ?`, id).
+			Scan(&m.ID, &m.Project, &m.Scope, &m.Key, &m.Agent, &m.Layer, &m.Status, &m.ValidFrom, &m.ValidUntil,
+				&m.ArchivedBy, &m.Reason, &m.CreatedAt, &archivedAt)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		m.Live = !archivedAt.Valid
+		out = append(out, m)
+	}
+	return out, nil
+}
+
+// prior is what a resolution changed on one memory, so revert restores the
+// exact row: archived members lose archived_* and get their status back;
+// stamped members (both_valid_temporal) get their valid_until back.
+func (m conflictMem) prior(archived bool) map[string]any {
+	return map[string]any{"archived": archived, "status": m.Status, "valid_until": nullStr(m.ValidUntil),
+		"archived_by": nullStr(m.ArchivedBy), "archived_reason": nullStr(m.Reason)}
+}
+
+func nullStr(s sql.NullString) any {
+	if s.Valid {
+		return s.String
+	}
+	return nil
+}
+
+// archiveForConflictTx archives one live member with invalidated_by = cid and
+// logs its one-row retraction (class retraction: coherence reaches the
+// member's consumers). extra is the legacy path's validity close ("" = none).
+func archiveForConflictTx(tx *writerTx, m conflictMem, cid, by, reason, now string, closeValidity bool) error {
+	q := `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived', invalidated_by = ?`
+	args := []any{now, by, reason, cid}
+	if closeValidity {
+		q += `, ` + closeValidityClause
+		args = append(args, now, now)
+	}
+	res, err := tx.Exec(q+` WHERE id = ? AND archived_at IS NULL`, append(args, m.ID)...)
+	if err != nil {
+		return fmt.Errorf("archive member %s: %w", m.ID, err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("archive member %s: moved concurrently", m.ID)
+	}
+	if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+		Project: m.Project, Scope: m.Scope, Key: m.Key, PrevMemoryID: m.ID, Op: opRetract, Layer: m.Layer, Agent: by, At: now,
+	}, m.Agent); err != nil {
+		return err
+	}
+	return nil
+}
+
+// agentProfile is name's profile in project (any project for '*').
+func agentProfile(q excQ, project, name string) string {
+	var p string
+	_ = q.QueryRow(`SELECT COALESCE(profile_slug, '') FROM agents WHERE lower(name) = lower(?) AND (project = ? OR ? = '*')
+		ORDER BY status = 'active' DESC LIMIT 1`, name, project, project).Scan(&p)
+	return p
+}
+
+// agentLead is name's reports_to in project (any project for '*').
+func agentLead(q excQ, project, name string) string {
+	var lead string
+	_ = q.QueryRow(`SELECT COALESCE(reports_to, '') FROM agents WHERE lower(name) = lower(?) AND (project = ? OR ? = '*')
+		ORDER BY status = 'active' DESC LIMIT 1`, name, project, project).Scan(&lead)
+	return lead
+}
+
+func isActiveExecutive(q excQ, project, name string) bool {
+	var one int
+	err := q.QueryRow(`SELECT 1 FROM agents WHERE lower(name) = lower(?) AND is_executive = 1 AND status = 'active'
+		AND (project = ? OR ? = '*') LIMIT 1`, name, project, project).Scan(&one)
+	return err == nil
+}
+
+// pickAuditor names the audit's target: the resolver's lead when its profile
+// differs from the resolver's, else an active executive of another profile.
+// ("", "") when there is none.
+func pickAuditor(q excQ, project, resolver, resolverProfile string) (name, profile string) {
+	if lead := agentLead(q, project, resolver); lead != "" {
+		if p := agentProfile(q, project, lead); p != "" && p != resolverProfile {
+			return strings.ToLower(lead), p
+		}
+	}
+	_ = q.QueryRow(`SELECT name, profile_slug FROM agents WHERE is_executive = 1 AND status = 'active'
+		AND (project = ? OR ? = '*') AND lower(name) <> lower(?) AND COALESCE(profile_slug, '') NOT IN ('', ?)
+		ORDER BY name LIMIT 1`, project, project, resolver, resolverProfile).Scan(&name, &profile)
+	return name, profile
+}
+
+// precisionTx is (profile, layer)'s audit precision since since, and the audit
+// count it is over.
+func precisionTx(q excQ, profile, layer, since string) (float64, int, error) {
+	var upheld, reverted int
+	err := q.QueryRow(`SELECT
+			COALESCE(SUM(CASE WHEN json_extract(a.value, '$.outcome') = ? THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN json_extract(a.value, '$.outcome') = ? THEN 1 ELSE 0 END), 0)
+		FROM knowledge_conflicts c, json_each(c.gate_evidence, '$.audits') a
+		WHERE json_extract(a.value, '$.profile') = ? AND json_extract(a.value, '$.layer') = ? AND json_extract(a.value, '$.at') >= ?`,
+		AuditUpheld, AuditReverted, profile, layer, since).Scan(&upheld, &reverted)
+	if err != nil {
+		return 0, 0, err
+	}
+	n := upheld + reverted
+	if n == 0 {
+		return 1, 0, nil
+	}
+	return float64(upheld) / float64(n), n, nil
+}
+
+func (d *DB) precisionMin() float64 {
+	raw := d.GetSetting(settingPrecisionMin)
+	if raw == "" {
+		return precisionMinDefault
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil || f != f {
+		warnSettingOnce(settingPrecisionMin, raw, "unparsable as float", precisionMinDefault)
+		return precisionMinDefault
+	}
+	return min(max(f, 0), 1)
+}
+
+// sampleAuditTx advances the archiving-resolution sequence and says whether
+// this one is audited: 1 in contradiction_audit_rate when set, else 1 in 3
+// while fewer than 30 audits have an outcome, then 1 in 10. The first
+// archiving resolution is always sampled.
+func sampleAuditTx(q excQ, rateSetting string) (bool, error) {
+	var seq int64
+	if err := q.QueryRow(`INSERT INTO settings (key, value) VALUES (?, '1')
+		ON CONFLICT(key) DO UPDATE SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT) RETURNING CAST(value AS INTEGER)`,
+		settingArchiveSeq).Scan(&seq); err != nil {
+		return false, fmt.Errorf("audit sequence: %w", err)
+	}
+	rate := auditRateLate
+	if n, err := strconv.Atoi(rateSetting); err == nil && n >= 1 {
+		rate = n
+	} else {
+		var audited int
+		if err := q.QueryRow(`SELECT COUNT(*) FROM knowledge_conflicts c, json_each(c.gate_evidence, '$.audits') a
+			WHERE json_extract(a.value, '$.outcome') IN (?, ?)`, AuditUpheld, AuditReverted).Scan(&audited); err != nil {
+			return false, err
+		}
+		if audited < auditEarlyUntil {
+			rate = auditRateEarly
+		}
+	}
+	return (seq-1)%int64(rate) == 0, nil
+}
+
+// ConflictResolution is one resolve call.
+type ConflictResolution struct {
+	ID, Agent, Resolution, Keep, Rationale string
+	Now                                    time.Time
+}
+
+// ConflictOutcome is what a resolve or revert did.
+type ConflictOutcome struct {
+	ConflictID string   `json:"conflict_id"`
+	State      string   `json:"state"`
+	Resolution string   `json:"resolution,omitempty"`
+	Kept       string   `json:"kept,omitempty"`
+	Archived   []string `json:"archived,omitempty"`
+	Restored   []string `json:"restored,omitempty"`
+	// Proposed: the resolver's (profile, layer) is below the precision gate,
+	// so nothing was archived; a second agent must claim and resolve the same
+	// way to concur.
+	Proposed bool   `json:"proposed,omitempty"`
+	Audit    string `json:"audit,omitempty"`
+	Auditor  string `json:"auditor,omitempty"`
+	// AuditorProfile is the profile an audit ticket goes to (sampled only).
+	AuditorProfile string `json:"-"`
+	Project        string `json:"-"`
+}
+
+// ResolveKnowledgeConflict applies a resolution (§4.3) in one writer tx, by
+// the lease holder only. Archiving resolutions archive with invalidated_by =
+// the conflict id and log one retraction per archived member; edges carry
+// rule resolution:<id>; prior member state goes to gate_evidence.prior so
+// revert restores the exact rows. Below the precision gate (§5) an archiving
+// resolution becomes a proposal: the conflict returns to detected (no failed
+// claim) and a second agent's matching resolve concurs. On a resolved,
+// sampled conflict, the auditor profile's matching resolve upholds it.
+func (d *DB) ResolveKnowledgeConflict(in ConflictResolution) (*ConflictOutcome, error) {
+	if !resolutions[in.Resolution] {
+		return nil, ErrConflictResolution
+	}
+	agent := strings.ToLower(in.Agent)
+	now := in.Now.UTC().Format(memoryTimeFmt)
+	rateSetting := d.GetSetting(settingAuditRate)
+	precisionMin := d.precisionMin()
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, fmt.Errorf("resolve conflict begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var project, state, membersJSON, evJSON, holder, expires, resolution, keptID, audit string
+	err = tx.QueryRow(`SELECT project, state, members, gate_evidence, COALESCE(lease_holder, ''), COALESCE(lease_expires_at, ''),
+			COALESCE(resolution, ''), COALESCE(resolution_memory_id, ''), COALESCE(audit, '')
+		FROM knowledge_conflicts WHERE id = ?`, in.ID).
+		Scan(&project, &state, &membersJSON, &evJSON, &holder, &expires, &resolution, &keptID, &audit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConflictUnknown
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolve conflict: %w", err)
+	}
+	ev := parseEvidence(evJSON)
+	out := &ConflictOutcome{ConflictID: in.ID, Resolution: in.Resolution, Project: project}
+
+	// Uphold: the auditor profile concurs with a sampled resolution.
+	if state == ConflictResolved {
+		a, _ := ev["audit"].(map[string]any)
+		if audit != AuditSampled || a == nil || in.Resolution != resolution ||
+			agentProfile(tx, project, agent) != evidenceString(a, "profile") || evidenceString(a, "profile") == "" {
+			return nil, ErrConflictNotHeld
+		}
+		appendAudit(ev, AuditUpheld, agent, now)
+		ej, _ := json.Marshal(ev)
+		res, err := tx.Exec(`UPDATE knowledge_conflicts SET audit = ?, gate_evidence = ? WHERE id = ? AND state = ? AND audit = ?`,
+			AuditUpheld, string(ej), in.ID, ConflictResolved, AuditSampled)
+		if err != nil {
+			return nil, fmt.Errorf("uphold: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return nil, ErrConflictNotHeld
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		out.State, out.Kept, out.Audit = ConflictResolved, keptID, AuditUpheld
+		return out, nil
+	}
+	if state != ConflictClaimed || !strings.EqualFold(holder, agent) || expires < now {
+		return nil, ErrConflictNotHeld
+	}
+
+	var ids []string
+	_ = json.Unmarshal([]byte(membersJSON), &ids)
+	members, err := loadConflictMembers(tx, ids)
+	if err != nil {
+		return nil, err
+	}
+	var live []conflictMem
+	for _, m := range members {
+		if m.Live {
+			live = append(live, m)
+		}
+	}
+	sort.Slice(live, func(i, j int) bool {
+		return live[i].CreatedAt < live[j].CreatedAt || (live[i].CreatedAt == live[j].CreatedAt && live[i].ID < live[j].ID)
+	})
+	var keep *conflictMem
+	for i := range live {
+		if live[i].ID == in.Keep {
+			keep = &live[i]
+		}
+	}
+
+	// What the resolution archives, stamps and links.
+	var archive, stamp []conflictMem
+	type edge struct{ src, dst, kind string }
+	var edges []edge
+	switch in.Resolution {
+	case ResolutionMerge, ResolutionSupersede:
+		if keep == nil || len(live) < 2 {
+			return nil, ErrConflictResolution
+		}
+		for _, m := range live {
+			if m.ID != keep.ID {
+				archive = append(archive, m)
+				edges = append(edges, edge{keep.ID, m.ID, KEdgeSupersedes})
+			}
+		}
+	case ResolutionRejectNew:
+		if len(live) < 2 {
+			return nil, ErrConflictResolution
+		}
+		archive = []conflictMem{live[len(live)-1]}
+		keep = nil
+	case ResolutionScopeSplit, ResolutionOverrideDeclared:
+		if keep == nil {
+			return nil, ErrConflictResolution
+		}
+		for _, m := range live {
+			if m.ID != keep.ID {
+				edges = append(edges, edge{keep.ID, m.ID, KEdgeOverrides})
+			}
+		}
+	case ResolutionBothValidTemporal:
+		if len(live) < 2 {
+			return nil, ErrConflictResolution
+		}
+		newest := live[len(live)-1]
+		keep = &newest
+		for _, m := range live[:len(live)-1] {
+			stamp = append(stamp, m)
+			edges = append(edges, edge{newest.ID, m.ID, KEdgeAmends})
+		}
+	case ResolutionNotAConflict:
+		ev["distinct"] = true
+	}
+	if keep != nil {
+		out.Kept = keep.ID
+	}
+
+	// The precision gate and its concurrence.
+	profile := agentProfile(tx, project, agent)
+	layer := ""
+	for _, m := range archive {
+		if layer == "" || layerDurability(m.Layer) > layerDurability(layer) {
+			layer = m.Layer
+		}
+	}
+	if archivingResolution(in.Resolution) {
+		prop, _ := ev["proposal"].(map[string]any)
+		concurs := prop != nil && evidenceString(prop, "resolution") == in.Resolution && evidenceString(prop, "keep") == in.Keep
+		if concurs && strings.EqualFold(evidenceString(prop, "by"), agent) {
+			return nil, ErrConcurrenceSelf
+		}
+		if concurs {
+			ev["concurred_by"] = agent
+			delete(ev, "proposal")
+		} else {
+			p, n, err := precisionTx(tx, profile, layer, in.Now.Add(-precisionWindow).UTC().Format(memoryTimeFmt))
+			if err != nil {
+				return nil, fmt.Errorf("precision: %w", err)
+			}
+			if n >= precisionMinAudits && p < precisionMin {
+				ev["proposal"] = map[string]any{"by": agent, "profile": profile, "layer": layer, "resolution": in.Resolution,
+					"keep": in.Keep, "rationale": in.Rationale, "precision": round3(p), "audits": n, "at": now}
+				ej, _ := json.Marshal(ev)
+				res, err := tx.Exec(`UPDATE knowledge_conflicts SET state = ?, lease_holder = NULL, lease_expires_at = NULL, gate_evidence = ?
+					WHERE id = ? AND state = ? AND lease_holder = ?`, ConflictDetected, string(ej), in.ID, ConflictClaimed, holder)
+				if err != nil {
+					return nil, fmt.Errorf("propose: %w", err)
+				}
+				if n, _ := res.RowsAffected(); n != 1 {
+					return nil, ErrConflictNotHeld
+				}
+				if err := tx.Commit(); err != nil {
+					return nil, err
+				}
+				out.State, out.Proposed = ConflictDetected, true
+				return out, nil
+			}
+		}
+	}
+
+	// Apply: archive, stamp, link. Every change is recorded for revert.
+	priors := map[string]any{}
+	reason := "conflict:" + in.Resolution
+	for _, m := range archive {
+		priors[m.ID] = m.prior(true)
+		if err := archiveForConflictTx(tx, m, in.ID, agent, reason, now, false); err != nil {
+			return nil, err
+		}
+		out.Archived = append(out.Archived, m.ID)
+	}
+	for _, m := range stamp {
+		until := keep.CreatedAt
+		if keep.ValidFrom.Valid && keep.ValidFrom.String != "" {
+			until = keep.ValidFrom.String
+		}
+		if m.ValidUntil.Valid && m.ValidUntil.String != "" && m.ValidUntil.String <= until {
+			continue // already ends before its successor starts
+		}
+		priors[m.ID] = m.prior(false)
+		if _, err := tx.Exec(`UPDATE memories SET valid_until = ? WHERE id = ? AND archived_at IS NULL`, until, m.ID); err != nil {
+			return nil, fmt.Errorf("stamp %s: %w", m.ID, err)
+		}
+		if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+			Project: m.Project, Scope: m.Scope, Key: m.Key, MemoryID: m.ID, Op: opValidity, Layer: m.Layer,
+			Narrowing: true, Agent: agent, At: now,
+		}, m.Agent); err != nil {
+			return nil, err
+		}
+	}
+	rule := "resolution:" + in.ID
+	for _, e := range edges {
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO knowledge_edges (src_memory_id, dst_memory_id, kind, declared, rule, created_by, created_at)
+			VALUES (?, ?, ?, 1, ?, ?, ?)`, e.src, e.dst, e.kind, rule, agent, now); err != nil {
+			return nil, fmt.Errorf("resolution edge: %w", err)
+		}
+	}
+	ev["prior"] = priors
+	ev["resolved"] = map[string]any{"by": agent, "profile": profile, "layer": layer, "at": now}
+	auditCol := sql.NullString{}
+	if archivingResolution(in.Resolution) {
+		sampled, err := sampleAuditTx(tx, rateSetting)
+		if err != nil {
+			return nil, err
+		}
+		if sampled {
+			name, p := pickAuditor(tx, project, agent, profile)
+			ev["audit"] = map[string]any{"auditor": name, "profile": p, "at": now}
+			auditCol = sql.NullString{String: AuditSampled, Valid: true}
+			out.Audit, out.Auditor, out.AuditorProfile = AuditSampled, name, p
+		}
+	}
+	ej, _ := json.Marshal(ev)
+	res, err := tx.Exec(`UPDATE knowledge_conflicts SET state = ?, resolution = ?, resolution_memory_id = ?, resolved_by = ?, rationale = ?,
+			resolved_at = ?, audit = ?, gate_evidence = ?, lease_holder = NULL, lease_expires_at = NULL
+		WHERE id = ? AND state = ? AND lease_holder = ?`,
+		ConflictResolved, in.Resolution, knNull(out.Kept), agent, knNull(in.Rationale), now, auditCol, string(ej),
+		in.ID, ConflictClaimed, holder)
+	if err != nil {
+		return nil, fmt.Errorf("resolve conflict: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, ErrConflictNotHeld
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("resolve conflict commit: %w", err)
+	}
+	out.State = ConflictResolved
+	return out, nil
+}
+
+// appendAudit records one audit outcome of the conflict's current resolution
+// in gate_evidence.audits, keyed by the resolver's (profile, layer).
+func appendAudit(ev map[string]any, outcome, by, now string) {
+	r, _ := ev["resolved"].(map[string]any)
+	entry := map[string]any{"outcome": outcome, "by": by, "at": now,
+		"resolver": evidenceString(r, "by"), "profile": evidenceString(r, "profile"), "layer": evidenceString(r, "layer")}
+	list, _ := ev["audits"].([]any)
+	ev["audits"] = append(list, entry)
+}
+
+// RevertConflict undoes a resolution (§4.3 Reversal), by the resolver's
+// lead, an active executive, or the auditor profile: every invalidated_by =
+// id row is restored exactly (archived_* cleared, status back, invalidated_by
+// kept for history) with one knowledge_log set row each, stamped windows get
+// their valid_until back, the resolution's edges are deleted, and the
+// conflict returns to detected with audit = reverted. The only place that
+// un-archives.
+func (d *DB) RevertConflict(id, by string, now time.Time) (*ConflictOutcome, error) {
+	by = strings.ToLower(by)
+	ts := now.UTC().Format(memoryTimeFmt)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, fmt.Errorf("revert conflict begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var project, state, evJSON, resolvedBy string
+	err = tx.QueryRow(`SELECT project, state, gate_evidence, COALESCE(resolved_by, '') FROM knowledge_conflicts WHERE id = ?`, id).
+		Scan(&project, &state, &evJSON, &resolvedBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrConflictUnknown
+	}
+	if err != nil {
+		return nil, fmt.Errorf("revert conflict: %w", err)
+	}
+	if state != ConflictResolved {
+		return nil, ErrConflictNotResolved
+	}
+	ev := parseEvidence(evJSON)
+	a, _ := ev["audit"].(map[string]any)
+	auditorProfile := evidenceString(a, "profile")
+	allowed := isActiveExecutive(tx, project, by) ||
+		(resolvedBy != "" && strings.EqualFold(agentLead(tx, project, resolvedBy), by)) ||
+		(auditorProfile != "" && agentProfile(tx, project, by) == auditorProfile)
+	if !allowed {
+		return nil, ErrRevertNotAllowed
+	}
+	out := &ConflictOutcome{ConflictID: id, State: ConflictDetected, Audit: AuditReverted, Project: project}
+	priors, _ := ev["prior"].(map[string]any)
+	rows, err := tx.Query(`SELECT id FROM memories WHERE invalidated_by = ? AND archived_at IS NOT NULL ORDER BY id`, id)
+	if err != nil {
+		return nil, err
+	}
+	var restore []string
+	for rows.Next() {
+		var mid string
+		if err := rows.Scan(&mid); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		restore = append(restore, mid)
+	}
+	_ = rows.Close()
+	members, err := loadConflictMembers(tx, restore)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range members {
+		p, _ := priors[m.ID].(map[string]any)
+		status := evidenceString(p, "status")
+		if status == "" {
+			status = "live"
+		}
+		if _, err := tx.Exec(`UPDATE memories SET archived_at = NULL, archived_by = ?, archived_reason = ?, status = ?, valid_until = ?
+			WHERE id = ? AND invalidated_by = ?`, p["archived_by"], p["archived_reason"], status, p["valid_until"], m.ID, id); err != nil {
+			return nil, fmt.Errorf("restore %s: %w", m.ID, err)
+		}
+		if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+			Project: m.Project, Scope: m.Scope, Key: m.Key, MemoryID: m.ID, Op: opSet, Layer: m.Layer, Agent: by, At: ts,
+		}, m.Agent); err != nil {
+			return nil, err
+		}
+		out.Restored = append(out.Restored, m.ID)
+	}
+	// Stamped windows (both_valid_temporal) of still-live members.
+	var stamped []string
+	for mid, raw := range priors {
+		if p, _ := raw.(map[string]any); p != nil && p["archived"] == false {
+			stamped = append(stamped, mid)
+		}
+	}
+	sort.Strings(stamped)
+	stampedMems, err := loadConflictMembers(tx, stamped)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range stampedMems {
+		if !m.Live {
+			continue
+		}
+		p, _ := priors[m.ID].(map[string]any)
+		if _, err := tx.Exec(`UPDATE memories SET valid_until = ? WHERE id = ? AND archived_at IS NULL`, p["valid_until"], m.ID); err != nil {
+			return nil, fmt.Errorf("unstamp %s: %w", m.ID, err)
+		}
+		if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+			Project: m.Project, Scope: m.Scope, Key: m.Key, MemoryID: m.ID, Op: opValidity, Layer: m.Layer, Agent: by, At: ts,
+		}, m.Agent); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM knowledge_edges WHERE rule = ?`, "resolution:"+id); err != nil {
+		return nil, fmt.Errorf("revert edges: %w", err)
+	}
+	appendAudit(ev, AuditReverted, by, ts)
+	for _, k := range []string{"prior", "resolved", "distinct", "concurred_by", "audit"} {
+		delete(ev, k)
+	}
+	ej, _ := json.Marshal(ev)
+	res, err := tx.Exec(`UPDATE knowledge_conflicts SET state = ?, audit = ?, gate_evidence = ?, resolution = NULL, resolution_memory_id = NULL,
+			resolved_by = NULL, rationale = NULL, resolved_at = NULL, lease_holder = NULL, lease_expires_at = NULL
+		WHERE id = ? AND state = ?`, ConflictDetected, AuditReverted, string(ej), id, ConflictResolved)
+	if err != nil {
+		return nil, fmt.Errorf("revert conflict: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, ErrConflictNotResolved
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("revert conflict commit: %w", err)
+	}
+	return out, nil
+}
+
+// recordSiblingTx tracks a same-key sibling (§4.4): the open sibling conflict
+// that already holds live grows by sibling, else a new one opens with both.
+// It replaces writing conflict_with.
+func recordSiblingTx(q excQ, project, scope, key, agent, live, sibling, op, now string) error {
+	cp := project
+	if scope == "global" {
+		cp = "*"
+	}
+	var cid, membersJSON string
+	err := q.QueryRow(`SELECT c.id, c.members FROM knowledge_conflicts c
+		WHERE c.kind = ? AND c.state IN ('detected', 'claimed') AND EXISTS (SELECT 1 FROM json_each(c.members) WHERE value = ?)
+		ORDER BY c.created_at LIMIT 1`, ConflictKindSibling, live).Scan(&cid, &membersJSON)
+	if err == nil {
+		var members []string
+		_ = json.Unmarshal([]byte(membersJSON), &members)
+		members = append(members, sibling)
+		sort.Strings(members)
+		mj, _ := json.Marshal(members)
+		_, err = q.Exec(`UPDATE knowledge_conflicts SET members = ?, members_hash = ? WHERE id = ?`, string(mj), membersHash(members), cid)
+		return err
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	members := []string{live, sibling}
+	sort.Strings(members)
+	mj, _ := json.Marshal(members)
+	ej, _ := json.Marshal(map[string]any{"key": key, "scope": scope, "op": op})
+	_, err = q.Exec(`INSERT OR IGNORE INTO knowledge_conflicts (id, project, members, members_hash, kind, gate_evidence, detected_by, state, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		uuid.New().String(), cp, string(mj), membersHash(members), ConflictKindSibling, string(ej), agent, ConflictDetected, now)
+	return err
+}

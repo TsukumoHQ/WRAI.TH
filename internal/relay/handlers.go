@@ -976,6 +976,7 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	}
 	memories = kept
 	projectedMems := projectMemories(memories, sessionMemoryBudget)
+	h.markContested(projectedMems)
 	result["relevant_memories"] = projectedMems
 	served := make([]string, 0, len(projectedMems)+sessionDecisionMax)
 	for _, m := range projectedMems {

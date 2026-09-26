@@ -310,7 +310,9 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 	// Any other value (incl. default "") keeps the pure-FTS bm25 order.
 	ranked := req.GetString("rank", "") == "mempalace"
 
-	// Truncate values for compact response
+	// Truncate values for compact response. A sibling written since T2 is
+	// tracked in knowledge_conflicts, not conflict_with; kinds covers it.
+	var kinds map[string]string
 	compact := func(m *models.Memory) map[string]any {
 		val := m.Value
 		if len(val) > 300 {
@@ -326,7 +328,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 			"confidence": m.Confidence,
 			"version":    m.Version,
 			"updated_at": m.UpdatedAt,
-			"conflict":   m.ConflictWith != nil,
+			"conflict":   m.ConflictWith != nil || kinds[m.ID] == db.ConflictKindSibling,
 			"status":     m.Status,
 			"importance": roundImportance(m.Importance),
 		}
@@ -343,6 +345,10 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 		}
 		rows := make([]map[string]any, len(results))
 		served := make([]string, len(results))
+		for i := range results {
+			served[i] = results[i].ID
+		}
+		kinds = h.db.OpenConflictKinds(served)
 		for i := range results {
 			row := compact(&results[i].Memory)
 			row["rank_score"] = roundImportance(results[i].RankScore)
@@ -367,6 +373,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 		memories = []models.Memory{}
 	}
 
+	kinds = h.db.OpenConflictKinds(memoryIDs(memories))
 	truncated := make([]map[string]any, len(memories))
 	for i := range memories {
 		truncated[i] = compact(&memories[i])
@@ -404,6 +411,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 	}
 
 	// Truncate values for compact response
+	kinds := h.db.OpenConflictKinds(memoryIDs(memories))
 	truncated := make([]map[string]any, len(memories))
 	for i, m := range memories {
 		val := m.Value
@@ -421,7 +429,7 @@ func (h *Handlers) HandleListMemories(ctx context.Context, req mcp.CallToolReque
 			"confidence": m.Confidence,
 			"version":    m.Version,
 			"updated_at": m.UpdatedAt,
-			"conflict":   m.ConflictWith != nil,
+			"conflict":   m.ConflictWith != nil || kinds[m.ID] == db.ConflictKindSibling,
 			"status":     m.Status,
 			"importance": roundImportance(m.Importance),
 		}
@@ -527,6 +535,9 @@ func targetAuthorIsDead(h *Handlers, project, author string) bool {
 func (h *Handlers) HandleResolveConflict(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
+	if action := req.GetString("action", ""); action != "" {
+		return h.handleConflictAction(project, agent, action, req)
+	}
 	key := req.GetString("key", "")
 	if key == "" {
 		return toolResultError("key is required"), nil
@@ -547,6 +558,116 @@ func (h *Handlers) HandleResolveConflict(ctx context.Context, req mcp.CallToolRe
 		"resolved": true,
 		"memory":   winner,
 	})
+}
+
+// handleConflictAction is resolve_conflict's action form over knowledge
+// conflicts (design 8d107daa T2, ruling ed744dee OQ5): list the open ones,
+// claim one (lease), resolve it as the lease holder, or revert a resolution
+// (the resolver's lead, an executive, or the auditor). Detection only
+// proposes; the claiming agent decides.
+func (h *Handlers) handleConflictAction(project, agent, action string, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	id := req.GetString("conflict_id", "")
+	if action != "list" && id == "" {
+		return validationError(CodeInvalidArgument, "conflict_id is required for action="+action), nil
+	}
+	now := time.Now().UTC()
+	switch action {
+	case "list":
+		list, err := h.db.ListConflicts(project, "", 20)
+		if err != nil {
+			return toolResultError(fmt.Sprintf("list conflicts: %v", err)), nil
+		}
+		if list == nil {
+			list = []db.ConflictView{}
+		}
+		return h.resultJSONTracked(project, agent, "resolve_conflict", map[string]any{"count": len(list), "conflicts": list})
+	case "claim":
+		ok, err := h.db.ClaimConflict(id, strings.ToLower(agent), now)
+		if err != nil {
+			return toolResultError(fmt.Sprintf("claim conflict: %v", err)), nil
+		}
+		if !ok {
+			return validationError(CodeInvalidArgument, "conflict "+id+" is not claimable: unknown, not detected, or leased to another agent"), nil
+		}
+		return h.resultJSONTracked(project, agent, "resolve_conflict", map[string]any{"claimed": true, "conflict_id": id})
+	case "resolve":
+		out, err := h.db.ResolveKnowledgeConflict(db.ConflictResolution{ID: id, Agent: agent, Resolution: req.GetString("resolution", ""),
+			Keep: req.GetString("keep", ""), Rationale: req.GetString("rationale", ""), Now: now})
+		if res := conflictRefusal(err); res != nil {
+			return res, nil
+		}
+		if err != nil {
+			return toolResultError(fmt.Sprintf("resolve conflict: %v", err)), nil
+		}
+		if out.Audit == db.AuditSampled && out.AuditorProfile != "" {
+			h.dispatchConflictAudit(project, agent, out)
+		}
+		h.events.Emit(MCPEvent{Type: "memory", Action: "resolve", Agent: agent, Project: project, Label: id})
+		return h.resultJSONTracked(project, agent, "resolve_conflict", out)
+	case "revert":
+		out, err := h.db.RevertConflict(id, agent, now)
+		if res := conflictRefusal(err); res != nil {
+			return res, nil
+		}
+		if err != nil {
+			return toolResultError(fmt.Sprintf("revert conflict: %v", err)), nil
+		}
+		h.events.Emit(MCPEvent{Type: "memory", Action: "revert", Agent: agent, Project: project, Label: id})
+		return h.resultJSONTracked(project, agent, "resolve_conflict", out)
+	}
+	return validationError(CodeInvalidArgument, "action must be list, claim, resolve or revert"), nil
+}
+
+// conflictRefusal maps the conflict layer's refusals (nothing written) to a
+// validation error; nil for any other outcome.
+func conflictRefusal(err error) *mcp.CallToolResult {
+	for _, e := range []error{db.ErrConflictUnknown, db.ErrConflictNotHeld, db.ErrConflictResolution,
+		db.ErrConflictNotResolved, db.ErrRevertNotAllowed, db.ErrConcurrenceSelf} {
+		if errors.Is(err, e) {
+			return validationError(CodeInvalidArgument, err.Error())
+		}
+	}
+	return nil
+}
+
+// dispatchConflictAudit sends a sampled resolution's audit ticket to the
+// auditor profile (§5): uphold by resolving the same way, or revert.
+// Best-effort: a refused dispatch is logged, the resolution stands.
+func (h *Handlers) dispatchConflictAudit(project, resolver string, out *db.ConflictOutcome) {
+	p := out.Project
+	if p == "*" {
+		p = project
+	}
+	short := out.ConflictID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	title := fmt.Sprintf("[audit] knowledge conflict %s: %s by %s", short, out.Resolution, resolver)
+	body := fmt.Sprintf("Sampled audit of conflict %s (resolution %s by %s, kept %q, archived %v). Read the members with "+
+		"resolve_conflict(action=list) or get_memory, then uphold with resolve_conflict(action=resolve, conflict_id=%s, resolution=%s) "+
+		"or undo with resolve_conflict(action=revert, conflict_id=%s).",
+		out.ConflictID, out.Resolution, resolver, out.Kept, out.Archived, out.ConflictID, out.Resolution, out.ConflictID)
+	ac, _ := json.Marshal([]string{"the conflict's audit is upheld (resolve with the same resolution) or reverted (action=revert)"})
+	ticket := db.TypedTicket{Goal: "Uphold or revert the sampled resolution of knowledge conflict " + short,
+		AcceptanceCriteria: string(ac), Dod: "resolve_conflict records upheld or reverted on the conflict"}
+	if _, err := h.db.DispatchTask(p, out.AuditorProfile, "relay-sweeper", title, body, "P2", nil, nil, ticket, false, nil); err != nil {
+		log.Printf("[contradictions] audit dispatch %s: %v", out.ConflictID, err)
+	}
+}
+
+// markContested flags the boot previews whose memory sits in an open
+// knowledge conflict (§4.2): one omitempty bool, no bytes on the others.
+func (h *Handlers) markContested(mems []MemorySummary) {
+	ids := make([]string, len(mems))
+	for i := range mems {
+		ids[i] = mems[i].id
+	}
+	kinds := h.db.OpenConflictKinds(ids)
+	for i := range mems {
+		if kinds[mems[i].id] != "" {
+			mems[i].Contested = true
+		}
+	}
 }
 
 // memoryIDs returns the row ids (= versions) of memories, for recall capture.

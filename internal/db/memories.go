@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -22,9 +23,10 @@ type SetMemoryOpts struct {
 	// BasedOn is the memory id the writer read before writing ("" = no causal
 	// context, legacy last-writer-wins; BasedOnNew = "I expect no live value").
 	// When it names anything other than the live row, a differing value is
-	// written as a live SIBLING (conflict_with = live row) instead of archiving
-	// the live row — a writer that read an older version never silently
-	// replaces a newer one.
+	// written as a live SIBLING (tracked as a knowledge_conflicts sibling row;
+	// the returned memory's ConflictWith names the live row) instead of
+	// archiving the live row — a writer that read an older version never
+	// silently replaces a newer one.
 	BasedOn string
 	// ChangeClass is the writer's declared change class (knowledge_log,
 	// design af783f93): editorial|additive|narrowing|breaking, "" = undeclared.
@@ -63,8 +65,13 @@ func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confiden
 //   - different value, upsert=false: conflict mode (unchanged).
 //   - different value, based_on "" or == current.id: supersede (as before).
 //   - different value, based_on names another version or BasedOnNew: sibling —
-//     current stays live, the new row has conflict_with=current and
-//     supersedes=based_on (nil for BasedOnNew).
+//     current stays live, the new row has supersedes=based_on (nil for
+//     BasedOnNew).
+//
+// Both keep-both-live cases (conflict mode and sibling) record the pair in a
+// knowledge_conflicts(kind=sibling) row in the same tx instead of writing
+// conflict_with (design 8d107daa §4.4); the returned memory still carries
+// ConflictWith = current so callers see the conflict as before.
 //
 // Every supersede closes the predecessor's validity window where the
 // successor's opens (valid_until = now unless an earlier one is set).
@@ -200,13 +207,18 @@ func (d *DB) setMemoryTx(tx *writerTx, project, agentName, key, value, tagsJSON,
 	}
 
 	if _, err := tx.Exec(
-		`INSERT INTO memories (id, key, value, tags, scope, project, agent_name, confidence, version, supersedes, conflict_with, created_at, updated_at, layer, valid_from, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live')`,
+		`INSERT INTO memories (id, key, value, tags, scope, project, agent_name, confidence, version, supersedes, created_at, updated_at, layer, valid_from, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'live')`,
 		mem.ID, mem.Key, mem.Value, mem.Tags, mem.Scope, mem.Project,
-		mem.AgentName, mem.Confidence, mem.Version, mem.Supersedes, mem.ConflictWith,
+		mem.AgentName, mem.Confidence, mem.Version, mem.Supersedes,
 		mem.CreatedAt, mem.UpdatedAt, mem.Layer, now,
 	); err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
+	}
+	if mem.ConflictWith != nil {
+		if err := recordSiblingTx(tx, project, scope, key, agentName, *mem.ConflictWith, mem.ID, entry.Op, now); err != nil {
+			return nil, fmt.Errorf("sibling conflict: %w", err)
+		}
 	}
 	if _, _, err := appendKnowledgeTx(tx, entry, agentName); err != nil {
 		return nil, err
@@ -823,7 +835,12 @@ func (d *DB) GetMemoryIncludingArchived(project, agentName, key, scope string) (
 	return []models.Memory{}, nil
 }
 
-// ResolveConflict resolves a conflict by setting the chosen value and archiving alternatives.
+// ResolveConflict resolves a conflict by setting the chosen value and archiving
+// alternatives. It is the legacy form of resolve_conflict (design 8d107daa
+// §4.4): the key's open sibling conflict (opened here when the key has none,
+// e.g. a pre-T2 conflict_with pair) is resolved as supersede keeping the
+// chosen row, and every archived alternative carries invalidated_by = that
+// conflict, so RevertConflict can restore it. The result is unchanged.
 func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string) (*models.Memory, error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
@@ -882,13 +899,41 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// Everything archived below is recorded against the key's sibling
+	// conflict, for revert.
+	var cid string
+	priors := map[string]any{}
+	archived := losers
+	if winner == nil {
+		archived = memories
+	}
+	if len(archived) > 0 {
+		ids := make([]string, len(memories))
+		for i := range memories {
+			ids[i] = memories[i].ID
+		}
+		if cid, err = siblingConflictForTx(tx, project, scope, key, agentName, ids, now); err != nil {
+			return nil, err
+		}
+		rows, err := loadConflictMembers(tx, memoryIDsOf(archived))
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range rows {
+			priors[m.ID] = m.prior(true)
+		}
+	}
+	archive := func(id string) error {
+		_, err := tx.Exec(
+			`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived', invalidated_by = ?, `+closeValidityClause+` WHERE id = ?`,
+			now, "conflict_resolution", cid, now, now, id,
+		)
+		return err
+	}
+
 	// Archive all losers
 	for _, l := range losers {
-		_, err := tx.Exec(
-			`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived', `+closeValidityClause+` WHERE id = ?`,
-			now, "conflict_resolution", now, now, l.ID,
-		)
-		if err != nil {
+		if err := archive(l.ID); err != nil {
 			return nil, fmt.Errorf("archive loser: %w", err)
 		}
 	}
@@ -908,11 +953,7 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 		// Neither matched — create a new resolution memory, archive all
 		for _, m := range memories {
 			if m.ArchivedAt == nil { // not already archived above
-				_, err := tx.Exec(
-					`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = 'conflict_resolution', status = 'archived', `+closeValidityClause+` WHERE id = ?`,
-					now, "conflict_resolution", now, now, m.ID,
-				)
-				if err != nil {
+				if err := archive(m.ID); err != nil {
 					return nil, fmt.Errorf("archive for resolution: %w", err)
 				}
 			}
@@ -973,11 +1014,72 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 	}, agentName); err != nil {
 		return nil, err
 	}
+	if cid != "" {
+		var evJSON string
+		if err := tx.QueryRow(`SELECT gate_evidence FROM knowledge_conflicts WHERE id = ?`, cid).Scan(&evJSON); err != nil {
+			return nil, fmt.Errorf("sibling conflict: %w", err)
+		}
+		ev := parseEvidence(evJSON)
+		ev["prior"] = priors
+		ev["resolved"] = map[string]any{"by": strings.ToLower(agentName), "profile": agentProfile(tx, project, agentName),
+			"layer": resolveLayer, "at": now, "legacy": true}
+		ej, _ := json.Marshal(ev)
+		if _, err := tx.Exec(`UPDATE knowledge_conflicts SET state = ?, resolution = ?, resolution_memory_id = ?, resolved_by = ?,
+				resolved_at = ?, gate_evidence = ?, lease_holder = NULL, lease_expires_at = NULL WHERE id = ?`,
+			ConflictResolved, ResolutionSupersede, winner.ID, strings.ToLower(agentName), now, string(ej), cid); err != nil {
+			return nil, fmt.Errorf("resolve sibling conflict: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
 
 	return winner, nil
+}
+
+// siblingConflictForTx returns the open sibling conflict holding any of the
+// key's live rows ids, or opens one with all of them (a key that reached
+// conflict before T2 has conflict_with rows and no conflict row).
+func siblingConflictForTx(tx *writerTx, project, scope, key, agent string, ids []string, now string) (string, error) {
+	ph, args := inPlaceholders(ids)
+	var cid string
+	err := tx.QueryRow(`SELECT c.id FROM knowledge_conflicts c
+		WHERE c.kind = ? AND c.state IN ('detected', 'claimed')
+		  AND EXISTS (SELECT 1 FROM json_each(c.members) j WHERE j.value IN (`+ph+`))
+		ORDER BY c.created_at LIMIT 1`, append([]any{ConflictKindSibling}, args...)...).Scan(&cid)
+	if err == nil {
+		return cid, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("sibling conflict: %w", err)
+	}
+	members := append([]string(nil), ids...)
+	sort.Strings(members)
+	cp := project
+	if scope == "global" {
+		cp = "*"
+	}
+	mj, _ := json.Marshal(members)
+	ej, _ := json.Marshal(map[string]any{"key": key, "scope": scope, "op": opResolve})
+	cid = uuid.New().String()
+	if _, err := tx.Exec(`INSERT INTO knowledge_conflicts (id, project, members, members_hash, kind, gate_evidence, detected_by, state, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(members_hash) DO UPDATE SET state = excluded.state`,
+		cid, cp, string(mj), membersHash(members), ConflictKindSibling, string(ej), strings.ToLower(agent), ConflictDetected, now); err != nil {
+		return "", fmt.Errorf("open sibling conflict: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT id FROM knowledge_conflicts WHERE members_hash = ?`, membersHash(members)).Scan(&cid); err != nil {
+		return "", fmt.Errorf("open sibling conflict: %w", err)
+	}
+	return cid, nil
+}
+
+func memoryIDsOf(mems []models.Memory) []string {
+	ids := make([]string, len(mems))
+	for i := range mems {
+		ids[i] = mems[i].ID
+	}
+	return ids
 }
 
 // GetMemoriesByLayer returns all active memories for an agent filtered by layer.
@@ -1108,15 +1210,24 @@ func (d *DB) GetMemoryByID(id string) (*models.Memory, error) {
 	return &mems[0], nil
 }
 
-// MemoryStats returns summary stats for the CLI/API.
+// MemoryStats returns summary stats for the CLI/API. conflicts counts live
+// sibling rows: pre-T2 conflict_with rows plus, for each open sibling conflict,
+// its members beyond the first.
 func (d *DB) MemoryStats(project string) (total int, conflicts int, err error) {
 	q := `SELECT COUNT(*), COALESCE(SUM(CASE WHEN conflict_with IS NOT NULL THEN 1 ELSE 0 END), 0) FROM memories WHERE archived_at IS NULL`
+	sq := `SELECT COALESCE(SUM(json_array_length(members) - 1), 0) FROM knowledge_conflicts WHERE kind = 'sibling' AND state IN ('detected', 'claimed')`
 	var args []any
 	if project != "" {
 		q += " AND project = ?"
+		sq += " AND project IN (?, '*')"
 		args = append(args, project)
 	}
-	err = d.ro().QueryRow(q, args...).Scan(&total, &conflicts)
+	if err = d.ro().QueryRow(q, args...).Scan(&total, &conflicts); err != nil {
+		return
+	}
+	var siblings int
+	err = d.ro().QueryRow(sq, args...).Scan(&siblings)
+	conflicts += siblings
 	return
 }
 

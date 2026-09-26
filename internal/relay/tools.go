@@ -411,15 +411,17 @@ func deleteMemoryTool() mcp.Tool {
 func resolveConflictTool() mcp.Tool {
 	return mcp.NewTool(
 		"resolve_conflict",
-		mcp.WithDescription("Resolve a memory conflict by choosing one value (existing or new). The rejected version is archived with resolution metadata."),
+		mcp.WithDescription("key+chosen_value keeps it; or action on detected conflicts: list, claim, resolve (lease holder; keep=member id), revert (reversible)."),
 		asParam,
 		projectParam,
-		mcp.WithString("key", mcp.Description("Conflicted memory key"), mcp.Required()),
-		mcp.WithString("chosen_value", mcp.Description("Value to keep"), mcp.Required()),
-		mcp.WithString("scope",
-			mcp.Description("Scope of the conflict"),
-			mcp.Enum("agent", "project", "global"),
-		),
+		mcp.WithString("key"),
+		mcp.WithString("chosen_value"),
+		mcp.WithString("scope", mcp.Enum("agent", "project", "global")),
+		mcp.WithString("action", mcp.Enum("list", "claim", "resolve", "revert")),
+		mcp.WithString("conflict_id"),
+		mcp.WithString("resolution", mcp.Enum("merge", "supersede", "reject_new", "scope_split", "both_valid_temporal", "override_declared", "not_a_conflict")),
+		mcp.WithString("keep"),
+		mcp.WithString("rationale"),
 	)
 }
 
@@ -664,7 +666,7 @@ func cancelTaskTool() mcp.Tool {
 func reclaimTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"reclaim_task",
-		mcp.WithDescription("Take over a DEAD holder's task: only if the lease expired or the holder is inactive, else TASK_LEASE_HELD. The task becomes 'accepted' under you with a fresh lease."),
+		mcp.WithDescription("Take over a DEAD holder's task (lease expired or holder inactive, else TASK_LEASE_HELD): accepted under you, fresh lease."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),

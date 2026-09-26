@@ -518,6 +518,9 @@ type MemorySummary struct {
 	Confidence     string `json:"confidence,omitempty"`
 	AgentName      string `json:"agent_name,omitempty"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
+	// Contested: the memory is a member of an open knowledge conflict (⚠
+	// contested, design 8d107daa §4.2). Omitted otherwise.
+	Contested bool `json:"contested,omitempty"`
 
 	// id is the served memory row id (= version), recorded by the boot
 	// consumption snapshot (design 54e529d8). Never serialized.

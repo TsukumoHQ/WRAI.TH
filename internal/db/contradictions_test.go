@@ -2,10 +2,12 @@ package db
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -423,4 +425,411 @@ func pairIn(line, a, b string) bool {
 	}
 	i := has(a, -1)
 	return i >= 0 && has(b, i) >= 0
+}
+
+// Conflict resolution, reversible invalidation, the sibling path and sampled
+// audits (design 8d107daa T2, ruling ed744dee).
+func TestContradictionResolution(t *testing.T) {
+	// fixture: alice (profile dev, reports to boss, profile lead) resolves;
+	// bob (profile ops) is a second resolver; cto is an executive; carol is
+	// unrelated. a1 / a2 are two project constraints stating the same fact.
+	type fixture struct {
+		d      *DB
+		a1, a2 string
+	}
+	now := time.Now().UTC()
+	setup := func(t *testing.T) *fixture {
+		t.Helper()
+		d := testDB(t)
+		seedAgent(t, d.conn, "foo", "alice", "active", "dev", "boss", 0)
+		seedAgent(t, d.conn, "foo", "bob", "active", "ops", "", 0)
+		seedAgent(t, d.conn, "foo", "boss", "active", "lead", "", 0)
+		seedAgent(t, d.conn, "foo", "cto", "active", "cto", "", 0)
+		seedAgent(t, d.conn, "foo", "carol", "active", "dev", "", 0)
+		if _, err := d.conn.Exec(`UPDATE agents SET is_executive = 1 WHERE name = 'cto'`); err != nil {
+			t.Fatal(err)
+		}
+		f := &fixture{d: d}
+		m1, err := d.SetMemory("foo", "alice", "pg-version", "foo runs PostgreSQL 16", "[]", "project", "stated", "constraints")
+		if err != nil {
+			t.Fatal(err)
+		}
+		m2, err := d.SetMemory("foo", "bob", "foo-postgres", "foo runs PostgreSQL 16 in prod", "[]", "project", "stated", "constraints")
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.a1, f.a2 = m1.ID, m2.ID
+		return f
+	}
+	// open inserts a detected candidate conflict over ids.
+	open := func(t *testing.T, d *DB, ids ...string) string {
+		t.Helper()
+		members := append([]string(nil), ids...)
+		sort.Strings(members)
+		mj, _ := json.Marshal(members)
+		id := "c-" + strings.Join(members, "-")[:12] + "-" + time.Now().Format("150405.000000000")
+		if _, err := d.conn.Exec(`INSERT INTO knowledge_conflicts (id, project, members, members_hash, kind, gate_evidence, detected_by, state, created_at)
+			VALUES (?, 'foo', ?, ?, 'candidate', '{}', 'relay-sweeper', 'detected', ?)`, id, string(mj), membersHash(members)+id, now.Format(memoryTimeFmt)); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	claim := func(t *testing.T, d *DB, id, agent string) {
+		t.Helper()
+		if ok, err := d.ClaimConflict(id, agent, now); err != nil || !ok {
+			t.Fatalf("claim %s by %s: %v %v", id, agent, ok, err)
+		}
+	}
+	resolve := func(d *DB, id, agent, res, keep string) (*ConflictOutcome, error) {
+		return d.ResolveKnowledgeConflict(ConflictResolution{ID: id, Agent: agent, Resolution: res, Keep: keep, Rationale: "same fact", Now: now})
+	}
+	// rowOf is every memories column but invalidated_by, as one string.
+	rowOf := func(t *testing.T, d *DB, id string) string {
+		t.Helper()
+		var s string
+		if err := d.conn.QueryRow(`SELECT id || '|' || key || '|' || value || '|' || tags || '|' || scope || '|' || project || '|' ||
+				agent_name || '|' || confidence || '|' || version || '|' || COALESCE(supersedes, '') || '|' || COALESCE(conflict_with, '') || '|' ||
+				created_at || '|' || updated_at || '|' || COALESCE(archived_at, '') || '|' || COALESCE(archived_by, '') || '|' ||
+				COALESCE(archived_reason, '') || '|' || layer || '|' || COALESCE(valid_from, '') || '|' || COALESCE(valid_until, '') || '|' || status
+			FROM memories WHERE id = ?`, id).Scan(&s); err != nil {
+			t.Fatalf("row %s: %v", id, err)
+		}
+		return s
+	}
+	count := func(t *testing.T, d *DB, q string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := d.conn.QueryRow(q, args...).Scan(&n); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return n
+	}
+	head := func(t *testing.T, d *DB) int {
+		return count(t, d, `SELECT COALESCE(MAX(rev), 0) FROM knowledge_log`)
+	}
+
+	t.Run("MergeArchivesWithInvalidatedByAndLogsRetraction", func(t *testing.T) {
+		f := setup(t)
+		// carol served a2 at boot: the retraction must reach her.
+		if _, _, err := f.d.RecordSnapshot("foo", "carol", "", SnapshotBoot, []string{f.a2}); err != nil {
+			t.Fatal(err)
+		}
+		cid := open(t, f.d, f.a1, f.a2)
+		claim(t, f.d, cid, "alice")
+		out, err := resolve(f.d, cid, "alice", ResolutionMerge, f.a1)
+		if err != nil || out.State != ConflictResolved || out.Kept != f.a1 || len(out.Archived) != 1 || out.Archived[0] != f.a2 {
+			t.Fatalf("merge = %+v, %v", out, err)
+		}
+		var status, inv, reason string
+		if err := f.d.conn.QueryRow(`SELECT status, COALESCE(invalidated_by, ''), COALESCE(archived_reason, '') FROM memories WHERE id = ?`, f.a2).
+			Scan(&status, &inv, &reason); err != nil || status != "archived" || inv != cid || reason != "conflict:merge" {
+			t.Fatalf("loser = %s / invalidated_by %q / %q (%v), want archived / %s", status, inv, reason, err, cid)
+		}
+		if memRow(t, f.d, f.a1).ArchivedAt != nil {
+			t.Fatal("kept member archived")
+		}
+		var class string
+		if err := f.d.conn.QueryRow(`SELECT change_class FROM knowledge_log WHERE op = 'retract' AND prev_memory_id = ?`, f.a2).Scan(&class); err != nil || class != ChangeRetraction {
+			t.Fatalf("retraction row class %q (%v)", class, err)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_edges WHERE src_memory_id = ? AND dst_memory_id = ? AND kind = 'supersedes'
+			AND declared = 1 AND rule = ?`, f.a1, f.a2, "resolution:"+cid); n != 1 {
+			t.Fatalf("supersedes edge = %d, want 1", n)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE id = ? AND state = 'resolved' AND resolution = 'merge'
+			AND resolved_by = 'alice' AND resolution_memory_id = ? AND lease_holder IS NULL`, cid, f.a1); n != 1 {
+			t.Fatal("conflict row not resolved as merge by alice")
+		}
+		rep, err := f.d.EvaluateCoherence(now)
+		if err != nil || rep.Rollouts != 1 || rep.Opened != 1 {
+			t.Fatalf("coherence after the merge = %+v (%v), want 1 rollout reaching carol", rep, err)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM obligations WHERE norm_id = ? AND bearer = 'carol' AND state = 'active'`, NormCoherenceReassess); n != 1 {
+			t.Fatalf("carol's reassess obligations = %d, want 1", n)
+		}
+	})
+
+	t.Run("OnlyLeaseHolderResolves", func(t *testing.T) {
+		f := setup(t)
+		cid := open(t, f.d, f.a1, f.a2)
+		before := head(t, f.d)
+		if _, err := resolve(f.d, cid, "alice", ResolutionMerge, f.a1); !errors.Is(err, ErrConflictNotHeld) {
+			t.Fatalf("unclaimed resolve err = %v", err)
+		}
+		claim(t, f.d, cid, "alice")
+		if ok, _ := f.d.ClaimConflict(cid, "bob", now); ok {
+			t.Fatal("bob claimed a leased conflict")
+		}
+		for _, who := range []string{"bob", "carol"} {
+			if _, err := resolve(f.d, cid, who, ResolutionMerge, f.a1); !errors.Is(err, ErrConflictNotHeld) {
+				t.Fatalf("%s resolve err = %v, want ErrConflictNotHeld", who, err)
+			}
+		}
+		if _, err := f.d.ResolveKnowledgeConflict(ConflictResolution{ID: cid, Agent: "alice", Resolution: ResolutionMerge, Keep: f.a1,
+			Now: now.Add(3 * time.Hour)}); !errors.Is(err, ErrConflictNotHeld) {
+			t.Fatalf("expired-lease resolve err = %v", err)
+		}
+		if _, err := resolve(f.d, cid, "alice", ResolutionMerge, "not-a-member"); !errors.Is(err, ErrConflictResolution) {
+			t.Fatalf("keep outside members err = %v", err)
+		}
+		if head(t, f.d) != before || count(t, f.d, `SELECT COUNT(*) FROM memories WHERE archived_at IS NOT NULL`) != 0 ||
+			count(t, f.d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE id = ? AND state = 'claimed' AND lease_holder = 'alice'`, cid) != 1 {
+			t.Fatal("a refused resolve wrote something")
+		}
+	})
+
+	t.Run("RevertRestoresExactRowAndLogsSet", func(t *testing.T) {
+		f := setup(t)
+		orig := rowOf(t, f.d, f.a2)
+		cid := open(t, f.d, f.a1, f.a2)
+		claim(t, f.d, cid, "alice")
+		if _, err := resolve(f.d, cid, "alice", ResolutionSupersede, f.a1); err != nil {
+			t.Fatal(err)
+		}
+		before := head(t, f.d)
+		out, err := f.d.RevertConflict(cid, "boss", now)
+		if err != nil || len(out.Restored) != 1 || out.Restored[0] != f.a2 || out.State != ConflictDetected {
+			t.Fatalf("revert = %+v, %v", out, err)
+		}
+		if got := rowOf(t, f.d, f.a2); got != orig {
+			t.Fatalf("restored row differs:\n got %s\nwant %s", got, orig)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM memories WHERE id = ? AND invalidated_by = ?`, f.a2, cid); n != 1 {
+			t.Fatal("invalidated_by not kept for history")
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_log WHERE rev > ? AND op = 'set' AND memory_id = ?`, before, f.a2); n != 1 {
+			t.Fatalf("set rows for the restore = %d, want 1", n)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_edges WHERE rule = ?`, "resolution:"+cid); n != 0 {
+			t.Fatal("resolution edges kept after revert")
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE id = ? AND state = 'detected' AND audit = 'reverted' AND resolution IS NULL`, cid); n != 1 {
+			t.Fatal("conflict not back to detected / reverted")
+		}
+
+		// The legacy key/chosen_value path closes the validity window; revert
+		// gives it back too.
+		s1, _ := f.d.SetMemory("foo", "alice", "k", "one", "[]", "project", "stated", "behavior")
+		s2, _ := f.d.SetMemoryWith("foo", "bob", "k", "two", "[]", "project", "stated", "behavior", true, SetMemoryOpts{BasedOn: BasedOnNew})
+		origS2 := rowOf(t, f.d, s2.ID)
+		if _, err := f.d.ResolveConflict("foo", "alice", "k", "one", "project"); err != nil {
+			t.Fatal(err)
+		}
+		var legacy string
+		if err := f.d.conn.QueryRow(`SELECT COALESCE(invalidated_by, '') FROM memories WHERE id = ?`, s2.ID).Scan(&legacy); err != nil || legacy == "" {
+			t.Fatalf("legacy archive without invalidated_by (%v)", err)
+		}
+		if _, err := f.d.RevertConflict(legacy, "cto", now); err != nil {
+			t.Fatal(err)
+		}
+		if got := rowOf(t, f.d, s2.ID); got != origS2 {
+			t.Fatalf("legacy restore differs:\n got %s\nwant %s", got, origS2)
+		}
+		if memRow(t, f.d, s1.ID).ArchivedAt != nil {
+			t.Fatal("legacy winner archived")
+		}
+	})
+
+	t.Run("RevertAuthority", func(t *testing.T) {
+		f := setup(t)
+		cid := open(t, f.d, f.a1, f.a2)
+		claim(t, f.d, cid, "alice")
+		out, err := resolve(f.d, cid, "alice", ResolutionMerge, f.a1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// The first archiving resolution is sampled; its auditor is alice's
+		// lead (profile lead != dev).
+		if out.Audit != AuditSampled || out.Auditor != "boss" || out.AuditorProfile != "lead" {
+			t.Fatalf("audit = %q auditor %q/%q, want sampled boss/lead", out.Audit, out.Auditor, out.AuditorProfile)
+		}
+		before := head(t, f.d)
+		for _, who := range []string{"alice", "carol", "bob"} {
+			if _, err := f.d.RevertConflict(cid, who, now); !errors.Is(err, ErrRevertNotAllowed) {
+				t.Fatalf("%s revert err = %v, want ErrRevertNotAllowed", who, err)
+			}
+		}
+		if head(t, f.d) != before || memRow(t, f.d, f.a2).ArchivedAt == nil {
+			t.Fatal("a refused revert wrote something")
+		}
+		if _, err := f.d.RevertConflict(cid, "cto", now); err != nil {
+			t.Fatalf("executive revert: %v", err)
+		}
+		if _, err := f.d.RevertConflict(cid, "cto", now); !errors.Is(err, ErrConflictNotResolved) {
+			t.Fatalf("second revert err = %v", err)
+		}
+
+		// The auditor profile (not the lead) may revert: bob resolves, his
+		// auditor is an executive of another profile (cto).
+		claim(t, f.d, cid, "bob")
+		if _, err := f.d.conn.Exec(`UPDATE settings SET value = '0' WHERE key = ?`, settingArchiveSeq); err != nil {
+			t.Fatal(err)
+		}
+		out, err = resolve(f.d, cid, "bob", ResolutionMerge, f.a2)
+		if err != nil || out.Audit != AuditSampled || out.AuditorProfile != "cto" {
+			t.Fatalf("bob's merge = %+v, %v", out, err)
+		}
+		seedAgent(t, f.d.conn, "foo", "cto-2", "active", "cto", "", 0)
+		if _, err := f.d.RevertConflict(cid, "cto-2", now); err != nil {
+			t.Fatalf("auditor-profile revert: %v", err)
+		}
+	})
+
+	t.Run("SiblingWritesConflictRowNotConflictWith", func(t *testing.T) {
+		d := testDB(t)
+		v1, _ := d.SetMemory("foo", "a", "k", "one", "[]", "project", "stated", "behavior")
+		v2, err := d.SetMemoryWith("foo", "b", "k", "two", "[]", "project", "stated", "behavior", true, SetMemoryOpts{BasedOn: BasedOnNew})
+		if err != nil || v2.ConflictWith == nil || *v2.ConflictWith != v1.ID {
+			t.Fatalf("sibling result = %+v, %v (callers still see conflict_with)", v2, err)
+		}
+		if n := count(t, d, `SELECT COUNT(*) FROM memories WHERE conflict_with IS NOT NULL`); n != 0 {
+			t.Fatalf("conflict_with written on %d rows", n)
+		}
+		want, _ := json.Marshal(func() []string { s := []string{v1.ID, v2.ID}; sort.Strings(s); return s }())
+		if n := count(t, d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE kind = 'sibling' AND state = 'detected' AND members = ?`, string(want)); n != 1 {
+			t.Fatal("no sibling conflict row with both members")
+		}
+		// A third live value joins the same row; upsert=false does the same.
+		v3, _ := d.SetMemoryWith("foo", "c", "k", "three", "[]", "project", "stated", "behavior", true, SetMemoryOpts{BasedOn: BasedOnNew})
+		v4, _ := d.SetMemory("foo", "e", "k", "four", "[]", "project", "stated", "behavior", false)
+		var members string
+		if err := d.conn.QueryRow(`SELECT members FROM knowledge_conflicts WHERE kind = 'sibling'`).Scan(&members); err != nil {
+			t.Fatal(err)
+		}
+		for _, id := range []string{v1.ID, v2.ID, v3.ID, v4.ID} {
+			if !strings.Contains(members, id) {
+				t.Fatalf("members %s miss %s", members, id)
+			}
+		}
+		if n := count(t, d, `SELECT COUNT(*) FROM knowledge_conflicts`); n != 1 {
+			t.Fatalf("conflict rows = %d, want one group", n)
+		}
+		if _, c, err := d.MemoryStats("foo"); err != nil || c != 3 {
+			t.Fatalf("MemoryStats conflicts = %d (%v), want 3", c, err)
+		}
+		// The legacy resolve closes the group.
+		if _, err := d.ResolveConflict("foo", "a", "k", "three", "project"); err != nil {
+			t.Fatal(err)
+		}
+		if n := count(t, d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE state = 'resolved' AND resolution = 'supersede' AND resolution_memory_id = ?`, v3.ID); n != 1 {
+			t.Fatal("legacy resolve left the sibling conflict open")
+		}
+	})
+
+	t.Run("AuditSampledAndPrecisionGateDowngrades", func(t *testing.T) {
+		f := setup(t)
+		f.d.SetSetting(settingAuditRate, "1") // audit every one: five audits
+		pair := func(i int) (string, string) {
+			x, _ := f.d.SetMemory("foo", "alice", "dup-a-"+strconv.Itoa(i), "fact number "+strconv.Itoa(i), "[]", "project", "stated", "constraints")
+			y, _ := f.d.SetMemory("foo", "bob", "dup-b-"+strconv.Itoa(i), "fact number "+strconv.Itoa(i)+" again", "[]", "project", "stated", "constraints")
+			return x.ID, y.ID
+		}
+		for i := 0; i < 5; i++ {
+			x, y := pair(i)
+			cid := open(t, f.d, x, y)
+			claim(t, f.d, cid, "alice")
+			out, err := resolve(f.d, cid, "alice", ResolutionMerge, x)
+			if err != nil || out.Audit != AuditSampled || out.Auditor != "boss" {
+				t.Fatalf("merge %d = %+v, %v", i, out, err)
+			}
+			if i < 3 {
+				if up, err := resolve(f.d, cid, "boss", ResolutionMerge, x); err != nil || up.Audit != AuditUpheld {
+					t.Fatalf("uphold %d = %+v, %v", i, up, err)
+				}
+			} else if _, err := f.d.RevertConflict(cid, "boss", now); err != nil {
+				t.Fatalf("revert %d: %v", i, err)
+			}
+		}
+		p, n, err := precisionTx(f.d.conn, "dev", "constraints", now.Add(-precisionWindow).Format(memoryTimeFmt))
+		if err != nil || n != 5 || p != 0.6 {
+			t.Fatalf("precision = %v over %d (%v), want 0.6 over 5", p, n, err)
+		}
+
+		// alice's next merge on constraints is only a proposal.
+		cid := open(t, f.d, f.a1, f.a2)
+		claim(t, f.d, cid, "alice")
+		before := head(t, f.d)
+		out, err := resolve(f.d, cid, "alice", ResolutionMerge, f.a1)
+		if err != nil || !out.Proposed || out.State != ConflictDetected || len(out.Archived) != 0 {
+			t.Fatalf("gated merge = %+v, %v, want a proposal", out, err)
+		}
+		if head(t, f.d) != before || memRow(t, f.d, f.a2).ArchivedAt != nil {
+			t.Fatal("a proposal archived something")
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE id = ? AND failed_claims = 0
+			AND json_extract(gate_evidence, '$.proposal.by') = 'alice'`, cid); n != 1 {
+			t.Fatal("proposal not recorded (or counted as a failed claim)")
+		}
+		// Archiving-free resolutions are not gated.
+		claim(t, f.d, cid, "alice")
+		if _, err := resolve(f.d, cid, "alice", ResolutionMerge, f.a1); !errors.Is(err, ErrConcurrenceSelf) {
+			t.Fatalf("self-concurrence err = %v", err)
+		}
+		if ok, _ := f.d.ReleaseConflict(cid, "alice"); !ok {
+			t.Fatal("release")
+		}
+		// bob's matching resolve is the second concurrence: now it archives.
+		claim(t, f.d, cid, "bob")
+		out, err = resolve(f.d, cid, "bob", ResolutionMerge, f.a1)
+		if err != nil || out.State != ConflictResolved || len(out.Archived) != 1 {
+			t.Fatalf("concurrence = %+v, %v", out, err)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM knowledge_conflicts WHERE id = ? AND json_extract(gate_evidence, '$.concurred_by') = 'bob'`, cid); n != 1 {
+			t.Fatal("concurrence not recorded")
+		}
+		// Without the setting the rate is 1 in 3 below 30 audits.
+		f.d.SetSetting(settingAuditRate, "")
+		sampled := 0
+		for i := 10; i < 16; i++ {
+			x, y := pair(i)
+			c := open(t, f.d, x, y)
+			claim(t, f.d, c, "bob")
+			o, err := resolve(f.d, c, "bob", ResolutionMerge, x)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.Audit == AuditSampled {
+				sampled++
+			}
+		}
+		if sampled != 2 {
+			t.Fatalf("sampled %d of 6 at the early rate, want 2", sampled)
+		}
+	})
+
+	t.Run("NothingArchivedWithoutReversibleRecord", func(t *testing.T) {
+		f := setup(t)
+		mk := func(k, v, agent string) string {
+			m, err := f.d.SetMemory("foo", agent, k, v, "[]", "project", "stated", "constraints")
+			if err != nil {
+				t.Fatal(err)
+			}
+			return m.ID
+		}
+		for _, res := range []string{ResolutionMerge, ResolutionSupersede, ResolutionRejectNew} {
+			x, y := mk(res+"-x", "value "+res, "alice"), mk(res+"-y", "value "+res+" too", "bob")
+			cid := open(t, f.d, x, y)
+			claim(t, f.d, cid, "alice")
+			if _, err := resolve(f.d, cid, "alice", res, x); err != nil {
+				t.Fatalf("%s: %v", res, err)
+			}
+		}
+		// Legacy: winner found, and neither matched (a new resolution row).
+		for i, chosen := range []string{"one", "brand new"} {
+			k := "legacy-" + strconv.Itoa(i)
+			_, _ = f.d.SetMemory("foo", "alice", k, "one", "[]", "project", "stated", "behavior")
+			_, _ = f.d.SetMemoryWith("foo", "bob", k, "two", "[]", "project", "stated", "behavior", true, SetMemoryOpts{BasedOn: BasedOnNew})
+			if _, err := f.d.ResolveConflict("foo", "alice", k, chosen, "project"); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM memories WHERE archived_at IS NOT NULL AND archived_reason LIKE 'conflict%'`); n != 6 {
+			t.Fatalf("conflict archives = %d, want 6 (merge, supersede, reject_new, legacy 1 + 2)", n)
+		}
+		if n := count(t, f.d, `SELECT COUNT(*) FROM memories m WHERE m.archived_at IS NOT NULL AND m.archived_reason LIKE 'conflict%'
+			AND (m.invalidated_by IS NULL OR NOT EXISTS (SELECT 1 FROM knowledge_conflicts c WHERE c.id = m.invalidated_by
+			  AND json_extract(c.gate_evidence, '$.prior."' || m.id || '"') IS NOT NULL))`); n != 0 {
+			t.Fatalf("%d archive(s) without a reversible record", n)
+		}
+	})
 }
