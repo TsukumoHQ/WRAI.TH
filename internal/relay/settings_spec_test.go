@@ -34,7 +34,7 @@ func getSettingEntry(t *testing.T, body map[string]any, key string) (map[string]
 }
 
 // TestSettingsSpecAllowlistDerived (T2a AC1): writableKeys() is the spec-derived
-// full PUT allowlist (31 = 9 legacy + 22 Operational), contains no evil_key;
+// full PUT allowlist (35 = 9 legacy + 26 Operational), contains no evil_key;
 // apiPutSetting consults the spec — a legacy key and an Operational key both
 // apply via PUT; spec keys are unique and every group is valid.
 func TestSettingsSpecAllowlistDerived(t *testing.T) {
@@ -52,6 +52,7 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 		"activity_exit_seconds", "cost_default_model",
 		"ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age",
 		"class_budget_mode", "attribution_share", "knowledge_min_compaction_lag",
+		"coherence_mode", "coherence_reassess_age", "coherence_reassess_breaking_age", "coherence_role_age",
 	}
 
 	wk := writableKeys()
@@ -59,8 +60,8 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 	for _, k := range append(append([]string{}, legacy...), operational...) {
 		wantWK[k] = true
 	}
-	if len(wk) != 31 || len(wantWK) != 31 {
-		t.Fatalf("writableKeys size %d, expected set size %d, want 31", len(wk), len(wantWK))
+	if len(wk) != 35 || len(wantWK) != 35 {
+		t.Fatalf("writableKeys size %d, expected set size %d, want 35", len(wk), len(wantWK))
 	}
 	for k := range wantWK {
 		if !wk[k] {
@@ -446,7 +447,8 @@ func TestSettingsSpecClampsMatchReaders(t *testing.T) {
 		}
 		return int64(v / time.Second)
 	}
-	for _, k := range []string{"ack_notify_age", "ack_escalate_age", "ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age"} {
+	for _, k := range []string{"ack_notify_age", "ack_escalate_age", "ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age",
+		"coherence_reassess_age", "coherence_role_age"} {
 		var def, mn, mx int64
 		if err := raw.QueryRow(`SELECT deadline_default_s, deadline_min_s, deadline_max_s FROM norms WHERE deadline_setting = ?`, k).
 			Scan(&def, &mn, &mx); err != nil {
@@ -470,6 +472,16 @@ func TestSettingsSpecClampsMatchReaders(t *testing.T) {
 		mode.Default != db.ClassBudgetModeShadow {
 		t.Errorf("class_budget_mode spec %v/%s != db enum", mode.Enum, mode.Default)
 	}
+	cm := specByKey[db.SettingCoherenceMode]
+	if strings.Join(cm.Enum, ",") != strings.Join([]string{db.CoherenceModeOff, db.CoherenceModeAdvisory, "enforce"}, ",") ||
+		cm.Default != db.CoherenceModeAdvisory {
+		t.Errorf("coherence_mode spec %v/%s != db enum (enforce is read by T2's fence)", cm.Enum, cm.Default)
+	}
+	// coherence_reassess_breaking_age has no norms row: rolloutDeadline reads it
+	// with SettingDuration(4h, 15m..72h).
+	if s := specByKey["coherence_reassess_breaking_age"]; s.Min != dur(15*time.Minute) || s.Max != dur(72*time.Hour) || s.Default != dur(4*time.Hour) {
+		t.Errorf("coherence_reassess_breaking_age spec %s [%s..%s], want 4h [15m..72h]", s.Default, s.Min, s.Max)
+	}
 	// Readers outside this package's reach: attribution_share (db/class_budgets.go,
 	// default 0.6, accepts 0 < v <= 1) and knowledge_min_compaction_lag
 	// (compactKnowledgeLogs, knowledge S2: 30 d, clamp 7..365 d).
@@ -478,5 +490,54 @@ func TestSettingsSpecClampsMatchReaders(t *testing.T) {
 	}
 	if s := specByKey["knowledge_min_compaction_lag"]; s.Min != dur(7*24*time.Hour) || s.Max != dur(365*24*time.Hour) || s.Default != dur(30*24*time.Hour) {
 		t.Errorf("knowledge_min_compaction_lag spec %s [%s..%s], want 720h [168h..8760h]", s.Default, s.Min, s.Max)
+	}
+}
+
+// TestSettingsSpecCoherenceKeys (a6f347ec AC1): coherence_mode and the three
+// reassess ages are PUT-writable and read back; a bogus mode and out-of-range
+// ages are refused with 400 naming the key; coherence_cursor_rev is listed
+// read-only and refused on PUT.
+func TestSettingsSpecCoherenceKeys(t *testing.T) {
+	r := testRelay(t)
+	for _, kv := range [][2]string{
+		{"coherence_mode", "enforce"}, {"coherence_mode", "off"}, {"coherence_mode", "advisory"},
+		{"coherence_reassess_age", "15m"}, {"coherence_reassess_breaking_age", "72h"}, {"coherence_role_age", "12h"},
+	} {
+		w := doAPI(r, http.MethodPut, "/settings", `{"`+kv[0]+`":"`+kv[1]+`"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT %s=%s: status %d\nbody: %s", kv[0], kv[1], w.Code, w.Body.String())
+		}
+		if got := r.DB.GetSetting(kv[0]); got != kv[1] {
+			t.Errorf("%s read back %q, want %q", kv[0], got, kv[1])
+		}
+	}
+	for _, b := range [][2]string{
+		{"coherence_mode", "bogus"}, {"coherence_mode", "shadow"}, {"coherence_reassess_age", "10m"},
+		{"coherence_reassess_breaking_age", "73h"}, {"coherence_role_age", "0s"}, {"coherence_role_age", "soon"},
+	} {
+		before := r.DB.GetSetting(b[0])
+		w := doAPI(r, http.MethodPut, "/settings", `{"`+b[0]+`":"`+b[1]+`"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("PUT %s=%s: status %d, want 400", b[0], b[1], w.Code)
+		}
+		if j := decodeJSON(t, w); j["key"] != b[0] {
+			t.Errorf("PUT %s=%s: 400 names key %v", b[0], b[1], j["key"])
+		}
+		if got := r.DB.GetSetting(b[0]); got != before {
+			t.Errorf("PUT %s=%s changed the stored value to %q", b[0], b[1], got)
+		}
+	}
+	if w := doAPI(r, http.MethodPut, "/settings", `{"coherence_cursor_rev":"0"}`); w.Code != http.StatusForbidden {
+		t.Errorf("PUT coherence_cursor_rev: status %d, want 403", w.Code)
+	}
+	body := decodeJSON(t, doAPI(r, http.MethodGet, "/settings", ""))
+	for _, k := range []string{"coherence_mode", "coherence_reassess_age", "coherence_reassess_breaking_age", "coherence_role_age", "coherence_cursor_rev"} {
+		e, ok := getSettingEntry(t, body, k)
+		if !ok {
+			t.Fatalf("GET /settings does not list %s", k)
+		}
+		if wantW := k != "coherence_cursor_rev"; e["group"] != groupOperational || e["writable"] != wantW {
+			t.Errorf("%s = {group:%v writable:%v}, want {operational, %v}", k, e["group"], e["writable"], wantW)
+		}
 	}
 }

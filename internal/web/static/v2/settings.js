@@ -80,6 +80,10 @@ const LABELS = {
   class_budget_mode: { label: 'Class budget mode', help: 'off | shadow (record only) | on' },
   attribution_share: { label: 'Attribution share', help: 'number in (0, 1]: min share to blame one dimension' },
   knowledge_min_compaction_lag: { label: 'Knowledge compaction lag', help: 'knowledge_log rows younger than this are kept' },
+  coherence_mode: { label: 'Coherence mode', help: 'off | advisory (reassess obligations only) | enforce (claim fence)' },
+  coherence_reassess_age: { label: 'Coherence reassess age', help: 'reassess deadline after a narrowing or retraction' },
+  coherence_reassess_breaking_age: { label: 'Coherence breaking age', help: 'reassess deadline after a breaking change' },
+  coherence_role_age: { label: 'Coherence role age', help: 'deadline once a reassess escalates to the lead' },
   // Timing (read-only consts, shown for transparency)
   writer_timeout: { label: 'Writer timeout', help: 'must stay below the referential scan timeout' },
   referential_scan_timeout: { label: 'Referential scan timeout', help: 'writer timeout must stay below this' },

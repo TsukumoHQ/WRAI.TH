@@ -120,6 +120,15 @@ var settingSpecs = []settingSpec{
 	{Key: "class_budget_mode", Group: groupOperational, Kind: kindEnum, Source: "db", Writable: true, Enum: []string{"off", "shadow", "on"}, Default: "shadow"},
 	{Key: "attribution_share", Group: groupOperational, Kind: kindString, Source: "db", Writable: true, Default: "0.6", Note: "number in (0, 1]: min share to blame one dimension"},
 	{Key: "knowledge_min_compaction_lag", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(7 * 24 * time.Hour), Max: dur(365 * 24 * time.Hour), Default: dur(30 * 24 * time.Hour), Note: "knowledge_log rows younger than this are never compacted"},
+	// Coherence (T1, db/coherence.go): the mode cleanup's evaluateCoherence and
+	// T2's claim fence read, and the reassess deadlines. Reassess and role ages
+	// are norms-row backed (coherence.reassess / coherence.reassess_role); the
+	// breaking age is read by rolloutDeadline. TestSettingsSpecClampsMatchReaders
+	// pins each pair.
+	{Key: "coherence_mode", Group: groupOperational, Kind: kindEnum, Source: "db", Writable: true, Enum: []string{"off", "advisory", "enforce"}, Default: "advisory", Note: "enforce is the cto's flip after the 2-week advisory gate"},
+	{Key: "coherence_reassess_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(15 * time.Minute), Max: dur(72 * time.Hour), Default: dur(24 * time.Hour), Note: "reassess deadline after a narrowing or retraction"},
+	{Key: "coherence_reassess_breaking_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(15 * time.Minute), Max: dur(72 * time.Hour), Default: dur(4 * time.Hour), Note: "reassess deadline after a breaking change"},
+	{Key: "coherence_role_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(15 * time.Minute), Max: dur(72 * time.Hour), Default: dur(24 * time.Hour), Note: "deadline once a reassess escalates to the consumer's lead"},
 
 	// ---- Operational RO (destructive toggles / dynamic keys stay out of the panel) ----
 	{Key: "limbo_sweep_apply", Group: groupOperational, Kind: kindBool, Source: "db", Default: "0", Note: "destructive; env/SQL only"},
@@ -128,6 +137,7 @@ var settingSpecs = []settingSpec{
 	{Key: "github_webhook_project", Group: groupOperational, Kind: kindString, Source: "db"},
 	{Key: "signal_webhook_project", Group: groupOperational, Kind: kindString, Source: "db"},
 	{Key: "budget_epoch", Group: groupOperational, Kind: kindString, Source: "db", Note: "stamped by migration; exceptions opened before it never count toward a class budget"},
+	{Key: "coherence_cursor_rev", Group: groupOperational, Kind: kindString, Source: "db", Note: "internal: knowledge_log rev the coherence sweeper has consumed (CAS cursor); never written by hand"},
 
 	// ---- Timing (RO, compile-time consts) ----
 	{Key: "purge_interval", Group: groupTiming, Kind: kindDuration, Source: "code", Default: dur(5 * time.Minute)},
@@ -155,7 +165,7 @@ var specByKey = func() map[string]settingSpec {
 }()
 
 // writableKeys is the full PUT allowlist derived from the spec: every key with
-// Writable=true (the 9 legacy panel keys + the 22 Operational knobs).
+// Writable=true (the 9 legacy panel keys + the 26 Operational knobs).
 func writableKeys() map[string]bool {
 	m := make(map[string]bool, len(settingSpecs))
 	for _, s := range settingSpecs {
