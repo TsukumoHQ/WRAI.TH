@@ -243,7 +243,11 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 		}
 	}
 
-	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes, dependsOn)
+	mem, err := h.db.RememberDecision(project, agent, area, decision, rationale, tags, supersedes, dependsOn,
+		db.SetMemoryOpts{ChangeClass: req.GetString("change_class", "")})
+	if errors.Is(err, db.ErrInvalidChangeClass) {
+		return validationError(CodeInvalidArgument, err.Error()), nil
+	}
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to remember decision: %v", err)), nil
 	}

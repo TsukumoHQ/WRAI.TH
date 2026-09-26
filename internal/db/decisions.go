@@ -52,7 +52,17 @@ func (d *DB) nextDecisionSeq(project, keyArea string) int {
 // dedup-or-supersede: an active decision in the same area with the same text is
 // rejected unless `supersedes` is given; on supersede the named prior decision
 // is archived so only the live set stays "accepted". Returns the new decision.
-func (d *DB) RememberDecision(project, agent, area, decision, rationale string, tags []string, supersedes string, dependsOn []string) (*models.Memory, error) {
+// opts (optional, at most one) carries the writer's declared change class to
+// the knowledge_log append, like set_memory; omitted keeps the relay's floor
+// (an undeclared decision is HIGH-layer, so breaking).
+func (d *DB) RememberDecision(project, agent, area, decision, rationale string, tags []string, supersedes string, dependsOn []string, opts ...SetMemoryOpts) (*models.Memory, error) {
+	var o SetMemoryOpts
+	if len(opts) > 0 {
+		o = opts[0]
+	}
+	if !validDeclaredClass(o.ChangeClass) {
+		return nil, ErrInvalidChangeClass
+	}
 	decision = strings.TrimSpace(decision)
 	if decision == "" {
 		return nil, fmt.Errorf("decision text is required")
@@ -95,7 +105,7 @@ func (d *DB) RememberDecision(project, agent, area, decision, rationale string, 
 			return nil, err
 		}
 	}
-	mem, err := d.setMemoryTx(tx, project, agent, key, string(vj), TagsToJSON(allTags), "project", "stated", "decision", true, SetMemoryOpts{})
+	mem, err := d.setMemoryTx(tx, project, agent, key, string(vj), TagsToJSON(allTags), "project", "stated", "decision", true, SetMemoryOpts{ChangeClass: o.ChangeClass})
 	if err != nil {
 		return nil, err
 	}

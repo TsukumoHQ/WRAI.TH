@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -861,6 +862,12 @@ func buildOnboardingPrompt(name, description, cwd string, interactive, linearMod
 func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *string, minimal ...bool) map[string]any {
 	lean := len(minimal) > 0 && minimal[0]
 	result := map[string]any{}
+
+	// knowledge_rev: the knowledge_log head at boot, the agent's starting
+	// cursor for knowledge_delta (design af783f93 §5.2). RO; kept when lean.
+	if kd, err := h.db.KnowledgeDelta(project, math.MaxInt64, false); err == nil {
+		result["knowledge_rev"] = kd.HeadRev
+	}
 
 	// Profile (full only).
 	if !lean && profileSlug != nil && *profileSlug != "" {

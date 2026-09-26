@@ -319,6 +319,7 @@ func rememberTool() mcp.Tool {
 		mcp.WithArray("tags", mcp.Description("Extra tags for search"), mcp.WithStringItems()),
 		mcp.WithString("supersedes", mcp.Description("DEC id this replaces (archives it)")),
 		mcp.WithArray("depends_on", mcp.Description("DEC ids this rests on (graph edges)"), mcp.WithStringItems()),
+		mcp.WithString("change_class", mcp.Enum("editorial", "additive", "narrowing", "breaking")),
 	)
 }
 
