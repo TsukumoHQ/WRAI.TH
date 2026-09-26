@@ -654,20 +654,27 @@ func (d *DB) OpenAnswerObligations(project, messageID, actionRequired string, re
 	return opened, nil
 }
 
+// answerQ is the read surface of the message_answered predicate: the reader
+// pool, or the breach's own writer tx (*writerTx satisfies it).
+type answerQ interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // answerChain returns the message ids a reply answers: its reply_to, then that
 // message's reply_to, and so on, read from messages and, for a purged link,
 // from message_tombstones. At most answerReplyHops ids; stops at a cycle or an
 // unknown id.
-func (d *DB) answerChain(project, replyTo string) []string {
+func answerChain(q answerQ, project, replyTo string) []string {
 	var ids []string
 	seen := map[string]bool{}
 	for cur := replyTo; cur != "" && len(ids) < answerReplyHops && !seen[cur]; {
 		seen[cur] = true
 		ids = append(ids, cur)
 		var parent sql.NullString
-		err := d.ro().QueryRow(`SELECT reply_to FROM messages WHERE id = ? AND project = ?`, cur, project).Scan(&parent)
+		err := q.QueryRow(`SELECT reply_to FROM messages WHERE id = ? AND project = ?`, cur, project).Scan(&parent)
 		if errors.Is(err, sql.ErrNoRows) {
-			err = d.ro().QueryRow(`SELECT reply_to FROM message_tombstones WHERE id = ? AND project = ?`, cur, project).Scan(&parent)
+			err = q.QueryRow(`SELECT reply_to FROM message_tombstones WHERE id = ? AND project = ?`, cur, project).Scan(&parent)
 		}
 		if err != nil {
 			break
@@ -685,7 +692,7 @@ func (d *DB) FulfilAnswerObligations(project, from, replyTo, replyID string, now
 	if replyTo == "" || from == "" {
 		return 0, nil
 	}
-	chain := d.answerChain(project, replyTo)
+	chain := answerChain(d.ro(), project, replyTo)
 	if len(chain) == 0 {
 		return 0, nil
 	}
@@ -767,15 +774,33 @@ func (d *DB) AnswerObligationByID(project, id string) (*AnswerObligation, error)
 	return &o, nil
 }
 
-// answeredBy reports whether from sent a message after since whose reply_to
-// chain reaches messageID: the predicate message_answered, re-checked by the
-// relay on discharge instead of trusting the claim.
-func (d *DB) answeredBy(project, from, messageID, since string) (string, bool) {
-	rows, err := d.ro().Query(`SELECT id, reply_to FROM messages
-		WHERE project = ? AND from_agent = ? AND reply_to IS NOT NULL AND reply_to <> '' AND created_at >= ?
-		ORDER BY created_at`, project, from, since)
+// Match kinds of the message_answered predicate, stored in discharge_evidence.
+const (
+	answerMatchReplyTo = "reply_to" // the reply's reply_to chain reaches the ask
+	answerMatchIDCite  = "id_cite"  // a message to the asker cites the ask id
+)
+
+// answerCiteLen is how much of the ask id a cite must carry: the 8-hex prefix
+// agents write as "re 92a153b6: ...".
+const answerCiteLen = 8
+
+// answeredBy is the predicate message_answered, re-checked by the relay on
+// discharge and at breach instead of trusting the claim: one of from sent,
+// at or after since, a message whose reply_to chain reaches messageID
+// (reply_to), else a message to the ask's sender whose subject or content
+// contains messageID's first 8 hex chars (id_cite). It returns the reply id
+// and the match kind; ok is false when neither exists.
+func answeredBy(q answerQ, project string, from []string, messageID, since string) (replyID, match string, ok bool) {
+	if len(from) == 0 {
+		return "", "", false
+	}
+	ph, fromArgs := inPlaceholders(from)
+	args := append([]interface{}{project}, fromArgs...)
+	rows, err := q.Query(`SELECT id, reply_to FROM messages
+		WHERE project = ? AND from_agent IN (`+ph+`) AND reply_to IS NOT NULL AND reply_to <> '' AND created_at >= ?
+		ORDER BY created_at, id`, append(args, since)...)
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	type reply struct{ id, replyTo string }
 	var replies []reply
@@ -787,13 +812,37 @@ func (d *DB) answeredBy(project, from, messageID, since string) (string, bool) {
 	}
 	_ = rows.Close()
 	for _, r := range replies {
-		for _, id := range d.answerChain(project, r.replyTo) {
+		for _, id := range answerChain(q, project, r.replyTo) {
 			if id == messageID {
-				return r.id, true
+				return r.id, answerMatchReplyTo, true
 			}
 		}
 	}
-	return "", false
+
+	if len(messageID) < answerCiteLen {
+		return "", "", false
+	}
+	var asker string
+	err = q.QueryRow(`SELECT from_agent FROM messages WHERE id = ? AND project = ?`, messageID, project).Scan(&asker)
+	if errors.Is(err, sql.ErrNoRows) {
+		err = q.QueryRow(`SELECT from_agent FROM message_tombstones WHERE id = ? AND project = ?`, messageID, project).Scan(&asker)
+	}
+	if err != nil || asker == "" {
+		return "", "", false
+	}
+	// Bearer -> asker only: addressed to the asker, or delivered to it.
+	cite := strings.ToLower(messageID[:answerCiteLen])
+	err = q.QueryRow(`SELECT m.id FROM messages m
+		WHERE m.project = ? AND m.from_agent IN (`+ph+`) AND m.created_at >= ? AND m.id <> ?
+		  AND (lower(m.to_agent) = lower(?)
+		    OR EXISTS (SELECT 1 FROM deliveries dl WHERE dl.message_id = m.id AND lower(dl.to_agent) = lower(?)))
+		  AND (instr(lower(m.subject), ?) > 0 OR instr(lower(m.content), ?) > 0)
+		ORDER BY m.created_at, m.id LIMIT 1`,
+		append(append(args, since, messageID, asker, asker), cite, cite)...).Scan(&replyID)
+	if err != nil {
+		return "", "", false
+	}
+	return replyID, answerMatchIDCite, true
 }
 
 // DischargeAnswerObligation fulfils an active answer obligation only if its
@@ -812,11 +861,11 @@ func (d *DB) DischargeAnswerObligation(project, id, by, evidence string, now tim
 	case !strings.EqualFold(o.Bearer, by):
 		return false, "only the obligation's bearer can discharge it", nil
 	}
-	replyID, answered := d.answeredBy(project, o.Bearer, o.MessageID, o.CreatedAt)
+	replyID, match, answered := answeredBy(d.ro(), project, []string{o.Bearer}, o.MessageID, o.CreatedAt)
 	if !answered {
 		return false, "predicate message_answered is false: no reply from " + o.Bearer + " reaches message " + o.MessageID, nil
 	}
-	ev, _ := json.Marshal(map[string]string{"by": by, "evidence": evidence, "reply": replyID})
+	ev, _ := json.Marshal(map[string]string{"by": by, "evidence": evidence, "reply": replyID, "match": match})
 	res, err := d.writerExec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
 		ObligationFulfilled, now.UTC().Format(memoryTimeFmt), string(ev), id, ObligationActive)
 	if err != nil {
@@ -923,10 +972,15 @@ type AnswerChild struct {
 }
 
 // BreachAnswerObligation closes a due answer obligation unfulfilled and opens
-// childNorm on bearer, in one writer tx. ok is false (nothing written) when the
-// obligation is no longer active, i.e. another writer or a reply won. childNorm
-// "" breaches without a child. The caller picks childNorm and bearer: the
-// human bearer only on the max-depth norm.
+// childNorm on bearer, in one writer tx. It first re-checks message_answered
+// in that tx (task fc67d019): a reply from the bearer, or from the ask's
+// original recipient, that the send path did not fulfil on (an id cite
+// without reply_to, or a missed fulfil) fulfils the obligation instead, with
+// the reply and match kind in discharge_evidence. ok is false (no breach, no
+// child) when the obligation is no longer active or was fulfilled here, i.e.
+// another writer or a reply won. childNorm "" breaches without a child. The
+// caller picks childNorm and bearer: the human bearer only on the max-depth
+// norm.
 func (d *DB) BreachAnswerObligation(due AnswerDue, childNorm, bearer string, now time.Time) (*AnswerChild, bool, error) {
 	var child *AnswerChild
 	var version int
@@ -953,6 +1007,27 @@ func (d *DB) BreachAnswerObligation(due AnswerDue, childNorm, bearer string, now
 		return nil, false, fmt.Errorf("answer breach begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	// A late answer from the original recipient ends the chain it started,
+	// as on the send path (FulfilAnswerObligations).
+	answerers := []string{strings.ToLower(due.Bearer)}
+	if r := strings.ToLower(due.Recipient); r != "" && r != answerers[0] {
+		answerers = append(answerers, r)
+	}
+	if replyID, match, ok := answeredBy(tx, due.Project, answerers, due.MessageID, due.AskedAt); ok {
+		ev, _ := json.Marshal(map[string]string{"reply": replyID, "match": match, "by": "breach-recheck"})
+		res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+			ObligationFulfilled, ts, string(ev), due.ID, ObligationActive)
+		if err != nil {
+			return nil, false, fmt.Errorf("answer breach fulfil: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return nil, false, nil
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, false, fmt.Errorf("answer breach fulfil commit: %w", err)
+		}
+		return nil, false, nil
+	}
 	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ? WHERE id = ? AND state = ?`,
 		ObligationUnfulfilled, ts, due.ID, ObligationActive)
 	if err != nil {
