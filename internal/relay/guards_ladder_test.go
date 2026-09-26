@@ -202,3 +202,85 @@ func TestLadderGuards(t *testing.T) {
 		}
 	})
 }
+
+// Pre-expiry notice (task 5b16f32d): a live guard whose expires_at enters the
+// 7-day window is announced once to its creator and challenger; a renewal
+// re-arms the notice; closed guards are never announced.
+func TestGuardPreExpiry(t *testing.T) {
+	const fmtTS = "2006-01-02T15:04:05.000000Z"
+	// liveGuard: an active ladder guard (no anchor, one live hit: renewable)
+	// challenged by rev, expiring at expires.
+	liveGuard := func(f *ladderFixture, expires time.Time) string {
+		gid := f.ladderGuard(db.GuardActionRoute, map[string]string{"profile": "cmo-lane"}, false)
+		f.exec(`UPDATE compiled_guards SET mode = 'active', challenged_by = 'rev', promoted_at = ?, live_hits = 1, expires_at = ? WHERE id = ?`,
+			time.Now().UTC().Format(fmtTS), expires.UTC().Format(fmtTS), gid)
+		return gid
+	}
+	notices := func(f *ladderFixture, gid string) int {
+		return f.count(`SELECT COUNT(*) FROM messages WHERE from_agent = 'relay' AND type = 'fyi' AND subject LIKE ?`,
+			"guard "+gid+" expires%")
+	}
+
+	t.Run("PreExpiryNotifiesOnce", func(t *testing.T) {
+		f := newLadderFixture(t, "cmo", "", "p/cmo/active/cmo-lane//0")
+		now := time.Now()
+		gid := liveGuard(f, now.Add(5*24*time.Hour))
+		far := liveGuard(f, now.Add(20*24*time.Hour))
+		for i := 0; i < 3; i++ {
+			evaluateGuards(f.db, f.rec, now.Add(time.Duration(i)*2*GuardSweepInterval))
+		}
+		if n := notices(f, gid); n != 1 {
+			t.Fatalf("pre-expiry notices = %d across three ticks, want 1", n)
+		}
+		if n := notices(f, far); n != 0 {
+			t.Fatalf("guard 20d from expiry got %d notice(s), want none", n)
+		}
+		var to, prio string
+		if err := f.raw.QueryRow(`SELECT GROUP_CONCAT(d.to_agent), m.priority FROM deliveries d JOIN messages m ON m.id = d.message_id
+			WHERE m.subject LIKE ?`, "guard "+gid+" expires%").Scan(&to, &prio); err != nil ||
+			!strings.Contains(to, "cmo") || !strings.Contains(to, "rev") || prio != "P2" {
+			t.Fatalf("notice delivered to %q at %s (%v), want creator cmo + challenger rev at P2", to, prio, err)
+		}
+	})
+
+	t.Run("PreExpiryRearmsAfterRenew", func(t *testing.T) {
+		f := newLadderFixture(t, "cmo", "", "p/cmo/active/cmo-lane//0")
+		now := time.Now()
+		gid := liveGuard(f, now.Add(5*24*time.Hour))
+		evaluateGuards(f.db, f.rec, now)
+		if _, err := f.db.RenewGuard(gid, "rev", 30*24*time.Hour, now.Add(time.Hour)); err != nil {
+			t.Fatalf("renew: %v", err)
+		}
+		// Out of the window after the renewal: no new notice.
+		evaluateGuards(f.db, f.rec, now.Add(2*GuardSweepInterval))
+		if n := notices(f, gid); n != 1 {
+			t.Fatalf("notices after renewal = %d, want still 1", n)
+		}
+		// Back in the window of the new expiry: announced once more.
+		later := now.Add(25 * 24 * time.Hour)
+		evaluateGuards(f.db, f.rec, later)
+		evaluateGuards(f.db, f.rec, later.Add(2*GuardSweepInterval))
+		if n := notices(f, gid); n != 2 {
+			t.Fatalf("notices after re-entering the window = %d, want 2", n)
+		}
+	})
+
+	t.Run("PreExpirySkipsClosed", func(t *testing.T) {
+		f := newLadderFixture(t, "cmo", "", "p/cmo/active/cmo-lane//0")
+		now := time.Now()
+		soon := now.Add(3 * 24 * time.Hour)
+		retired, withdrawn, expired := liveGuard(f, soon), liveGuard(f, soon), liveGuard(f, soon)
+		f.exec(`UPDATE compiled_guards SET mode = 'retired', ended_reason = 'no_hits' WHERE id = ?`, retired)
+		if _, err := f.db.WithdrawGuard(withdrawn, "cmo", now); err != nil {
+			t.Fatalf("withdraw: %v", err)
+		}
+		f.exec(`UPDATE compiled_guards SET mode = 'expired' WHERE id = ?`, expired)
+		lapsing := liveGuard(f, now.Add(-time.Minute)) // the sweep expires it
+		evaluateGuards(f.db, f.rec, now)
+		for _, gid := range []string{retired, withdrawn, expired, lapsing} {
+			if n := notices(f, gid); n != 0 {
+				t.Fatalf("closed guard %s got %d pre-expiry notice(s), want none", gid, n)
+			}
+		}
+	})
+}

@@ -140,6 +140,9 @@ func migrateGuards(conn *sql.DB) {
 		ended_reason      TEXT
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_guards_eval ON compiled_guards(point, mode, class_id)`)
+	// expiry_noticed_for holds the expires_at a pre-expiry notice announced; a
+	// renewal moves expires_at, which re-arms the notice.
+	ensureColumns(conn, "compiled_guards", map[string]string{"expiry_noticed_for": "TEXT"})
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS guard_hits (
 		guard_id     TEXT NOT NULL,
 		exception_id TEXT NOT NULL,
@@ -1159,6 +1162,18 @@ func (d *DB) WithdrawGuard(id, caller string, now time.Time) (Guard, error) {
 // GuardSweep reports what one sweep changed (S2 turns it into messages).
 type GuardSweep struct {
 	Demoted, Expired, Retired []string
+	// Expiring lists live guards within GuardExpiryNoticeWindow of expiry
+	// whose current expiry was not announced yet.
+	Expiring []GuardExpiryNotice
+}
+
+// GuardExpiryNoticeWindow is how far ahead of expires_at a guard's creator and
+// challenger hear about it (design 4d2e57a3 §6).
+const GuardExpiryNoticeWindow = 7 * 24 * time.Hour
+
+// GuardExpiryNotice is a live guard due for its pre-expiry notice.
+type GuardExpiryNotice struct {
+	GuardID, Project, CreatedBy, ChallengedBy, ExpiresAt string
 }
 
 // SweepGuards settles every pending hit whose outcome is now known, counts
@@ -1220,7 +1235,40 @@ func (d *DB) SweepGuards(now time.Time) (GuardSweep, error) {
 			}
 		}
 	}
-	return out, nil
+	expiring, err := d.guardsDueExpiryNotice(ts, now.Add(GuardExpiryNoticeWindow).UTC().Format(memoryTimeFmt))
+	out.Expiring = expiring
+	return out, err
+}
+
+// guardsDueExpiryNotice reads the live guards expiring in (ts, horizon] whose
+// current expires_at has not been announced.
+func (d *DB) guardsDueExpiryNotice(ts, horizon string) ([]GuardExpiryNotice, error) {
+	rows, err := d.ro().Query(`SELECT id, project, created_by, COALESCE(challenged_by, ''), expires_at FROM compiled_guards
+		WHERE mode IN ('shadow', 'active') AND expires_at > ? AND expires_at <= ?
+		  AND (expiry_noticed_for IS NULL OR expiry_noticed_for != expires_at) ORDER BY expires_at, id`, ts, horizon)
+	if err != nil {
+		return nil, fmt.Errorf("guard expiry notices: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []GuardExpiryNotice
+	for rows.Next() {
+		var n GuardExpiryNotice
+		if err := rows.Scan(&n.GuardID, &n.Project, &n.CreatedBy, &n.ChallengedBy, &n.ExpiresAt); err != nil {
+			return nil, err
+		}
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
+// MarkGuardExpiryNoticed records that the notice for this expiry was sent. It
+// only lands while expires_at is unchanged, so a renewal racing the notice
+// leaves the new expiry armed.
+func (d *DB) MarkGuardExpiryNoticed(id, expiresAt string) error {
+	return d.inGuardTx(func(tx *writerTx) error {
+		_, err := tx.Exec(`UPDATE compiled_guards SET expiry_noticed_for = expires_at WHERE id = ? AND expires_at = ?`, id, expiresAt)
+		return err
+	})
 }
 
 func (d *DB) inGuardTx(fn func(tx *writerTx) error) error {

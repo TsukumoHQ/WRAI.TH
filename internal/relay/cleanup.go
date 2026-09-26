@@ -750,9 +750,10 @@ const (
 )
 
 // evaluateGuards runs SweepGuards at most once per GuardSweepInterval, then,
-// after the sweep's commits, sends one message per guard demotion (sweep or
-// inline) to its creator and challenger, advancing an audit-log cursor so a
-// demotion is never announced twice.
+// after the sweep's commits, sends one fyi per guard entering its pre-expiry
+// window and one message per guard demotion (sweep or inline) to its creator
+// and challenger. A per-guard mark and an audit-log cursor keep each from
+// being announced twice.
 func evaluateGuards(database *db.DB, notifier ackNotifier, now time.Time) {
 	if last, err := time.Parse(time.RFC3339Nano, database.GetSetting(settingGuardSweepAt)); err == nil && now.Sub(last) < GuardSweepInterval {
 		return
@@ -760,8 +761,28 @@ func evaluateGuards(database *db.DB, notifier ackNotifier, now time.Time) {
 	database.SetSetting(settingGuardSweepAt, now.UTC().Format(time.RFC3339Nano))
 	if sw, err := database.SweepGuards(now); err != nil {
 		log.Printf("[guards] sweep: %v", err)
-	} else if len(sw.Demoted)+len(sw.Expired)+len(sw.Retired) > 0 {
-		log.Printf("[guards] demoted=%d expired=%d retired=%d", len(sw.Demoted), len(sw.Expired), len(sw.Retired))
+	} else {
+		if len(sw.Demoted)+len(sw.Expired)+len(sw.Retired) > 0 {
+			log.Printf("[guards] demoted=%d expired=%d retired=%d", len(sw.Demoted), len(sw.Expired), len(sw.Retired))
+		}
+		for _, n := range sw.Expiring {
+			if to := guardOwners(n.CreatedBy, n.ChallengedBy); len(to) > 0 {
+				subject := fmt.Sprintf("guard %s expires %s", n.GuardID, n.ExpiresAt)
+				body := fmt.Sprintf("Compiled guard %s expires at %s and never auto-renews. An active guard that still earns its keep can be renewed (guard op=renew, by an agent other than its creator); otherwise let it lapse.", n.GuardID, n.ExpiresAt)
+				msg, _, err := database.InsertMessageWithDeliveries(n.Project, "relay", to[0], "fyi", subject, body,
+					"{}", "P2", -1, nil, nil, to, "none")
+				if err != nil {
+					log.Printf("[guards] expiry notice %s: %v", n.GuardID, err)
+					continue
+				}
+				for _, r := range to {
+					notifier.Notify(n.Project, r, "relay", subject, msg.ID)
+				}
+			}
+			if err := database.MarkGuardExpiryNoticed(n.GuardID, n.ExpiresAt); err != nil {
+				log.Printf("[guards] expiry notice mark %s: %v", n.GuardID, err)
+			}
+		}
 	}
 	demotions, err := database.GuardDemotionsSince(database.GetSetting(settingGuardDemoteNotices))
 	if err != nil {
@@ -769,13 +790,7 @@ func evaluateGuards(database *db.DB, notifier ackNotifier, now time.Time) {
 		return
 	}
 	for _, dm := range demotions {
-		var to []string
-		for _, who := range []string{dm.CreatedBy, dm.ChallengedBy} {
-			if who != "" && who != "system" && (len(to) == 0 || to[0] != who) {
-				to = append(to, who)
-			}
-		}
-		if len(to) > 0 {
+		if to := guardOwners(dm.CreatedBy, dm.ChallengedBy); len(to) > 0 {
 			subject := fmt.Sprintf("guard %s demoted to shadow", dm.GuardID)
 			body := fmt.Sprintf("Compiled guard %s went back to shadow (%s). It needs fresh clean shadow hits and a promotion by another agent to act again.", dm.GuardID, dm.Reason)
 			msg, _, err := database.InsertMessageWithDeliveries(dm.Project, "relay", to[0], "notification", subject, body,
@@ -790,4 +805,16 @@ func evaluateGuards(database *db.DB, notifier ackNotifier, now time.Time) {
 		}
 		database.SetSetting(settingGuardDemoteNotices, dm.At)
 	}
+}
+
+// guardOwners is a guard's creator and challenger, deduplicated, without the
+// system actor: the recipients of its lifecycle messages.
+func guardOwners(createdBy, challengedBy string) []string {
+	var to []string
+	for _, who := range []string{createdBy, challengedBy} {
+		if who != "" && who != "system" && (len(to) == 0 || to[0] != who) {
+			to = append(to, who)
+		}
+	}
+	return to
 }
