@@ -75,6 +75,13 @@ type Task struct {
 	// prior state. nil when the transition left the holder unchanged.
 	LeaseTransfer *LeaseTransfer `json:"lease_transfer,omitempty"`
 
+	// Readiness (typed edges, design d523e74e) — TRANSIENT, never scanned:
+	// Released lists the dependents whose hold this transition released (the
+	// handler announces them); Ready/BlockedBy are filled on reads that ask.
+	Released  []string  `json:"-"`
+	Ready     *bool     `json:"ready,omitempty"`
+	BlockedBy []EdgeRef `json:"blocked_by,omitempty"`
+
 	// --- Git zone (review gate) — where the work physically lives, so an
 	// external supervisor (e.g. niwa's Q&A gate) can review and merge it.
 	// Set by the doer at review_task time; never interpreted by the relay.
@@ -188,4 +195,11 @@ type Board struct {
 	CreatedBy   string  `json:"created_by"`
 	CreatedAt   string  `json:"created_at"`
 	ArchivedAt  *string `json:"archived_at,omitempty"`
+}
+
+// EdgeRef is one unsatisfied prerequisite of a task (a live blocked_by edge).
+type EdgeRef struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+	Until  string `json:"until"` // done | in-review
 }

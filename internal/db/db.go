@@ -1112,6 +1112,10 @@ func migrate(conn *sql.DB) error {
 	// the exception_occurrences view unions it in.
 	migrateExceptions(conn)
 
+	// Typed edges + readiness holds (design d523e74e). tasks.depends_on (dead
+	// since ade0c39, 0 non-empty rows) is left in place: columns are never dropped.
+	migrateOrgEdges(conn)
+
 	// knowledge_log + clock + compaction watermark (design af783f93). Starts empty:
 	// no backfill (ruling af6e3a5f OQ3).
 	migrateKnowledgeLog(conn)

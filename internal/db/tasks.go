@@ -5,6 +5,7 @@ import (
 	"agent-relay/internal/normalize"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -110,6 +111,16 @@ type TypedTicket struct {
 	// TypedTicketError, on any project, enforced or not (task 6c1c5167 follow-up,
 	// DEC-niwa-goal-validate-1). nil = no command recorded.
 	VerifyCmd *string
+
+	// BlockedBy are prerequisite task ids ("<id>" or "<id>@in-review"): each
+	// becomes a blocked_by edge written in the dispatch tx, and a task not
+	// ready at dispatch is held (no claim signal) until released (design
+	// d523e74e). Not part of the typed-ticket contract.
+	BlockedBy []string
+	// DiscoveredFrom is the task this one was discovered while working on: a
+	// display-only discovered_from edge, and board / trace / profile are
+	// inherited from it when the caller omits them. Never sets the parent.
+	DiscoveredFrom string
 }
 
 // hasAcceptanceItems reports whether raw is a JSON array carrying ≥1 non-blank
@@ -253,6 +264,38 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		}
 	}
 
+	// Typed edges (design d523e74e): validate blocked_by up front, and inherit
+	// board / trace / profile from a discovered_from origin when omitted.
+	blockers, err := parseBlockedBy(ticket.BlockedBy)
+	if err != nil {
+		return nil, err
+	}
+	originHolder := ""
+	if ticket.DiscoveredFrom != "" {
+		var oBoard, oTrace, oHolder sql.NullString
+		var oProfile string
+		err := d.ro().QueryRow(`SELECT board_id, trace_id, profile_slug, lease_holder FROM tasks WHERE id = ? AND project = ?`,
+			ticket.DiscoveredFrom, project).Scan(&oBoard, &oTrace, &oProfile, &oHolder)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, newTaskError(CodeTaskNotFound, "discovered_from task %s not found in project %s", ticket.DiscoveredFrom, project)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("discovered_from: %w", err)
+		}
+		if boardID == nil && oBoard.Valid && oBoard.String != "" {
+			b := oBoard.String
+			boardID = &b
+		}
+		if (traceID == nil || *traceID == "") && oTrace.Valid && oTrace.String != "" {
+			tr := oTrace.String
+			traceID = &tr
+		}
+		if profileSlug == "" {
+			profileSlug = oProfile
+		}
+		originHolder = oHolder.String
+	}
+
 	// Single board-resolution guard — every creation path funnels through
 	// DispatchTask, so an omitted board_id can never silently pick the wrong
 	// board again. 0 boards: leave nil (a caller like dispatchCore auto-creates
@@ -342,17 +385,63 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		TraceID:            &tid,
 	}
 
-	_, err := d.writerExec(
-		`INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, pending_since, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, trace_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?)`,
-		task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
+	const insertTask = `INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, pending_since, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?)`
+	insertArgs := []any{task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
 		task.Priority, task.Status, task.Project, task.DispatchedAt, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
-		task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, tid,
-	)
+		task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, tid}
+	if len(blockers) == 0 && ticket.DiscoveredFrom == "" {
+		if _, err := d.writerExec(insertTask, insertArgs...); err != nil {
+			return nil, fmt.Errorf("dispatch task: %w", err)
+		}
+		return task, nil
+	}
+
+	// The task, its edges and (when not ready) its hold commit together.
+	tx, err := d.beginWriterTx()
 	if err != nil {
+		return nil, fmt.Errorf("dispatch task: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(insertTask, insertArgs...); err != nil {
 		return nil, fmt.Errorf("dispatch task: %w", err)
 	}
+	for _, b := range blockers {
+		meta := map[string]any{}
+		if b[1] == untilInReview {
+			meta["until"] = untilInReview
+		}
+		if err := d.addEdgeTx(tx, project, EdgeInput{SrcKind: "task", SrcID: task.ID, Type: EdgeBlockedBy,
+			DstKind: "task", DstID: b[0], Metadata: meta, CreatedBy: dispatchedBy}, now); err != nil {
+			return nil, err
+		}
+	}
+	if ticket.DiscoveredFrom != "" {
+		meta := map[string]any{"discovered_by": dispatchedBy}
+		if originHolder != "" {
+			meta["origin_holder"] = originHolder
+		}
+		if err := d.addEdgeTx(tx, project, EdgeInput{SrcKind: "task", SrcID: task.ID, Type: EdgeDiscoveredFrom,
+			DstKind: "task", DstID: ticket.DiscoveredFrom, Metadata: meta, CreatedBy: dispatchedBy}, now); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("dispatch task: commit: %w", err)
+	}
+	if len(blockers) > 0 {
+		if ready, refs, err := d.TaskReadiness(project, task.ID); err == nil {
+			task.Ready, task.BlockedBy = &ready, refs
+		}
+	}
 	return task, nil
+}
+
+// TaskHeld reports whether the task has an unreleased hold (dispatch skips
+// its claim signal while held).
+func (d *DB) TaskHeld(project, taskID string) bool {
+	var one int
+	return d.ro().QueryRow(`SELECT 1 FROM task_holds WHERE task_id = ? AND project = ? AND released_at IS NULL`, taskID, project).Scan(&one) == nil
 }
 
 // ReviewTask transitions a task to in-review (the agent's "PR up" signal).
@@ -641,9 +730,14 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	// Every other transition keeps the plain autocommit write.
 	hasReason := blockedReason != nil && strings.TrimSpace(*blockedReason) != ""
 	needExc := newStatus == "blocked" || leavingBlocked || (newStatus == "cancelled" && hasReason)
+	// Typed edges (design d523e74e): a prerequisite entering or leaving
+	// in-review / done / cancelled can change its held dependents' readiness;
+	// they are settled in the same tx as this CAS (bounded to settleLimit).
+	satisfying := func(s string) bool { return s == "in-review" || s == "done" || s == "cancelled" }
+	needSettle := (satisfying(newStatus) || satisfying(oldStatus)) && d.hasBlockingDependentsRO(taskID)
 	exec := d.writerExec
 	var tx *writerTx
-	if needExc {
+	if needExc || needSettle {
 		if tx, err = d.beginWriterTx(); err != nil {
 			return nil, fmt.Errorf("update task status: begin: %w", err)
 		}
@@ -788,8 +882,17 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 			"status changed from %q before %q could apply on task %s", oldStatus, newStatus, taskID)
 	}
 	if tx != nil {
-		if err := d.writeTransitionExceptions(tx, task, agentName, oldStatus, newStatus, blockedReason, now); err != nil {
-			return nil, fmt.Errorf("update task status: %w", err)
+		if needExc {
+			if err := d.writeTransitionExceptions(tx, task, agentName, oldStatus, newStatus, blockedReason, now); err != nil {
+				return nil, fmt.Errorf("update task status: %w", err)
+			}
+		}
+		if needSettle {
+			released, err := settleHoldsTx(tx, project, taskID, now)
+			if err != nil {
+				return nil, fmt.Errorf("update task status: settle holds: %w", err)
+			}
+			task.Released = released
 		}
 		if err := tx.Commit(); err != nil {
 			tx = nil
