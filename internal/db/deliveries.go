@@ -444,6 +444,15 @@ func (d *DB) ExpireDeliveries() (int, error) {
 		return 0, fmt.Errorf("journal deadletter: %w", err)
 	}
 
+	// P7 (design 220f4f3d §5.2): the same expiring set, grouped per message and
+	// split by the recipient's state read in this tx, becomes at most two typed
+	// exception rows per message. The deadletter rows above are not touched.
+	if deadletterExceptionsEnabled {
+		if err := expireDeliveryExceptionsTx(tx, now); err != nil {
+			return 0, fmt.Errorf("deadletter exceptions: %w", err)
+		}
+	}
+
 	result, err := tx.Exec(
 		`UPDATE deliveries SET state = 'expired', expired_at = ?
 		 WHERE state IN ('queued', 'surfaced')
@@ -458,6 +467,53 @@ func (d *DB) ExpireDeliveries() (int, error) {
 	}
 	n, _ := result.RowsAffected()
 	return int(n), nil
+}
+
+// deadletterExceptionsEnabled gates the P7 write; only a test turns it off, to
+// prove the deadletter journal is identical with and without it.
+var deadletterExceptionsEnabled = true
+
+// expireDeliveryExceptionsTx reads the deliveries ExpireDeliveries is about to
+// expire (its exact predicate), one group per message, and writes their P7
+// exceptions on the same tx. Groups are read fully before any write.
+func expireDeliveryExceptionsTx(tx *writerTx, now string) error {
+	live := fmt.Sprintf(deadletterLiveSQL, "d.to_agent", "d.project")
+	rows, err := tx.Query(`SELECT d.message_id, MIN(d.project), m.from_agent, COALESCE(m.priority, 'P2'), m.subject, m.created_at, m.trace_id,
+		SUM(CASE WHEN ` + live + ` THEN 1 ELSE 0 END), COUNT(*)
+		FROM deliveries d JOIN messages m ON d.message_id = m.id
+		WHERE d.state IN ('queued', 'surfaced') AND m.expired_at IS NOT NULL
+		GROUP BY d.message_id ORDER BY m.created_at, d.message_id`)
+	if err != nil {
+		return err
+	}
+	var groups []deadletterGroup
+	for rows.Next() {
+		var g deadletterGroup
+		var total int
+		if err := rows.Scan(&g.MessageID, &g.Project, &g.From, &g.Priority, &g.Subject, &g.CreatedAt, &g.TraceID,
+			&g.Live, &total); err != nil {
+			rows.Close()
+			return err
+		}
+		g.Gone = total - g.Live
+		groups = append(groups, g)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(groups) == 0 {
+		return nil
+	}
+	agents, err := excAgentNames(tx)
+	if err != nil {
+		return err
+	}
+	for _, g := range groups {
+		if _, err := writeDeadletterExceptionsTx(tx, g, agents, now, "expiry"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Deadletter lists journaled expired-unread messages (T6) for a project,

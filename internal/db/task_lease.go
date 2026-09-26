@@ -210,7 +210,7 @@ type SweptLease struct {
 func (d *DB) SweepExpiredLeases() ([]SweptLease, error) {
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	rows, err := d.ro().Query(
-		"SELECT id, project, title, COALESCE(lease_holder,''), status, priority, profile_slug FROM tasks "+
+		"SELECT id, project, title, COALESCE(lease_holder,''), status, priority, profile_slug, trace_id FROM tasks "+
 			"WHERE status IN ('accepted','in-progress','in-review') "+
 			"AND COALESCE(lease_holder,'') != '' "+
 			"AND COALESCE(lease_expires_at,'') != '' AND lease_expires_at < ? "+
@@ -220,11 +220,14 @@ func (d *DB) SweepExpiredLeases() ([]SweptLease, error) {
 	if err != nil {
 		return nil, err
 	}
-	type candidate struct{ id, project, title, holder, status, priority, profile string }
+	type candidate struct {
+		id, project, title, holder, status, priority, profile string
+		traceID                                               *string
+	}
 	var candidates []candidate
 	for rows.Next() {
 		var c candidate
-		if err := rows.Scan(&c.id, &c.project, &c.title, &c.holder, &c.status, &c.priority, &c.profile); err != nil {
+		if err := rows.Scan(&c.id, &c.project, &c.title, &c.holder, &c.status, &c.priority, &c.profile, &c.traceID); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
@@ -241,17 +244,8 @@ func (d *DB) SweepExpiredLeases() ([]SweptLease, error) {
 		if d.agentLive(c.project, c.holder) {
 			continue // live holder — the lease is generous on purpose; leave it
 		}
-		res, err := d.writerExec(
-			`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
-			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?, pending_since=?
-			 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,
-			now, now, c.id, c.project, c.holder, c.status,
-		)
-		if err != nil {
-			continue // best-effort; the next sweep retries
-		}
-		if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
-			continue // lost a race to a live claim/transition — correct to skip
+		if !d.requeueExpiredLease(c.id, c.project, c.holder, c.status, now, c.traceID) {
+			continue // lost a race, or a failed write the next sweep retries
 		}
 		d.auditLeaseTransfer(c.project, c.id, "relay-sweeper",
 			&models.LeaseTransfer{From: c.holder, To: "", Reason: "expired-swept"})
@@ -261,6 +255,34 @@ func (d *DB) SweepExpiredLeases() ([]SweptLease, error) {
 		})
 	}
 	return swept, nil
+}
+
+// requeueExpiredLease runs one sweep requeue and its P5 exception (design
+// 220f4f3d: opened and resolved at once, resolved_by=self, requeued) in one
+// writer tx. The CAS on (id, project, lease_holder, status) decides: a lost
+// race (RowsAffected==0) writes nothing. False = not requeued.
+func (d *DB) requeueExpiredLease(id, project, holder, status, now string, traceID *string) bool {
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(
+		`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
+		   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?, pending_since=?
+		 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,
+		now, now, id, project, holder, status,
+	)
+	if err != nil {
+		return false
+	}
+	if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
+		return false
+	}
+	if _, err := openExceptionTx(tx, leaseExceptionOpen(project, id, holder, "expired-swept", now, traceID)); err != nil {
+		return false
+	}
+	return tx.Commit() == nil
 }
 
 func orNone(s string) string {

@@ -5,8 +5,10 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"sort"
 	"strings"
@@ -35,6 +37,10 @@ const (
 	excSourceTaskBlock  = "task_block"
 	excSourceTaskCancel = "task_cancel"
 	excSourceLimbo      = "limbo_sweep"
+	// Slice 2: structural producers (no free text to classify).
+	excSourceLeaseSweep   = "lease_sweep"
+	excSourceAgentCascade = "agent_cascade"
+	excSourceDeadletter   = "deadletter"
 )
 
 // excOpenBlockSources are the rows a task leaving 'blocked' resolves: an
@@ -112,6 +118,10 @@ func migrateExceptions(conn *sql.DB) {
 		FROM integrity_quarantine`)
 	// Class budgets + the inert escalation-ladder schema (design 1111292b T1).
 	migrateClassBudgets(conn)
+	// One-shot history backfill (design §6), behind its settings marker. After
+	// the budgets migration: budget_epoch is stamped first, and every
+	// backfilled row predates it, so history never counts toward a budget.
+	backfillExceptionsV1(conn)
 }
 
 // excQ is the statement surface classification and the exception writes run
@@ -391,6 +401,31 @@ func drainSimilarity(tpl, toks []string) (float64, bool) {
 	return float64(same) / float64(len(toks)), true
 }
 
+// classifyStructuralTx resolves a structural class: the fingerprint is taken
+// over the template exactly as given (no parameterizer, no Drain), so the class
+// set of a machine producer is fixed by its shapes, not by the text it carries.
+func classifyStructuralTx(q excQ, kind, code, template, now string) (excClassification, error) {
+	toks := strings.Fields(template)
+	fp := excFingerprint(kind, code, toks)
+	c := excClassification{Fingerprint: fp, Template: strings.Join(toks, " ")}
+	var classID string
+	err := q.QueryRow(`SELECT id FROM exception_classes WHERE fingerprint = ? AND grouping_version = ?`,
+		fp, exceptionGroupingVersion).Scan(&classID)
+	if err == nil {
+		c.ClassID, c.MatchedBy = classID, "exact"
+		return c, bumpClassTx(q, classID, "", now)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return c, err
+	}
+	c.ClassID, c.MatchedBy = uuid.New().String(), "new"
+	_, err = q.Exec(`INSERT INTO exception_classes
+		(id, kind, reason_code, fingerprint, template, grouping_version, matched_by, occurrences, first_seen, last_seen)
+		VALUES (?, ?, ?, ?, ?, ?, 'new', 1, ?, ?)`,
+		c.ClassID, kind, code, fp, c.Template, exceptionGroupingVersion, now, now)
+	return c, err
+}
+
 func bumpClassTx(q excQ, classID, template, now string) error {
 	if template != "" {
 		_, err := q.Exec(`UPDATE exception_classes SET occurrences = occurrences + 1, last_seen = ?, template = ? WHERE id = ?`,
@@ -403,13 +438,19 @@ func bumpClassTx(q excQ, classID, template, now string) error {
 
 // exceptionOpen is one exception to write. Code/Kind/Retry are the
 // source-declared L0 class; when Code is empty the lexicon classifies Text and
-// DefaultKind is used for unclassified text. A non-nil Resolved inserts the row
-// already resolved (an event that opens and closes at once, e.g. a cancel).
+// DefaultKind is used for unclassified text. A non-empty Template makes the
+// class structural: it is keyed on (Kind, Code, Template) as given, with no
+// parameterizer and no Drain attach (machine producers such as the deadletter
+// and lease sweeps). A non-nil Resolved inserts the row already resolved (an
+// event that opens and closes at once, e.g. a cancel). Evidence is stored as
+// evidence_json: small structured counts, never message content.
 type exceptionOpen struct {
 	Project, SourceKind, SourceRef, RaisedBy, TaskID string
 	TraceID                                          *string
 	Text                                             string
 	Code, Kind, Retry, DefaultKind                   string
+	Template                                         string
+	Evidence                                         map[string]any
 	At                                               string
 	Resolved                                         *exceptionResolution
 }
@@ -424,7 +465,13 @@ func openExceptionTx(q excQ, e exceptionOpen) (string, error) {
 	if code == "" {
 		code, kind, retry = classifyReason(e.Text, e.DefaultKind)
 	}
-	cls, err := classifyTx(q, kind, code, e.Text, e.At)
+	var cls excClassification
+	var err error
+	if e.Template != "" {
+		cls, err = classifyStructuralTx(q, kind, code, e.Template, e.At)
+	} else {
+		cls, err = classifyTx(q, kind, code, e.Text, e.At)
+	}
 	if err != nil {
 		return "", fmt.Errorf("classify exception: %w", err)
 	}
@@ -434,17 +481,27 @@ func openExceptionTx(q excQ, e exceptionOpen) (string, error) {
 		status = "resolved"
 		resolvedBy, resolutionReason, resolvedAt = e.Resolved.By, e.Resolved.Reason, e.Resolved.At
 	}
-	var taskID any
+	var taskID, raisedBy, evidence any
 	if e.TaskID != "" {
 		taskID = e.TaskID
+	}
+	if e.RaisedBy != "" {
+		raisedBy = e.RaisedBy
+	}
+	if e.Evidence != nil {
+		b, err := json.Marshal(e.Evidence)
+		if err != nil {
+			return "", fmt.Errorf("exception evidence: %w", err)
+		}
+		evidence = string(b)
 	}
 	id := uuid.New().String()
 	_, err = q.Exec(`INSERT INTO exceptions
 		(id, project, class_id, source_kind, source_ref, kind, reason_code, retry_class, fingerprint, matched_by, match_distance,
-		 raised_by, task_id, trace_id, status, resolved_by, resolution_reason, opened_at, resolved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 raised_by, task_id, trace_id, evidence_json, status, resolved_by, resolution_reason, opened_at, resolved_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, e.Project, cls.ClassID, e.SourceKind, e.SourceRef, kind, code, retry, cls.Fingerprint, cls.MatchedBy, cls.MatchDistance,
-		e.RaisedBy, taskID, e.TraceID, status, resolvedBy, resolutionReason, e.At, resolvedAt)
+		raisedBy, taskID, e.TraceID, evidence, status, resolvedBy, resolutionReason, e.At, resolvedAt)
 	if err != nil {
 		return "", fmt.Errorf("insert exception: %w", err)
 	}
@@ -566,4 +623,358 @@ func (d *DB) writeTransitionExceptions(tx *writerTx, task *models.Task, actor, o
 		return err
 	}
 	return nil
+}
+
+// exceptionExistsTx reports whether the (source_kind, source_ref, opened_at)
+// occurrence is already recorded: the UNIQUE key, checked first so a replay
+// (backfill chunk, re-run sweep) skips instead of failing its tx or bumping a
+// class twice.
+func exceptionExistsTx(q excQ, sourceKind, ref, openedAt string) (bool, error) {
+	var one int
+	err := q.QueryRow(`SELECT 1 FROM exceptions WHERE source_kind = ? AND source_ref = ? AND opened_at = ?`,
+		sourceKind, ref, openedAt).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// P7 deadletter classes are structural (design §5.2): shape x recipient state x
+// priority. The subject only goes to evidence, parameterized.
+var (
+	excNewTaskRE     = regexp.MustCompile(`^New task: `)
+	excCycleDigestRE = regexp.MustCompile(`^Cycle \S+: \d+/\d+ done`)
+)
+
+// deadletterShape classifies an expired message by what it was, not by its
+// text: a relay notice, a broadcast (more than one unread recipient), or a
+// direct message, with or without a subject.
+func deadletterShape(subject string, recipients int) string {
+	switch {
+	case excNewTaskRE.MatchString(subject):
+		return "relay_notice:new_task"
+	case excCycleDigestRE.MatchString(subject):
+		return "relay_notice:cycle_digest"
+	case recipients > 1:
+		return "broadcast_unread"
+	case strings.TrimSpace(subject) == "":
+		return "direct_unread:no_subject"
+	default:
+		return "direct_unread"
+	}
+}
+
+// deadletterGroup is one expired message's unread recipients, split by state.
+type deadletterGroup struct {
+	MessageID, Project, From, Priority, Subject, CreatedAt string
+	TraceID                                                *string
+	Live, Gone                                             int
+}
+
+// writeDeadletterExceptionsTx writes at most two exceptions for an expired
+// message (ruling 10b62e06 OQ7): one per recipient state that has unread
+// recipients, 'live' (active/sleeping agent: a real delivery failure) and
+// 'gone' (deleted, inactive or unknown: routing hygiene). Both rows carry the
+// message-wide counts. source_ref is "<message_id>:<state>" so the two rows of
+// one message stay distinct under UNIQUE(source_kind, source_ref, opened_at).
+// asof marks where the recipient state came from ("expiry" at write time,
+// "backfill" = today's status for history). Returns the rows written.
+func writeDeadletterExceptionsTx(q excQ, g deadletterGroup, agents []string, resolvedAt, asof string) (int, error) {
+	prio := g.Priority
+	if prio == "" {
+		prio = "P2"
+	}
+	shape := deadletterShape(g.Subject, g.Live+g.Gone)
+	evidence := map[string]any{
+		"recipients": g.Live + g.Gone, "live": g.Live, "gone": g.Gone,
+		"priority": prio, "from": g.From, "shape": shape, "state_asof": asof,
+		"subject_template": strings.Join(excTokens(parameterize(g.Subject, agents)), " "),
+	}
+	written := 0
+	for _, st := range []struct {
+		state, retry string
+		n            int
+	}{{"live", "retryable", g.Live}, {"gone", "non_retryable", g.Gone}} {
+		if st.n == 0 {
+			continue
+		}
+		ref := g.MessageID + ":" + st.state
+		exists, err := exceptionExistsTx(q, excSourceDeadletter, ref, g.CreatedAt)
+		if err != nil {
+			return written, err
+		}
+		if exists {
+			continue
+		}
+		if _, err := openExceptionTx(q, exceptionOpen{
+			Project: g.Project, SourceKind: excSourceDeadletter, SourceRef: ref, RaisedBy: "relay-sweeper",
+			TraceID: g.TraceID, Code: shape + ":" + st.state, Kind: "delivery", Retry: st.retry,
+			Template: fmt.Sprintf("%s unread by %s recipients, %s", shape, st.state, prio),
+			Evidence: evidence, At: g.CreatedAt,
+			Resolved: &exceptionResolution{By: "expired", Reason: "expired", At: resolvedAt},
+		}); err != nil {
+			return written, err
+		}
+		written++
+	}
+	return written, nil
+}
+
+// leaseExceptionOpen is the P5 row: a dead holder's expired lease requeued by
+// the sweeper, opened and resolved at once (resolved_by=self, requeued).
+// reason is the audit reason: "expired-swept" (P5) or "agent-deactivated" (P5b,
+// backfill only in this slice).
+func leaseExceptionOpen(project, taskID, holder, reason, at string, traceID *string) exceptionOpen {
+	source, code, tpl := excSourceLeaseSweep, "expired_swept", "lease expired, holder dead, task requeued"
+	if reason == "agent-deactivated" {
+		source, code, tpl = excSourceAgentCascade, "agent_deactivated", "lease released, holder deactivated, task requeued"
+	}
+	ev := map[string]any{"reason": reason}
+	if holder != "" {
+		ev["from"] = holder
+	}
+	return exceptionOpen{
+		Project: project, SourceKind: source, SourceRef: taskID, RaisedBy: "relay-sweeper", TaskID: taskID,
+		TraceID: traceID, Code: code, Kind: "lease_expired", Retry: "retryable", Template: tpl,
+		Evidence: ev, At: at,
+		Resolved: &exceptionResolution{By: "self", Reason: "requeued", At: at},
+	}
+}
+
+// excBackfillChunk is the number of source rows per backfill writer tx.
+const excBackfillChunk = 500
+
+// backfillExceptionsV1 writes the prod history once (design §6): tasks with a
+// blocked_reason, deadletter grouped per message, lease sweeps from the audit
+// trail. Behind the settings marker 'backfill_exceptions_v1'; every row is
+// also skip-if-exists, so a boot that dies mid-way resumes without duplicates.
+// Historical resolvers were never recorded: resolved_by is 'unknown' for tasks
+// (never invented). Fails soft: an error is logged, the marker stays unset and
+// the next boot retries. Returns the rows written.
+func backfillExceptionsV1(conn *sql.DB) int {
+	var marker string
+	_ = conn.QueryRow(`SELECT value FROM settings WHERE key = 'backfill_exceptions_v1'`).Scan(&marker)
+	if marker == "done" {
+		return 0
+	}
+	total := 0
+	for _, step := range []struct {
+		name string
+		fn   func(*sql.DB) (int, error)
+	}{{"tasks", backfillTaskExceptions}, {"deadletter", backfillDeadletterExceptions}, {"leases", backfillLeaseExceptions}} {
+		n, err := step.fn(conn)
+		total += n
+		if err != nil {
+			log.Printf("exceptions backfill v1: %s: %v (marker not set, retried next boot)", step.name, err)
+			return total
+		}
+	}
+	_, _ = conn.Exec(`INSERT INTO settings (key, value) VALUES ('backfill_exceptions_v1', 'done') ON CONFLICT(key) DO UPDATE SET value = 'done'`)
+	if total > 0 {
+		log.Printf("exceptions backfill v1: %d rows", total)
+	}
+	return total
+}
+
+// excChunked runs write over items in writer transactions of excBackfillChunk.
+func excChunked[T any](conn *sql.DB, items []T, write func(tx *sql.Tx, agents []string, it T) (int, error)) (int, error) {
+	total := 0
+	for start := 0; start < len(items); start += excBackfillChunk {
+		end := min(start+excBackfillChunk, len(items))
+		tx, err := conn.Begin()
+		if err != nil {
+			return total, err
+		}
+		agents, err := excAgentNames(tx)
+		if err != nil {
+			_ = tx.Rollback()
+			return total, err
+		}
+		n := 0
+		for _, it := range items[start:end] {
+			w, err := write(tx, agents, it)
+			if err != nil {
+				_ = tx.Rollback()
+				return total, err
+			}
+			n += w
+		}
+		if err := tx.Commit(); err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+type excTaskRow struct {
+	ID, Project, Status, Reason, Periods, DoneAt, CompletedAt, LastActivity, DispatchedAt string
+	TraceID                                                                               *string
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func backfillTaskExceptions(conn *sql.DB) (int, error) {
+	rows, err := conn.Query(`SELECT id, project, status, blocked_reason, COALESCE(blocked_periods, '[]'),
+		COALESCE(done_at, ''), COALESCE(completed_at, ''), COALESCE(last_activity_at, ''), COALESCE(dispatched_at, ''), trace_id
+		FROM tasks WHERE TRIM(COALESCE(blocked_reason, '')) != '' ORDER BY dispatched_at, id`)
+	if err != nil {
+		return 0, err
+	}
+	var items []excTaskRow
+	for rows.Next() {
+		var r excTaskRow
+		if err := rows.Scan(&r.ID, &r.Project, &r.Status, &r.Reason, &r.Periods, &r.DoneAt, &r.CompletedAt,
+			&r.LastActivity, &r.DispatchedAt, &r.TraceID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, r)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	return excChunked(conn, items, func(tx *sql.Tx, _ []string, r excTaskRow) (int, error) {
+		// A task already carrying an exception (written live by slice 1) is
+		// not backfilled a second time.
+		var one int
+		err := tx.QueryRow(`SELECT 1 FROM exceptions WHERE source_ref = ? AND source_kind IN (?, ?, ?) LIMIT 1`,
+			r.ID, excSourceTaskBlock, excSourceTaskCancel, excSourceLimbo).Scan(&one)
+		if err == nil {
+			return 0, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return 0, err
+		}
+		var periods []struct {
+			Start string `json:"start"`
+		}
+		_ = json.Unmarshal([]byte(r.Periods), &periods)
+		text := strings.TrimSpace(r.Reason)
+		code, _, _ := classifyReason(text, "")
+		source, defKind := excSourceTaskCancel, "plan_change"
+		switch {
+		case code == "limbo_sweep":
+			source, defKind = excSourceLimbo, "limbo"
+		case len(periods) > 0 || r.Status == "blocked":
+			// A blocked task is always a block row, so leaving 'blocked'
+			// later resolves it through the slice-1 path.
+			source, defKind = excSourceTaskBlock, "blocker"
+		}
+		opened := ""
+		if len(periods) > 0 {
+			opened = periods[0].Start
+		}
+		opened = firstNonEmpty(opened, r.CompletedAt, r.DoneAt, r.LastActivity, r.DispatchedAt)
+		e := exceptionOpen{
+			Project: r.Project, SourceKind: source, SourceRef: r.ID, TaskID: r.ID, TraceID: r.TraceID,
+			Text: text, DefaultKind: defKind, At: opened,
+			Evidence: map[string]any{"blocked_period_n": len(periods), "state_asof": "backfill"},
+		}
+		if r.Status != "blocked" {
+			e.Resolved = &exceptionResolution{
+				By: "unknown", Reason: excResolutionReason(r.Status, code),
+				At: firstNonEmpty(r.DoneAt, r.CompletedAt, r.LastActivity, opened),
+			}
+		}
+		if _, err := openExceptionTx(tx, e); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	})
+}
+
+type excDeadletterRow struct {
+	deadletterGroup
+	ExpiredAt string
+}
+
+// deadletterLiveSQL counts a recipient as live when its agent row is active or
+// sleeping (the same test as agentLive); anything else, including no row, is gone.
+const deadletterLiveSQL = `EXISTS (SELECT 1 FROM agents a WHERE a.name = %s AND a.project = %s AND a.status IN ('active', 'sleeping'))`
+
+func backfillDeadletterExceptions(conn *sql.DB) (int, error) {
+	live := fmt.Sprintf(deadletterLiveSQL, "dl.to_agent", "dl.project")
+	rows, err := conn.Query(`SELECT dl.message_id, MIN(dl.project), MIN(dl.from_agent), MIN(dl.priority), MIN(dl.subject),
+		MIN(dl.created_at), MAX(dl.expired_at),
+		SUM(CASE WHEN ` + live + ` THEN 1 ELSE 0 END), COUNT(*)
+		FROM deadletter dl GROUP BY dl.message_id ORDER BY MIN(dl.expired_at), dl.message_id`)
+	if err != nil {
+		return 0, err
+	}
+	var items []excDeadletterRow
+	for rows.Next() {
+		var r excDeadletterRow
+		var total int
+		if err := rows.Scan(&r.MessageID, &r.Project, &r.From, &r.Priority, &r.Subject, &r.CreatedAt, &r.ExpiredAt,
+			&r.Live, &total); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		r.Gone = total - r.Live
+		items = append(items, r)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	return excChunked(conn, items, func(tx *sql.Tx, agents []string, r excDeadletterRow) (int, error) {
+		return writeDeadletterExceptionsTx(tx, r.deadletterGroup, agents, r.ExpiredAt, "backfill")
+	})
+}
+
+type excLeaseRow struct {
+	Project, TaskID, Reason, At, Summary string
+	TraceID                              *string
+}
+
+func backfillLeaseExceptions(conn *sql.DB) (int, error) {
+	rows, err := conn.Query(`SELECT project, resource_id, reason, created_at, summary, trace_id FROM audit_log
+		WHERE action = 'lease_transferred' AND reason IN ('expired-swept', 'agent-deactivated') ORDER BY created_at, id`)
+	if err != nil {
+		return 0, err
+	}
+	var items []excLeaseRow
+	for rows.Next() {
+		var r excLeaseRow
+		if err := rows.Scan(&r.Project, &r.TaskID, &r.Reason, &r.At, &r.Summary, &r.TraceID); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		items = append(items, r)
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	return excChunked(conn, items, func(tx *sql.Tx, _ []string, r excLeaseRow) (int, error) {
+		e := leaseExceptionOpen(r.Project, r.TaskID, leaseAuditFrom(r.Summary), r.Reason, r.At, r.TraceID)
+		exists, err := exceptionExistsTx(tx, e.SourceKind, e.SourceRef, e.At)
+		if err != nil || exists {
+			return 0, err
+		}
+		if _, err := openExceptionTx(tx, e); err != nil {
+			return 0, err
+		}
+		return 1, nil
+	})
+}
+
+// leaseAuditFrom recovers the previous holder from an auditLeaseTransfer
+// summary ("lease <from> → <to> (<reason>)"); "" when it does not parse.
+func leaseAuditFrom(summary string) string {
+	rest, ok := strings.CutPrefix(summary, "lease ")
+	if !ok {
+		return ""
+	}
+	from, _, ok := strings.Cut(rest, " → ")
+	if !ok || from == "(none)" {
+		return ""
+	}
+	return from
 }

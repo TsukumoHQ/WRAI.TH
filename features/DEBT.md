@@ -13,3 +13,4 @@
 - NON-BLOCKING NOTE ([LEGACY_OPPORTUNITY]): the resume "task is not blocked" refusal currently classifies to code=INTERNAL / isRetryable=true via classifyMessage — a latent miscoding (a deterministic not-blocked refusal is not transient/retryable). This observability change now makes that visible in the audit trail. Retyping that refusal to a non-retryable validation code is a separate follow-up (it changes the envelope a caller receives, which this ticket must not do).
 - [LEGACY_OPPORTUNITY]: none new — this change removes the tier-2 archive path rather than adding surface.
 - [LEGACY_OPPORTUNITY] Nothing calls CompactKnowledgeLog periodically yet. It needs a janitor hook in a later slice; until then the log grows with writes.
+- [LEGACY_OPPORTUNITY] P5b cascade producer (referential_cascade.go:76) is a follow-up; the backfill already covers its 5 historical rows as agent_cascade.
