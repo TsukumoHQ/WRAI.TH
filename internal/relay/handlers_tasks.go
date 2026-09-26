@@ -373,7 +373,7 @@ func (h *Handlers) claimed(project, agent string, task *models.Task, blockers []
 	pushStatusAsync(h.getConnector(), task, "accepted", nil)
 	// Basis stamp in its own tx after the transition (design 54e529d8 §4.3).
 	basis := h.stampBasis(project, agent, db.BasisClaim, []string{task.ID})
-	out := withBasis(task, basis)
+	out := h.withStaleContext(project, agent, withBasis(task, basis))
 	if m, ok := out.(map[string]any); ok && len(blockers) > 0 {
 		list := make([]map[string]any, 0, len(blockers))
 		for _, b := range blockers {
@@ -506,7 +506,7 @@ func (h *Handlers) HandleStartTask(ctx context.Context, req mcp.CallToolRequest)
 	pushStatusAsync(h.getConnector(), task, "in-progress", nil)
 	if fromPending {
 		basis := h.stampBasis(project, agent, db.BasisClaim, []string{task.ID})
-		return h.resultJSONTracked(project, agent, "start_task", withBasis(task, basis))
+		return h.resultJSONTracked(project, agent, "start_task", h.withStaleContext(project, agent, withBasis(task, basis)))
 	}
 	return h.resultJSONTracked(project, agent, "start_task", task)
 }

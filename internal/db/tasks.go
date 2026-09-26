@@ -618,6 +618,9 @@ func (d *DB) ClaimTask(taskID, agentName, project string) (*models.Task, error) 
 	if err := d.guardNotRunContainer(taskID, project); err != nil {
 		return nil, err
 	}
+	if err := d.guardStaleContext(taskID, agentName, project); err != nil {
+		return nil, err
+	}
 	return d.transitionTask(taskID, agentName, project, "accepted", nil, nil)
 }
 
@@ -651,6 +654,9 @@ func (d *DB) PromoteTask(taskID, agentName, project string) (*models.Task, bool,
 
 func (d *DB) StartTask(taskID, agentName, project string) (*models.Task, error) {
 	if err := d.guardNotRunContainer(taskID, project); err != nil {
+		return nil, err
+	}
+	if err := d.guardStaleContext(taskID, agentName, project); err != nil {
 		return nil, err
 	}
 	return d.transitionTask(taskID, agentName, project, "in-progress", nil, nil)

@@ -534,6 +534,9 @@ func obligationDischargeTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("id", mcp.Description("Obligation id"), mcp.Required()),
 		mcp.WithString("evidence", mcp.Description("Optional note")),
+		mcp.WithString("verdict", mcp.Description("Knowledge reassess (default prepared) or contest review"),
+			mcp.Enum("prepared", "unaffected", "conflict", "upheld", "overturned")),
+		mcp.WithString("reason", mcp.Description("Required for conflict")),
 	)
 }
 

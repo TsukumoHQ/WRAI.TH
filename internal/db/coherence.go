@@ -21,7 +21,8 @@ import (
 // unfulfilled reassess escalates to a supervisor agent and stops there —
 // never the human.
 //
-// T1 consumers (ruling: A1 claim-basis consumers land with T2):
+// Consumers:
+//   A1 leased task whose latest claim/reassess basis holds the old version → its assignee (T2)
 //   A2 leased task citing the key → its assignee
 //   A3 pending task citing the key → its dispatcher (confirm / rewrite / cancel)
 //   A4 live agent whose context head (or a recall on it) holds the old version
@@ -29,15 +30,36 @@ import (
 const (
 	NormCoherenceReassess     = "coherence.reassess"
 	NormCoherenceReassessRole = "coherence.reassess_role"
+	// NormCoherenceReview is the contest rung (T2, design §5): a reviewer rules
+	// upheld | overturned on a conflict against the new version.
+	NormCoherenceReview = "coherence.review"
 
 	SubjectKnowledgeTask    = "knowledge_task"
 	SubjectKnowledgeSession = "knowledge_session"
+	SubjectKnowledgeContest = "knowledge_contest"
 
 	// SettingCoherenceMode is off | advisory (default) | enforce (cto only;
 	// enforce is read by T2's claim fence).
 	SettingCoherenceMode  = "coherence_mode"
 	CoherenceModeOff      = "off"
 	CoherenceModeAdvisory = "advisory"
+	CoherenceModeEnforce  = "enforce"
+
+	// BasisReassess is the task_basis event a prepared reassess stamps.
+	BasisReassess = "reassess"
+	// CodeStaleContext is the claim fence's TaskError code (design §6).
+	CodeStaleContext = "STALE_CONTEXT"
+
+	// Discharge verdicts (design §4.2, §5).
+	VerdictPrepared   = "prepared"
+	VerdictUnaffected = "unaffected"
+	VerdictConflict   = "conflict"
+	VerdictUpheld     = "upheld"
+	VerdictOverturned = "overturned"
+
+	excSourceKnowledgeConflict = "knowledge_conflict"
+	coherenceConflictMinReason = 10
+	coherenceHumanTTL          = 72 * time.Hour
 
 	settingCoherenceCursor = "coherence_cursor_rev"
 	coherenceBatch         = 50
@@ -45,6 +67,7 @@ const (
 	coherenceMinCiteKeyLen = 6 // shorter keys would match task prose by accident
 
 	RolloutPreparing           = "preparing"
+	RolloutContested           = "contested"
 	RolloutCommitted           = "committed"
 	RolloutCommittedWithOrphan = "committed_with_orphans"
 	RolloutSuperseded          = "superseded"
@@ -84,6 +107,13 @@ func migrateCoherence(conn *sql.DB) {
 		 'time', 'created_at', 'coherence_role_age', 86400, 900, 259200, 'supervisor', 'message',
 		 '%s did not reassess against the change of %s (rev %d) in time; you are its supervisor: obligation %s.',
 		 NULL, 1, 1)`)
+	_, _ = conn.Exec(`INSERT OR IGNORE INTO norms (id, subject_kind, trigger, what, while_pred, deadline_kind, deadline_anchor,
+		deadline_setting, deadline_default_s, deadline_min_s, deadline_max_s, bearer_kind, sanction, sanction_template,
+		on_unfulfilled, max_depth, eval_order)
+		VALUES ('coherence.review', 'knowledge', 'knowledge_conflict', 'contest_ruled', 'rollout_contested',
+		 'time', 'created_at', 'coherence_role_age', 86400, 900, 259200, 'reviewer', 'message',
+		 '%s contests %s (rev %d, round %d): %s. Rule it: obligation_discharge %s verdict=upheld (the new version stands) or verdict=overturned (after you write the fix: supersede, scope split or valid_until).',
+		 NULL, 2, 2)`)
 	// Start from the current head: history written before this slice is not
 	// replayed into obligations (the log started empty at S1 anyway).
 	_, _ = conn.Exec(`INSERT OR IGNORE INTO settings (key, value)
@@ -110,6 +140,10 @@ func (c knowledgeChange) opensRollout() bool {
 // CoherenceNotice is one message the relay layer sends after a tick.
 type CoherenceNotice struct {
 	Project, To, Subject, Body, ObligationID string
+	// Action is the message's action_required ("" = do); Schema is the reply
+	// schema of the human rung (design §5.3).
+	Action string
+	Schema map[string]any
 }
 
 // CoherenceReport is what one tick did.
@@ -219,6 +253,35 @@ func (d *DB) affectedSet(c knowledgeChange) (out []consumer, capped bool, err er
 	}
 	var leased, pending []consumer
 	taskAgents := map[string]bool{}
+	seenTask := map[string]bool{}
+	// A1: leased tasks whose latest claim/reassess basis holds the old version.
+	a1, err := d.ro().Query(`SELECT t.id, t.project, COALESCE(t.assigned_to, ''), t.priority FROM tasks t
+		JOIN task_basis tb ON tb.task_id = t.id
+		WHERE t.archived_at IS NULL AND t.status IN ('accepted', 'in-progress', 'in-review', 'blocked')`+projectFilter+`
+		  AND tb.event IN ('claim', 'reassess')
+		  AND tb.stamped_at = (SELECT MAX(b2.stamped_at) FROM task_basis b2 WHERE b2.task_id = t.id AND b2.event IN ('claim', 'reassess'))
+		  AND EXISTS (SELECT 1 FROM context_snapshots s JOIN consumption_edges e ON e.set_hash = s.set_hash
+		              WHERE s.id IN (tb.snapshot_id, tb.recall_through) AND e.memory_id = ?)`, append(append([]any{}, args...), c.PrevID)...)
+	if err != nil {
+		return nil, false, fmt.Errorf("basis tasks: %w", err)
+	}
+	for a1.Next() {
+		var id, project, assignee, prio string
+		if err := a1.Scan(&id, &project, &assignee, &prio); err != nil {
+			_ = a1.Close()
+			return nil, false, err
+		}
+		if seenTask[id] || assignee == "" || strings.EqualFold(assignee, c.Agent) {
+			continue
+		}
+		seenTask[id] = true
+		leased = append(leased, consumer{project, SubjectKnowledgeTask, id, "consumer", assignee, "claim_basis", prio})
+		taskAgents[project+"/"+strings.ToLower(assignee)] = true
+	}
+	_ = a1.Close()
+	if err := a1.Err(); err != nil {
+		return nil, false, err
+	}
 	if len(c.Key) >= coherenceMinCiteKeyLen {
 		q := `SELECT t.id, t.project, t.status, COALESCE(t.assigned_to, ''), t.dispatched_by, t.priority FROM tasks t
 			WHERE t.archived_at IS NULL AND t.status IN ('pending', 'accepted', 'in-progress', 'in-review', 'blocked')` + projectFilter + `
@@ -234,6 +297,10 @@ func (d *DB) affectedSet(c knowledgeChange) (out []consumer, capped bool, err er
 				_ = rows.Close()
 				return nil, false, err
 			}
+			if seenTask[id] {
+				continue
+			}
+			seenTask[id] = true
 			if status == "pending" {
 				if d.IsLiveAgent(project, dispatcher) && !strings.EqualFold(dispatcher, c.Agent) {
 					pending = append(pending, consumer{project, SubjectKnowledgeTask, id, "dispatcher", dispatcher, "cited_pending", prio})
@@ -354,6 +421,12 @@ func (d *DB) openRollout(c knowledgeChange, prevCursor string, now time.Time, re
 		ObligationInactive, ts, ObligationActive, c.Project, c.Scope, c.Key); err != nil {
 		return 0, false, fmt.Errorf("supersede obligations: %w", err)
 	}
+	if _, err := tx.Exec(`UPDATE exceptions SET status = 'resolved', resolved_by = 'peer', resolution_reason = 'superseded', resolved_at = ?
+		WHERE source_kind = ? AND status = 'open' AND json_extract(evidence_json, '$.rollout_id') IN (
+			SELECT id FROM knowledge_rollouts WHERE project = ? AND scope = ? AND key = ? AND state IN ('preparing', 'contested'))`,
+		ts, excSourceKnowledgeConflict, c.Project, c.Scope, c.Key); err != nil {
+		return 0, false, fmt.Errorf("supersede contests: %w", err)
+	}
 	if _, err := tx.Exec(`UPDATE knowledge_rollouts SET state = ?, closed_at = ? WHERE project = ? AND scope = ? AND key = ?
 		AND state IN ('preparing', 'contested')`, RolloutSuperseded, ts, c.Project, c.Scope, c.Key); err != nil {
 		return 0, false, fmt.Errorf("supersede rollouts: %w", err)
@@ -422,7 +495,7 @@ func (d *DB) activeCoherence() ([]activeCoherence, error) {
 			COALESCE(o.deadline_at, ''), COALESCE(o.discharge_evidence, '{}'), o.escalation_depth,
 			r.id, r.state, r.key, COALESCE(r.new_memory_id, ''), r.old_memory_id, r.change_class, r.rev
 		FROM obligations o JOIN knowledge_rollouts r ON r.id = json_extract(o.discharge_evidence, '$.rollout_id')
-		WHERE o.state = ? AND o.norm_id IN (?, ?)`, ObligationActive, NormCoherenceReassess, NormCoherenceReassessRole)
+		WHERE o.state = ? AND o.norm_id IN (?, ?, ?)`, ObligationActive, NormCoherenceReassess, NormCoherenceReassessRole, NormCoherenceReview)
 	if err != nil {
 		return nil, err
 	}
@@ -543,6 +616,9 @@ func (d *DB) holds(project, agent, memoryID string) bool {
 // task orphan also writes an exception (escalation only via class budgets).
 func (d *DB) breachCoherence(a activeCoherence, now time.Time, rep *CoherenceReport) error {
 	ts := now.UTC().Format(memoryTimeFmt)
+	if a.Norm == NormCoherenceReview {
+		return d.lapseReview(a, ts)
+	}
 	var supervisor string
 	if a.Depth == 0 {
 		supervisor = d.LiveSupervisor(a.Project, a.Bearer)
@@ -648,49 +724,11 @@ func (d *DB) commitRollouts(now time.Time) (int, error) {
 	return n, nil
 }
 
-// DischargeReassess fulfils a coherence obligation as prepared. At depth 0 the
-// relay re-checks that the bearer was served the new version after the
-// rollout opened (a boot head or a recall); a retraction needs no read.
-// reason "unknown obligation" when id is not a coherence obligation.
+// DischargeReassess discharges a coherence obligation as prepared (the T1
+// contract, kept for callers that pass no verdict).
 func (d *DB) DischargeReassess(project, id, by, evidence string, now time.Time) (bool, string, error) {
-	var bearer, state, norm, rolloutID, rolloutAt, newID, key string
-	var depth int
-	err := d.ro().QueryRow(`SELECT o.bearer, o.state, o.norm_id, o.escalation_depth, r.id, r.created_at,
-			COALESCE(r.new_memory_id, ''), r.key
-		FROM obligations o JOIN knowledge_rollouts r ON r.id = json_extract(o.discharge_evidence, '$.rollout_id')
-		WHERE o.id = ? AND o.project = ? AND o.norm_id IN (?, ?)`, id, project, NormCoherenceReassess, NormCoherenceReassessRole).
-		Scan(&bearer, &state, &norm, &depth, &rolloutID, &rolloutAt, &newID, &key)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, "unknown obligation", nil
-	}
-	if err != nil {
-		return false, "", err
-	}
-	if state != ObligationActive {
-		return false, "obligation is " + state + ", not active", nil
-	}
-	if !strings.EqualFold(bearer, by) {
-		return false, "only the obligation's bearer can discharge it", nil
-	}
-	if depth == 0 && newID != "" {
-		var served int
-		_ = d.ro().QueryRow(`SELECT COUNT(*) FROM context_snapshots s JOIN consumption_edges e ON e.set_hash = s.set_hash
-			WHERE s.project = ? AND lower(s.agent_name) = lower(?) AND e.memory_id = ? AND s.created_at >= ?`,
-			project, by, newID, rolloutAt).Scan(&served)
-		if served == 0 {
-			return false, fmt.Sprintf("read the new version first: get_memory(%q), then discharge again", key), nil
-		}
-	}
-	a := activeCoherence{ID: id, Evidence: "{}"}
-	_ = d.ro().QueryRow(`SELECT COALESCE(discharge_evidence, '{}') FROM obligations WHERE id = ?`, id).Scan(&a.Evidence)
-	ok, err := d.closeCoherenceObligation(a, ObligationFulfilled, map[string]any{"verdict": "prepared", "by": by, "evidence": evidence}, now)
-	if err != nil {
-		return false, "", err
-	}
-	if !ok {
-		return false, "obligation moved concurrently", nil
-	}
-	return true, "", nil
+	r, err := d.DischargeCoherence(CoherenceDischarge{Project: project, ID: id, By: by, Evidence: evidence, Now: now})
+	return r.OK, r.Refusal, err
 }
 
 // MyCoherenceObligations lists the caller's active coherence obligations.
@@ -698,8 +736,8 @@ func (d *DB) MyCoherenceObligations(project, agent string) ([]ObligationView, er
 	rows, err := d.ro().Query(`SELECT o.id, o.norm_id, o.subject_kind, o.subject_id, o.bearer_kind, o.escalation_depth,
 			COALESCE(o.deadline_at, ''), r.key, r.change_class, r.rev
 		FROM obligations o JOIN knowledge_rollouts r ON r.id = json_extract(o.discharge_evidence, '$.rollout_id')
-		WHERE o.project = ? AND o.state = ? AND o.bearer = ? AND o.norm_id IN (?, ?)
-		ORDER BY o.created_at`, project, ObligationActive, strings.ToLower(agent), NormCoherenceReassess, NormCoherenceReassessRole)
+		WHERE o.project = ? AND o.state = ? AND o.bearer = ? AND o.norm_id IN (?, ?, ?)
+		ORDER BY o.created_at`, project, ObligationActive, strings.ToLower(agent), NormCoherenceReassess, NormCoherenceReassessRole, NormCoherenceReview)
 	if err != nil {
 		return nil, fmt.Errorf("my coherence obligations: %w", err)
 	}
@@ -714,7 +752,567 @@ func (d *DB) MyCoherenceObligations(project, agent string) ([]ObligationView, er
 		}
 		v.What = "knowledge_reassessed"
 		v.Subject = fmt.Sprintf("%s changed (%s, rev %d)", key, class, rev)
+		if v.Norm == NormCoherenceReview {
+			v.What = "contest_ruled"
+			v.Subject = fmt.Sprintf("%s contested (%s, rev %d): rule upheld or overturned", key, class, rev)
+		}
 		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// ---------------------------------------------------------------------------
+// T2: three-valued verdicts, contest rounds, the STALE_CONTEXT fence
+// (design e731f3c9 §4.2, §5, §6, §7; ruling 0019d6f5).
+
+// CoherenceDischarge is one obligation_discharge on a coherence obligation.
+// Verdict "" means prepared on a reassess rung (the T1 contract).
+type CoherenceDischarge struct {
+	Project, ID, By, Verdict, Reason, Evidence string
+	Now                                        time.Time
+}
+
+// CoherenceDischargeResult reports what a discharge did. StampTaskID is the
+// task whose basis the relay stamps (event reassess) after a prepared verdict;
+// Notices are the messages the relay sends (reviewer, human, raiser).
+type CoherenceDischargeResult struct {
+	OK          bool
+	Refusal     string
+	State       string
+	StampTaskID string
+	ContestID   string
+	Notices     []CoherenceNotice
+}
+
+// coherenceOb is one coherence obligation with its rollout, as a discharge reads it.
+type coherenceOb struct {
+	ID, Project, Norm, State, SubjectKind, SubjectID, Bearer, Evidence, Parent string
+	Depth                                                                      int
+	RolloutID, RolloutState, RolloutAt, Scope, Key, Layer, Class               string
+	NewID, OldID, Author                                                       string
+	Rev                                                                        int64
+}
+
+func (d *DB) coherenceOb(project, id string) (*coherenceOb, error) {
+	var o coherenceOb
+	err := d.ro().QueryRow(`SELECT o.id, o.project, o.norm_id, o.state, o.subject_kind, o.subject_id, o.bearer,
+			COALESCE(o.discharge_evidence, '{}'), COALESCE(o.parent_obligation_id, ''), o.escalation_depth,
+			r.id, r.state, r.created_at, r.scope, r.key, r.layer, r.change_class, COALESCE(r.new_memory_id, ''), r.old_memory_id,
+			COALESCE((SELECT l.agent FROM knowledge_log l WHERE l.rev = r.rev), ''), r.rev
+		FROM obligations o JOIN knowledge_rollouts r ON r.id = json_extract(o.discharge_evidence, '$.rollout_id')
+		WHERE o.id = ? AND o.project = ? AND o.norm_id IN (?, ?, ?)`, id, project,
+		NormCoherenceReassess, NormCoherenceReassessRole, NormCoherenceReview).
+		Scan(&o.ID, &o.Project, &o.Norm, &o.State, &o.SubjectKind, &o.SubjectID, &o.Bearer, &o.Evidence, &o.Parent, &o.Depth,
+			&o.RolloutID, &o.RolloutState, &o.RolloutAt, &o.Scope, &o.Key, &o.Layer, &o.Class, &o.NewID, &o.OldID, &o.Author, &o.Rev)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return &o, err
+}
+
+func (o *coherenceOb) evidence() map[string]any {
+	ev := map[string]any{}
+	_ = json.Unmarshal([]byte(o.Evidence), &ev)
+	return ev
+}
+
+func isHumanName(name string) bool {
+	n := strings.ToLower(name)
+	return n == "user" || n == "human"
+}
+
+// DischargeCoherence applies a verdict to a coherence obligation (design
+// §4.2, §5). Reassess rungs take prepared (re-checked: the bearer was served
+// the new version after the rollout opened), unaffected (trusted, audited by
+// §7) or conflict (reason >= 10 chars; opens a contest). Review rungs take
+// upheld or overturned (re-checked: the fix is written). Refusals change
+// nothing. Refusal "unknown obligation" means the id is not a coherence one.
+func (d *DB) DischargeCoherence(in CoherenceDischarge) (CoherenceDischargeResult, error) {
+	var r CoherenceDischargeResult
+	o, err := d.coherenceOb(in.Project, in.ID)
+	if err != nil {
+		return r, err
+	}
+	if o == nil {
+		r.Refusal = "unknown obligation"
+		return r, nil
+	}
+	if o.State != ObligationActive {
+		r.Refusal = "obligation is " + o.State + ", not active"
+		return r, nil
+	}
+	if !strings.EqualFold(o.Bearer, in.By) && !(isHumanName(o.Bearer) && isHumanName(in.By)) {
+		r.Refusal = "only the obligation's bearer can discharge it"
+		return r, nil
+	}
+	verdict := in.Verdict
+	review := o.Norm == NormCoherenceReview
+	if verdict == "" && !review {
+		verdict = VerdictPrepared
+	}
+	switch {
+	case review && verdict != VerdictUpheld && verdict != VerdictOverturned:
+		r.Refusal = "a contest review takes verdict upheld or overturned"
+		return r, nil
+	case !review && verdict != VerdictPrepared && verdict != VerdictUnaffected && verdict != VerdictConflict:
+		r.Refusal = "a reassess takes verdict prepared, unaffected or conflict"
+		return r, nil
+	}
+	now := in.Now
+	switch verdict {
+	case VerdictPrepared:
+		return d.dischargePrepared(o, in, now)
+	case VerdictUnaffected:
+		ok, err := d.closeCoherenceObligation(activeCoherence{ID: o.ID, Evidence: o.Evidence}, ObligationInactive,
+			map[string]any{"verdict": VerdictUnaffected, "by": in.By, "reason": in.Reason}, now)
+		return coherenceClosed(r, ok, ObligationInactive), err
+	case VerdictConflict:
+		if len(strings.TrimSpace(in.Reason)) < coherenceConflictMinReason {
+			r.Refusal = fmt.Sprintf("a conflict needs a reason (>= %d characters)", coherenceConflictMinReason)
+			return r, nil
+		}
+		return d.openContest(o, in, now)
+	case VerdictUpheld:
+		return d.ruleContest(o, in, true, now)
+	default:
+		return d.ruleContest(o, in, false, now)
+	}
+}
+
+func coherenceClosed(r CoherenceDischargeResult, ok bool, state string) CoherenceDischargeResult {
+	if !ok {
+		r.Refusal = "obligation moved concurrently"
+		return r
+	}
+	r.OK, r.State = true, state
+	return r
+}
+
+// dischargePrepared: on a reassess rung the bearer must have been served the
+// new version after the rollout opened (a boot head or a recall); a retraction
+// needs no read. A task consumer's basis is then re-stamped by the relay.
+func (d *DB) dischargePrepared(o *coherenceOb, in CoherenceDischarge, now time.Time) (CoherenceDischargeResult, error) {
+	var r CoherenceDischargeResult
+	if o.Norm == NormCoherenceReassess && o.NewID != "" {
+		var served int
+		_ = d.ro().QueryRow(`SELECT COUNT(*) FROM context_snapshots s JOIN consumption_edges e ON e.set_hash = s.set_hash
+			WHERE s.project = ? AND lower(s.agent_name) = lower(?) AND e.memory_id = ? AND s.created_at >= ?`,
+			in.Project, in.By, o.NewID, o.RolloutAt).Scan(&served)
+		if served == 0 {
+			r.Refusal = fmt.Sprintf("read the new version first: get_memory(%q), then discharge again", o.Key)
+			return r, nil
+		}
+	}
+	ok, err := d.closeCoherenceObligation(activeCoherence{ID: o.ID, Evidence: o.Evidence}, ObligationFulfilled,
+		map[string]any{"verdict": VerdictPrepared, "by": in.By, "evidence": in.Evidence}, now)
+	r = coherenceClosed(r, ok, ObligationFulfilled)
+	if r.OK && o.Norm == NormCoherenceReassess && o.SubjectKind == SubjectKnowledgeTask && o.evidence()["via"] != "cited_pending" {
+		r.StampTaskID = o.SubjectID
+	}
+	return r, err
+}
+
+// contestReviewer picks the round-1 reviewer (design §5.2): the new version
+// author's reports_to, else a live executive of the project, else any live
+// executive. Never the raiser, never the author, never the founder/human.
+func (d *DB) contestReviewer(project, author, raiser string) string {
+	bad := func(n string) bool {
+		return n == "" || nonAgentDispatchers[strings.ToLower(n)] || strings.EqualFold(n, author) || strings.EqualFold(n, raiser)
+	}
+	if author != "" {
+		if a, err := d.GetAgent(project, author); err == nil && a != nil && a.ReportsTo != nil && !bad(*a.ReportsTo) &&
+			d.IsLiveAgent(project, *a.ReportsTo) {
+			return *a.ReportsTo
+		}
+	}
+	return d.contestExecutive(project, author, raiser)
+}
+
+// contestExecutive is a live executive (project first, then fleet), never the
+// raiser, the author or the founder.
+func (d *DB) contestExecutive(project, author, raiser string) string {
+	rows, err := d.ro().Query(`SELECT name FROM agents WHERE is_executive = 1 AND status = 'active'
+		ORDER BY (project = ?) DESC, last_seen DESC`, project)
+	if err != nil {
+		return ""
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var n string
+		if rows.Scan(&n) != nil {
+			return ""
+		}
+		if nonAgentDispatchers[strings.ToLower(n)] || strings.EqualFold(n, author) || strings.EqualFold(n, raiser) {
+			continue
+		}
+		return n
+	}
+	return ""
+}
+
+// openReviewAt reports whether the rollout already has an active review at depth.
+func (d *DB) openReviewAt(rolloutID string, depth int) bool {
+	var n int
+	_ = d.ro().QueryRow(`SELECT COUNT(*) FROM obligations WHERE norm_id = ? AND state = ? AND escalation_depth = ?
+		AND json_extract(discharge_evidence, '$.rollout_id') = ?`, NormCoherenceReview, ObligationActive, depth, rolloutID).Scan(&n)
+	return n > 0
+}
+
+// contestRef is what a contest is raised against: the new version, or the
+// retracted one for a retraction.
+func (o *coherenceOb) contestRef() string {
+	if o.NewID != "" {
+		return o.NewID
+	}
+	return "retraction:" + o.OldID
+}
+
+// openContest records a conflict (design §5): the raiser's rung is fulfilled
+// with verdict conflict, an exception row is written against the new version,
+// the rollout goes contested (its fence drops), and a coherence.review opens:
+// round 1 on an agent reviewer; round 2 (a second conflict on the same
+// version, by anyone) on the human for a constraints key — the protocol's
+// only path to the user — else on a project executive.
+func (d *DB) openContest(o *coherenceOb, in CoherenceDischarge, now time.Time) (CoherenceDischargeResult, error) {
+	var r CoherenceDischargeResult
+	ts := now.UTC().Format(memoryTimeFmt)
+	ref := o.contestRef()
+	var prior int
+	if err := d.ro().QueryRow(`SELECT COUNT(*) FROM exceptions WHERE source_kind = ? AND source_ref = ?`,
+		excSourceKnowledgeConflict, ref).Scan(&prior); err != nil {
+		return r, err
+	}
+	round := prior + 1
+	if round > 2 {
+		round = 2
+	}
+	raiser := strings.ToLower(in.By)
+	reviewer, bearerKind := "", "reviewer"
+	deadline := now.Add(d.SettingDuration("coherence_role_age", 24*time.Hour, 15*time.Minute, 72*time.Hour))
+	switch {
+	case round == 1:
+		reviewer = d.contestReviewer(o.Project, o.Author, raiser)
+	case d.openReviewAt(o.RolloutID, 2):
+		// One round-2 review per rollout: a further conflict joins it (the
+		// human is paged at most once per contested version).
+	case o.Layer == "constraints":
+		reviewer, bearerKind, deadline = "user", "human", now.Add(coherenceHumanTTL)
+	default:
+		reviewer = d.contestExecutive(o.Project, o.Author, raiser)
+	}
+	var version int
+	var template string
+	_ = d.ro().QueryRow(`SELECT version, sanction_template FROM norms WHERE id = ?`, NormCoherenceReview).Scan(&version, &template)
+
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return r, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	ev := o.evidence()
+	for k, v := range map[string]any{"verdict": VerdictConflict, "by": in.By, "reason": in.Reason, "round": round} {
+		ev[k] = v
+	}
+	raw, _ := json.Marshal(ev)
+	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, done_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+		ObligationFulfilled, ts, ts, string(raw), o.ID, ObligationActive)
+	if err != nil {
+		return r, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		r.Refusal = "obligation moved concurrently"
+		return r, nil
+	}
+	excID, err := openExceptionTx(tx, exceptionOpen{Project: o.Project, SourceKind: excSourceKnowledgeConflict, SourceRef: ref,
+		RaisedBy: raiser, Code: "contradiction", Kind: "contradiction", Retry: "non_retryable",
+		Template: "contradiction: " + o.Layer + "/" + o.Key,
+		Evidence: map[string]any{"rollout_id": o.RolloutID, "key": o.Key, "layer": o.Layer, "raised_by": raiser,
+			"reason": in.Reason, "round": round, "obligation_id": o.ID, "reviewer": reviewer},
+		At: ts})
+	if err != nil {
+		return r, fmt.Errorf("contest exception: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE knowledge_rollouts SET state = ? WHERE id = ? AND state IN (?, ?)`,
+		RolloutContested, o.RolloutID, RolloutPreparing, RolloutContested); err != nil {
+		return r, err
+	}
+	if reviewer != "" {
+		oid := uuid.New().String()
+		rev, _ := json.Marshal(map[string]any{"rollout_id": o.RolloutID, "key": o.Key, "rev": o.Rev, "exception_id": excID,
+			"raiser": raiser, "raiser_obligation": o.ID, "round": round, "layer": o.Layer})
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO obligations
+			(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state,
+			 created_at, deadline_at, escalation_depth, parent_obligation_id, discharge_evidence)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			oid, o.Project, NormCoherenceReview, version, bindingsHash(NormCoherenceReview, SubjectKnowledgeContest, o.RolloutID+"|"+excID, round),
+			SubjectKnowledgeContest, excID, bearerKind, strings.ToLower(reviewer), ObligationActive, ts,
+			deadline.UTC().Format(memoryTimeFmt), round, o.ID, string(rev)); err != nil {
+			return r, fmt.Errorf("review obligation: %w", err)
+		}
+		n := CoherenceNotice{Project: o.Project, To: reviewer, ObligationID: oid,
+			Subject: fmt.Sprintf("contest: %s (round %d)", o.Key, round),
+			Body:    fmt.Sprintf(template, raiser, o.Key, o.Rev, round, in.Reason, oid)}
+		if bearerKind == "human" {
+			n.Subject = fmt.Sprintf("decide: %s contested twice", o.Key)
+			n.Action = "decide"
+			n.Schema = map[string]any{"decision": []string{"keep_new", "revert", "scope_split"}, "scope": "lane|project|global",
+				"generalize": "bool", "expires_in": "duration <= 90d", "ttl": coherenceHumanTTL.String()}
+		}
+		r.Notices = append(r.Notices, n)
+	}
+	if err := tx.Commit(); err != nil {
+		return r, err
+	}
+	r.OK, r.State, r.ContestID = true, ObligationFulfilled, excID
+	return r, nil
+}
+
+// ruleContest applies a reviewer's ruling. upheld: the new version stands, the
+// contest resolves, and the raiser's reassess re-opens one round deeper (it
+// must choose again). overturned: the reviewer must have written the fix
+// (a newer rev of the key, or the new version archived / given valid_until);
+// the contest resolves and the fix's rollout supersedes this one (a fix with
+// no new rev supersedes it here).
+func (d *DB) ruleContest(o *coherenceOb, in CoherenceDischarge, upheld bool, now time.Time) (CoherenceDischargeResult, error) {
+	var r CoherenceDischargeResult
+	ts := now.UTC().Format(memoryTimeFmt)
+	ev := o.evidence()
+	excID, _ := ev["exception_id"].(string)
+	raiserOb, _ := ev["raiser_obligation"].(string)
+	newerRev := false
+	if !upheld {
+		var n int
+		_ = d.ro().QueryRow(`SELECT COUNT(*) FROM knowledge_log WHERE project = ? AND scope = ? AND key = ? AND rev > ?`,
+			o.Project, o.Scope, o.Key, o.Rev).Scan(&n)
+		newerRev = n > 0
+		fixed := newerRev
+		if !fixed && o.NewID != "" {
+			_ = d.ro().QueryRow(`SELECT COUNT(*) FROM memories WHERE id = ? AND (archived_at IS NOT NULL OR valid_until IS NOT NULL)`,
+				o.NewID).Scan(&n)
+			fixed = n > 0
+		}
+		if !fixed {
+			r.Refusal = fmt.Sprintf("write the fix first (supersede %q, split its scope or set valid_until), then discharge overturned", o.Key)
+			return r, nil
+		}
+	}
+	resolvedBy := "peer"
+	if isHumanName(in.By) {
+		resolvedBy = "human"
+	}
+	verdict := VerdictOverturned
+	if upheld {
+		verdict = VerdictUpheld
+	}
+	var reopen struct {
+		subjectKind, subjectID, bearer, evidence string
+		depth                                    int
+	}
+	if upheld && raiserOb != "" {
+		_ = d.ro().QueryRow(`SELECT subject_kind, subject_id, bearer, COALESCE(discharge_evidence, '{}'), escalation_depth
+			FROM obligations WHERE id = ?`, raiserOb).Scan(&reopen.subjectKind, &reopen.subjectID, &reopen.bearer, &reopen.evidence, &reopen.depth)
+	}
+	var version int
+	var template string
+	_ = d.ro().QueryRow(`SELECT version, sanction_template FROM norms WHERE id = ?`, NormCoherenceReassess).Scan(&version, &template)
+
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return r, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	ev["verdict"], ev["by"], ev["reason"] = verdict, in.By, in.Reason
+	raw, _ := json.Marshal(ev)
+	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, done_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+		ObligationFulfilled, ts, ts, string(raw), o.ID, ObligationActive)
+	if err != nil {
+		return r, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		r.Refusal = "obligation moved concurrently"
+		return r, nil
+	}
+	if _, err := tx.Exec(`UPDATE exceptions SET status = 'resolved', resolved_by = ?, resolution_reason = ?, resolved_at = ?
+		WHERE id = ? AND status = 'open'`, resolvedBy, verdict, ts, excID); err != nil {
+		return r, err
+	}
+	switch {
+	case upheld:
+		if reopen.bearer != "" {
+			oid := uuid.New().String()
+			rev := map[string]any{}
+			_ = json.Unmarshal([]byte(reopen.evidence), &rev)
+			for _, k := range []string{"verdict", "by", "reason", "evidence", "outcome"} {
+				delete(rev, k)
+			}
+			rev["round"] = 2
+			rev["upheld_by"] = in.By
+			rj, _ := json.Marshal(rev)
+			depth := reopen.depth + 1
+			if _, err := tx.Exec(`INSERT OR IGNORE INTO obligations
+				(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state,
+				 created_at, deadline_at, escalation_depth, parent_obligation_id, discharge_evidence)
+				VALUES (?, ?, ?, ?, ?, ?, ?, 'consumer', ?, ?, ?, ?, ?, ?, ?)`,
+				oid, o.Project, NormCoherenceReassess, version,
+				bindingsHash(NormCoherenceReassess, reopen.subjectKind, o.RolloutID+"|"+reopen.subjectID, depth),
+				reopen.subjectKind, reopen.subjectID, reopen.bearer, ObligationActive, ts,
+				now.Add(d.reassessAge(o.Class)).UTC().Format(memoryTimeFmt), depth, raiserOb, string(rj)); err != nil {
+				return r, fmt.Errorf("reopen reassess: %w", err)
+			}
+			r.Notices = append(r.Notices, CoherenceNotice{Project: o.Project, To: reopen.bearer, ObligationID: oid,
+				Subject: fmt.Sprintf("contest upheld: reassess %s again (round 2)", o.Key),
+				Body:    fmt.Sprintf(template, o.Key, o.Class, o.Rev, oid)})
+		}
+		if err := uncontestTx(tx, o.RolloutID); err != nil {
+			return r, err
+		}
+	case !newerRev:
+		// The fix left no new rev (archive / valid_until): the rollout is over.
+		if _, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?,
+				discharge_evidence = json_set(COALESCE(discharge_evidence, '{}'), '$.moot', 'overturned')
+			WHERE state = ? AND norm_id LIKE 'coherence.%' AND json_extract(discharge_evidence, '$.rollout_id') = ?`,
+			ObligationInactive, ts, ObligationActive, o.RolloutID); err != nil {
+			return r, err
+		}
+		if _, err := tx.Exec(`UPDATE knowledge_rollouts SET state = ?, closed_at = ? WHERE id = ? AND state IN (?, ?)`,
+			RolloutSuperseded, ts, o.RolloutID, RolloutPreparing, RolloutContested); err != nil {
+			return r, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return r, err
+	}
+	r.OK, r.State = true, ObligationFulfilled
+	return r, nil
+}
+
+// uncontestTx returns a contested rollout to preparing once no contest of it
+// is open, so its commit (and fence) resume.
+func uncontestTx(q excQ, rolloutID string) error {
+	_, err := q.Exec(`UPDATE knowledge_rollouts SET state = ? WHERE id = ? AND state = ?
+		AND NOT EXISTS (SELECT 1 FROM exceptions WHERE source_kind = ? AND status = 'open'
+		                AND json_extract(evidence_json, '$.rollout_id') = ?)`,
+		RolloutPreparing, rolloutID, RolloutContested, excSourceKnowledgeConflict, rolloutID)
+	return err
+}
+
+// lapseReview closes a review past its deadline: nobody ruled, so the new
+// version stands (the contest resolves expired) and the rollout resumes.
+func (d *DB) lapseReview(a activeCoherence, ts string) error {
+	ev := map[string]any{}
+	_ = json.Unmarshal([]byte(a.Evidence), &ev)
+	excID, _ := ev["exception_id"].(string)
+	ev["outcome"] = "deadline"
+	raw, _ := json.Marshal(ev)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = ?`,
+		ObligationUnfulfilled, ts, string(raw), a.ID, ObligationActive)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil
+	}
+	if _, err := tx.Exec(`UPDATE exceptions SET status = 'resolved', resolved_by = 'expired', resolution_reason = 'review_lapsed',
+		resolved_at = ? WHERE id = ? AND status = 'open'`, ts, excID); err != nil {
+		return err
+	}
+	if err := uncontestTx(tx, a.RolloutID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// StaleContext is one open reassess the caller bears (design §6). Fence is
+// true when it gates claims: a breaking constraints change whose rollout is
+// preparing (a contested rollout drops its fence).
+type StaleContext struct {
+	Key          string `json:"key"`
+	Rev          int64  `json:"rev"`
+	RolloutID    string `json:"rollout_id"`
+	ObligationID string `json:"obligation_id"`
+	Fence        bool   `json:"fence"`
+}
+
+// StaleContextFor lists the agent's open A1/A2/A4 reassess obligations (never
+// an A3 dispatcher rung): what claim_task returns in advisory mode and what the
+// fence reads in enforce.
+func (d *DB) StaleContextFor(project, agent string) ([]StaleContext, error) {
+	rows, err := d.ro().Query(`SELECT r.key, r.rev, r.id, o.id, r.gate = 'block_claims' AND r.state = ?
+		FROM obligations o JOIN knowledge_rollouts r ON r.id = json_extract(o.discharge_evidence, '$.rollout_id')
+		WHERE o.project = ? AND o.bearer = ? AND o.state = ? AND o.norm_id = ?
+		  AND COALESCE(json_extract(o.discharge_evidence, '$.via'), '') <> 'cited_pending'
+		  AND r.state IN (?, ?)
+		ORDER BY o.created_at`, RolloutPreparing, project, strings.ToLower(agent), ObligationActive, NormCoherenceReassess,
+		RolloutPreparing, RolloutContested)
+	if err != nil {
+		return nil, fmt.Errorf("stale context: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []StaleContext
+	for rows.Next() {
+		var s StaleContext
+		if err := rows.Scan(&s.Key, &s.Rev, &s.RolloutID, &s.ObligationID, &s.Fence); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+// guardStaleContext is the claim fence (design §6): only in coherence_mode
+// enforce, only on a claim/start from pending (a leased task is grandfathered),
+// only for a bearer of an open reassess on a fencing rollout. A pre-transition
+// guard like guardNotRunContainer, deliberately outside the CAS: a claim that
+// slips past it becomes an A1 consumer on the next tick.
+func (d *DB) guardStaleContext(taskID, agentName, project string) error {
+	if isHumanName(agentName) || d.GetSetting(SettingCoherenceMode) != CoherenceModeEnforce {
+		return nil
+	}
+	var status string
+	if err := d.ro().QueryRow(`SELECT status FROM tasks WHERE id = ? AND project = ?`, taskID, project).Scan(&status); err != nil || status != "pending" {
+		return nil
+	}
+	stale, err := d.StaleContextFor(project, agentName)
+	if err != nil {
+		return nil // never refuse a claim on a read failure
+	}
+	for _, s := range stale {
+		if s.Fence {
+			return newTaskError(CodeStaleContext, "knowledge %q changed (breaking, rev %d): read it (get_memory), then obligation_discharge %s",
+				s.Key, s.Rev, s.ObligationID)
+		}
+	}
+	return nil
+}
+
+// StaleBasisCompletions is the §7 KPI: tasks completed on a basis that still
+// held a rollout's old version, stamped after that rollout opened, with no
+// prepared discharge by the completing agent for it.
+func (d *DB) StaleBasisCompletions(project string) ([]string, error) {
+	rows, err := d.ro().Query(`SELECT DISTINCT tb.task_id FROM task_basis tb
+		JOIN knowledge_rollouts r ON (r.project = tb.project OR r.project = '*') AND r.created_at < tb.stamped_at
+		WHERE tb.project = ? AND tb.event = ?
+		  AND EXISTS (SELECT 1 FROM context_snapshots s JOIN consumption_edges e ON e.set_hash = s.set_hash
+		              WHERE s.id IN (tb.snapshot_id, tb.recall_through) AND e.memory_id = r.old_memory_id)
+		  AND NOT EXISTS (SELECT 1 FROM obligations o WHERE json_extract(o.discharge_evidence, '$.rollout_id') = r.id
+		                  AND o.bearer = lower(tb.agent_name) AND json_extract(o.discharge_evidence, '$.verdict') = ?)
+		ORDER BY tb.task_id`, project, BasisComplete, VerdictPrepared)
+	if err != nil {
+		return nil, fmt.Errorf("stale basis completions: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
 	}
 	return out, rows.Err()
 }

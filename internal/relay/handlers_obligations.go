@@ -2,7 +2,9 @@ package relay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -56,12 +58,32 @@ func (h *Handlers) HandleObligationDischarge(ctx context.Context, req mcp.CallTo
 		return validationError(CodeInvalidArgument, "id is required"), nil
 	}
 	ok, reason, err := h.db.DischargeTaskObligation(project, id, agent, req.GetString("evidence", ""), h.db.Now())
+	var coh db.CoherenceDischargeResult
 	if err == nil && !ok && reason == "unknown obligation" {
-		// A knowledge reassess obligation (coherence): discharging it means
-		// "prepared". Flush buffered recalls first so a get_memory made just
-		// before counts as having read the new version.
+		// A knowledge coherence obligation (design e731f3c9 §4.2, §5): verdict
+		// prepared (default) | unaffected | conflict on a reassess, upheld |
+		// overturned on a contest review. Flush buffered recalls first so a
+		// get_memory made just before counts as having read the new version.
 		h.flushRecalls()
-		ok, reason, err = h.db.DischargeReassess(project, id, agent, req.GetString("evidence", ""), h.db.Now())
+		coh, err = h.db.DischargeCoherence(db.CoherenceDischarge{Project: project, ID: id, By: agent,
+			Verdict: req.GetString("verdict", ""), Reason: req.GetString("reason", ""),
+			Evidence: req.GetString("evidence", ""), Now: h.db.Now()})
+		ok, reason = coh.OK, coh.Refusal
+		if ok {
+			if coh.StampTaskID != "" {
+				// The work now runs on the version it just read (task_basis event=reassess).
+				h.stampBasis(project, agent, db.BasisReassess, []string{coh.StampTaskID})
+			}
+			sendCoherenceNotices(h.db, h.registry, coh.Notices)
+			out := map[string]any{"id": id, "state": coh.State}
+			if v := req.GetString("verdict", ""); v != "" {
+				out["verdict"] = v
+			}
+			if coh.ContestID != "" {
+				out["contest_id"] = coh.ContestID
+			}
+			return h.resultJSONTracked(project, agent, "obligation_discharge", out)
+		}
 	}
 	if err == nil && !ok && reason == "unknown obligation" {
 		// Not a task obligation: an answer obligation re-checks the bearer's reply.
@@ -159,4 +181,42 @@ func (h *Handlers) declineAnswerObligation(project, agent, id, reasonClass strin
 	return h.resultJSONTracked(project, agent, "obligation_decline", map[string]any{
 		"id": id, "state": db.ObligationUnfulfilled, "reason_class": reasonClass,
 	})
+}
+
+// sendCoherenceNotices delivers the messages a coherence discharge produced
+// (the contest reviewer, the human's round-2 decide with its reply schema, the
+// raiser's round-2 reassess) and pushes each live.
+func sendCoherenceNotices(database *db.DB, notifier ackNotifier, notices []db.CoherenceNotice) {
+	for _, n := range notices {
+		action, prio := "do", "P2"
+		meta := map[string]any{"obligation_id": n.ObligationID}
+		if n.Action != "" {
+			action, prio = n.Action, "P1"
+		}
+		if n.Schema != nil {
+			meta["schema"] = n.Schema
+		}
+		raw, _ := json.Marshal(meta)
+		msg, _, err := database.InsertMessageWithDeliveries(n.Project, "relay", n.To, "notification", n.Subject, n.Body, string(raw),
+			prio, -1, nil, nil, []string{n.To}, action)
+		if err != nil {
+			log.Printf("[coherence] notice %s: %v", n.ObligationID, err)
+			continue
+		}
+		notifier.Notify(n.Project, n.To, "relay", n.Subject, msg.ID)
+	}
+}
+
+// withStaleContext adds stale_context to a claim/start result when the claimer
+// bears open reassess obligations (design e731f3c9 §6, advisory: the claim
+// stands and the agent sees the delta before it starts). Best-effort.
+func (h *Handlers) withStaleContext(project, agent string, result any) any {
+	stale, err := h.db.StaleContextFor(project, agent)
+	if err != nil || len(stale) == 0 {
+		return result
+	}
+	if m, ok := result.(map[string]any); ok {
+		m["stale_context"] = stale
+	}
+	return result
 }
