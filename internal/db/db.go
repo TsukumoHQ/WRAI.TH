@@ -1108,6 +1108,10 @@ func migrate(conn *sql.DB) error {
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_integrity_open ON integrity_quarantine(class, resolved_at)`)
 
+	// Exceptions + exception classes (design 220f4f3d). After integrity_quarantine:
+	// the exception_occurrences view unions it in.
+	migrateExceptions(conn)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,

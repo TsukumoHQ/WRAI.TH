@@ -254,9 +254,17 @@ func (d *DB) lookupAgentLiveness(project, name string) agentLiveness {
 // blocked_periods window) but admits any non-terminal FROM status. The CAS guard
 // (status = fromStatus) makes a concurrent transition win instead of being
 // clobbered; RowsAffected==0 → the caller treats it as a raced no-op.
+//
+// The block and its limbo_sweep exception row (design 220f4f3d, source-declared
+// class limbo_sweep) share one writer tx: both land or neither does.
 func (d *DB) blockLimboTask(taskID, project, fromStatus, reason, blockedPeriods, now string) (bool, error) {
 	bp := openBlockedPeriod(blockedPeriods, now)
-	res, err := d.writerExec(
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(
 		`UPDATE tasks SET status = 'blocked', blocked_reason = ?, blocked_periods = ?
 		 WHERE id = ? AND project = ? AND status = ? AND status NOT IN ('done', 'cancelled')`,
 		reason, bp, taskID, project, fromStatus,
@@ -264,6 +272,20 @@ func (d *DB) blockLimboTask(taskID, project, fromStatus, reason, blockedPeriods,
 	if err != nil {
 		return false, err
 	}
-	n, _ := res.RowsAffected()
-	return n > 0, nil
+	if n, _ := res.RowsAffected(); n == 0 {
+		return false, nil
+	}
+	var traceID *string
+	_ = tx.QueryRow(`SELECT trace_id FROM tasks WHERE id = ? AND project = ?`, taskID, project).Scan(&traceID)
+	if _, err := openExceptionTx(tx, exceptionOpen{
+		Project: project, SourceKind: excSourceLimbo, SourceRef: taskID,
+		RaisedBy: "relay-sweeper", TaskID: taskID, TraceID: traceID,
+		Text: reason, Code: "limbo_sweep", Kind: "limbo", Retry: "retryable", At: now,
+	}); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }

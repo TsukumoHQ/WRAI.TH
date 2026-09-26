@@ -635,6 +635,26 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	// the lease up (task.lease_transferred, reason voluntary).
 	priorHolder := strVal(task.LeaseHolder)
 
+	// Exceptions (design 220f4f3d): a block, a cancel with a reason, and any move
+	// out of 'blocked' write their exception row in the SAME writer tx as the
+	// status CAS, so the transition and its record commit or roll back together.
+	// Every other transition keeps the plain autocommit write.
+	hasReason := blockedReason != nil && strings.TrimSpace(*blockedReason) != ""
+	needExc := newStatus == "blocked" || leavingBlocked || (newStatus == "cancelled" && hasReason)
+	exec := d.writerExec
+	var tx *writerTx
+	if needExc {
+		if tx, err = d.beginWriterTx(); err != nil {
+			return nil, fmt.Errorf("update task status: begin: %w", err)
+		}
+		defer func() {
+			if tx != nil {
+				_ = tx.Rollback()
+			}
+		}()
+		exec = tx.Exec
+	}
+
 	// Build update. Every transition auto-stamps its temporal trail with zero
 	// manual input.
 	task.Status = newStatus
@@ -648,7 +668,7 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.StartedAt = nil
 		task.ClaimedBy = nil
 		task.ClaimedAt = nil
-		res, err = d.writerExec(
+		res, err = exec(
 			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, claimed_by = NULL, claimed_at = NULL, lease_holder = NULL, lease_expires_at = NULL, lease_heartbeat_at = NULL WHERE id = ? AND project = ? AND status = ?",
 			newStatus, taskID, project, oldStatus,
 		)
@@ -666,7 +686,7 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.BlockedPeriods = "[]"
 		// pending_since = now restarts the ACK clock (task c933b2f1): a task
 		// re-entering pending (promote, unblock, reset) is newly unacked.
-		res, err = d.writerExec(
+		res, err = exec(
 			"UPDATE tasks SET status = ?, assigned_to = NULL, accepted_at = NULL, started_at = NULL, completed_at = NULL, result = NULL, blocked_reason = NULL, claimed_by = NULL, claimed_at = NULL, in_review_at = NULL, done_at = NULL, blocked_periods = '[]', pending_since = ? WHERE id = ? AND project = ? AND status = ?",
 			newStatus, now, taskID, project, oldStatus,
 		)
@@ -676,7 +696,7 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.AcceptedAt = &now
 		task.ClaimedBy = &agentName
 		task.ClaimedAt = &now
-		res, err = d.writerExec(
+		res, err = exec(
 			"UPDATE tasks SET status = ?, assigned_to = ?, accepted_at = ?, claimed_by = ?, claimed_at = ? WHERE id = ? AND project = ? AND status = ?",
 			newStatus, agentName, now, agentName, now, taskID, project, oldStatus,
 		)
@@ -686,12 +706,12 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.StartedAt = &now
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, agentName, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, agentName, now, taskID, project, oldStatus,
 			)
@@ -704,12 +724,12 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		}
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, agentName, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, agentName, now, taskID, project, oldStatus,
 			)
@@ -722,12 +742,12 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.Result = result
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, result = ?, completed_at = ?, done_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, result, now, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, result = ?, completed_at = ?, done_at = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, result, now, now, taskID, project, oldStatus,
 			)
@@ -736,7 +756,7 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		// block → append {start: now} to blocked_periods
 		task.BlockedReason = blockedReason
 		task.BlockedPeriods = openBlockedPeriod(task.BlockedPeriods, now)
-		res, err = d.writerExec(
+		res, err = exec(
 			"UPDATE tasks SET status = ?, blocked_reason = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
 			newStatus, blockedReason, task.BlockedPeriods, taskID, project, oldStatus,
 		)
@@ -745,12 +765,12 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 		task.BlockedReason = blockedReason // reuse as cancellation reason
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, blocked_reason = ?, completed_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, blockedReason, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
-			res, err = d.writerExec(
+			res, err = exec(
 				"UPDATE tasks SET status = ?, blocked_reason = ?, completed_at = ? WHERE id = ? AND project = ? AND status = ?",
 				newStatus, blockedReason, now, taskID, project, oldStatus,
 			)
@@ -766,6 +786,16 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	if n, raErr := res.RowsAffected(); raErr == nil && n == 0 {
 		return nil, newTaskError(CodeTaskStateConflict,
 			"status changed from %q before %q could apply on task %s", oldStatus, newStatus, taskID)
+	}
+	if tx != nil {
+		if err := d.writeTransitionExceptions(tx, task, agentName, oldStatus, newStatus, blockedReason, now); err != nil {
+			return nil, fmt.Errorf("update task status: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			tx = nil
+			return nil, fmt.Errorf("update task status: commit: %w", err)
+		}
+		tx = nil
 	}
 	// A transition is activity — reset the stale clock.
 	_, _ = d.writerExec("UPDATE tasks SET last_activity_at = ? WHERE id = ? AND project = ?", now, taskID, project)
