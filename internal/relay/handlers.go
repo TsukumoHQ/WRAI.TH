@@ -7,6 +7,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agent-relay/internal/connector"
@@ -36,6 +37,13 @@ type Handlers struct {
 	stopCh    chan struct{}
 	flushDone chan struct{}
 	closeOnce sync.Once
+
+	// recalls buffers the memory ids get_memory/search_memory returned, per
+	// agent, flushed as one recall snapshot tx per tick by flushConsumption
+	// (design 54e529d8: no write per recall). consumeDone closes when that
+	// flusher has drained and exited.
+	recalls     recallBuffer
+	consumeDone chan struct{}
 
 	// federation forwards direct messages to/from trusted peer relays. Nil-safe:
 	// a disabled Federation (no peers) makes the send path behave as before.
@@ -168,8 +176,9 @@ func (h *Handlers) getConnector() connector.TaskConnector {
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
-	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), stopCh: make(chan struct{}), flushDone: make(chan struct{}), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
+	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), stopCh: make(chan struct{}), flushDone: make(chan struct{}), consumeDone: make(chan struct{}), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
 	go h.flushTokenUsage()
+	go h.flushConsumption()
 	go h.sweepRegisterLimiters()
 	return h
 }
@@ -182,6 +191,7 @@ func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.In
 func (h *Handlers) Close() {
 	h.closeOnce.Do(func() { close(h.stopCh) })
 	<-h.flushDone
+	<-h.consumeDone
 }
 
 // checkBudgets fires a budget-exceeded event for any agent in the just-flushed
@@ -922,6 +932,9 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	// only. Profile, conversations, memories, and decisions are dropped from boot
 	// (each reachable on demand via its own tool) so a re-register costs <1.5 KB.
 	if lean {
+		// A minimal boot serves no memory: record the empty set so the basis
+		// says so (a no-op when the head is already empty or absent).
+		h.captureBoot(result, project, agentName, db.SnapshotBootMinimal, nil)
 		enforceSessionPayloadCeiling(result)
 		return result
 	}
@@ -957,6 +970,10 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 	memories = kept
 	projectedMems := projectMemories(memories, sessionMemoryBudget)
 	result["relevant_memories"] = projectedMems
+	served := make([]string, 0, len(projectedMems)+sessionDecisionMax)
+	for _, m := range projectedMems {
+		served = append(served, m.id)
+	}
 	if len(projectedMems) < len(memories) {
 		result["memories_omitted"] = len(memories) - len(projectedMems)
 	}
@@ -970,6 +987,9 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 		// sees no overflow signal would silently miss accepted decisions.
 		projectedDecs := projectDecisions(decs, sessionDecisionMax)
 		result["decisions"] = projectedDecs
+		for _, dsum := range projectedDecs {
+			served = append(served, dsum.id)
+		}
 		if len(projectedDecs) < len(decs) {
 			result["decisions_omitted"] = len(decs) - len(projectedDecs)
 		}
@@ -977,12 +997,137 @@ func (h *Handlers) buildSessionContext(project, agentName string, profileSlug *s
 
 	// Vault/doc context is served externally (the doc-context host), not injected here.
 
+	// Consumption snapshot (design 54e529d8): exactly the ids served above,
+	// post-projection. Zero writes when the set equals the agent's head.
+	h.captureBoot(result, project, agentName, db.SnapshotBoot, served)
+
 	// Last-resort ceiling: if a P0 flood bypassed the per-section budgets and the
 	// whole payload still exceeds the tool token cap, collapse conversations and
 	// flag it — the "boot in one call" tool must never blow the cap (WRAITH-1).
 	enforceSessionPayloadCeiling(result)
 
 	return result
+}
+
+// consumptionCaptureErrors counts boot/recall captures that failed. A failed
+// capture never fails the boot or the recall; it only loses the record.
+var consumptionCaptureErrors atomic.Int64
+
+// captureBoot records the served set as the agent's consumption snapshot and
+// stamps the resulting basis on the boot payload. Best-effort: an error is
+// logged and counted, and the payload is returned without a basis.
+func (h *Handlers) captureBoot(result map[string]any, project, agent, kind string, ids []string) {
+	head, _, err := h.db.RecordSnapshot(project, agent, "", kind, ids)
+	if err != nil {
+		consumptionCaptureErrors.Add(1)
+		log.Printf("consumption: boot capture %s/%s: %v", project, agent, err)
+		return
+	}
+	if head != nil {
+		result["basis"] = head.Basis()
+	}
+}
+
+// recallBufferCap bounds the ids held between flushes across all agents;
+// beyond it recalls are dropped (counted), never blocking the read path.
+const recallBufferCap = 4096
+
+// consumptionFlushInterval is the recall flush cadence (the outbox sweeper's);
+// retention pruning runs every consumptionPruneEvery ticks (~1 min).
+const (
+	consumptionFlushInterval = 1500 * time.Millisecond
+	consumptionPruneEvery    = 40
+)
+
+// recallBuffer holds recalled memory ids per agent until the next flush.
+type recallBuffer struct {
+	mu      sync.Mutex
+	ids     map[db.RecallKey]map[string]struct{}
+	n       int
+	dropped atomic.Int64
+}
+
+// record adds the ids an agent was just served by a recall. In memory only.
+func (b *recallBuffer) record(project, agent string, ids []string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.ids == nil {
+		b.ids = map[db.RecallKey]map[string]struct{}{}
+	}
+	k := db.RecallKey{Project: project, Agent: agent}
+	set := b.ids[k]
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, held := set[id]; held {
+			continue
+		}
+		if b.n >= recallBufferCap {
+			b.dropped.Add(1)
+			continue
+		}
+		if set == nil {
+			set = map[string]struct{}{}
+			b.ids[k] = set
+		}
+		set[id] = struct{}{}
+		b.n++
+	}
+}
+
+// drain empties the buffer and returns its content.
+func (b *recallBuffer) drain() map[db.RecallKey][]string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.n == 0 {
+		return nil
+	}
+	out := make(map[db.RecallKey][]string, len(b.ids))
+	for k, set := range b.ids {
+		for id := range set {
+			out[k] = append(out[k], id)
+		}
+	}
+	b.ids, b.n = nil, 0
+	return out
+}
+
+// flushRecalls writes the buffered recalls in one tx (none when empty).
+func (h *Handlers) flushRecalls() {
+	batch := h.recalls.drain()
+	if len(batch) == 0 {
+		return
+	}
+	if _, err := h.db.RecordRecallBatch(batch); err != nil {
+		consumptionCaptureErrors.Add(1)
+		log.Printf("consumption: recall flush: %v", err)
+	}
+}
+
+// flushConsumption flushes buffered recalls every consumptionFlushInterval and
+// prunes expired snapshots every consumptionPruneEvery ticks. On Close it
+// flushes what is left, then exits.
+func (h *Handlers) flushConsumption() {
+	defer close(h.consumeDone)
+	ticker := time.NewTicker(consumptionFlushInterval)
+	defer ticker.Stop()
+	ticks := 0
+	for {
+		select {
+		case <-ticker.C:
+			h.flushRecalls()
+			if ticks++; ticks%consumptionPruneEvery == 0 {
+				retention := h.db.SettingDuration("consumption_retention", 30*24*time.Hour, 7*24*time.Hour, 365*24*time.Hour)
+				if _, err := h.db.PruneConsumption(retention, time.Now()); err != nil {
+					log.Printf("consumption: prune: %v", err)
+				}
+			}
+		case <-h.stopCh:
+			h.flushRecalls()
+			return
+		}
+	}
 }
 
 // --- Soul RAG ---

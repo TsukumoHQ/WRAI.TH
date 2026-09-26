@@ -518,6 +518,10 @@ type MemorySummary struct {
 	Confidence     string `json:"confidence,omitempty"`
 	AgentName      string `json:"agent_name,omitempty"`
 	UpdatedAt      string `json:"updated_at,omitempty"`
+
+	// id is the served memory row id (= version), recorded by the boot
+	// consumption snapshot (design 54e529d8). Never serialized.
+	id string
 }
 
 func summarizeMemory(m models.Memory) MemorySummary {
@@ -528,6 +532,7 @@ func summarizeMemory(m models.Memory) MemorySummary {
 		Confidence: m.Confidence,
 		AgentName:  m.AgentName,
 		UpdatedAt:  m.UpdatedAt,
+		id:         m.ID,
 	}
 	s.ValuePreview, s.ValueTruncated = truncatePreview(m.Value, memValuePreview)
 	return s
@@ -580,6 +585,9 @@ type DecisionSummary struct {
 	Area      string `json:"area,omitempty"`
 	Decision  string `json:"decision"`
 	Rationale string `json:"rationale,omitempty"`
+
+	// id is the served decision row id; see MemorySummary.id.
+	id string
 }
 
 // decisionSummaryBytes measures the ENCODED JSON size of a decision entry, not
@@ -625,7 +633,7 @@ func projectDecisions(decs []models.Memory, max int) []DecisionSummary {
 		}
 		considered++
 		// Area IS bounded — it is display-only payload, not a lookup handle.
-		s := DecisionSummary{Key: m.Key}
+		s := DecisionSummary{Key: m.Key, id: m.ID}
 		var dv db.DecisionValue
 		if json.Unmarshal([]byte(m.Value), &dv) == nil && dv.Decision != "" {
 			s.Decision, _ = truncatePreview(dv.Decision, decisionPreview)

@@ -1116,6 +1116,10 @@ func migrate(conn *sql.DB) error {
 	// no backfill (ruling af6e3a5f OQ3).
 	migrateKnowledgeLog(conn)
 
+	// Consumption snapshots (design 54e529d8): which memory versions each agent
+	// was served. Side tables only. After knowledge_log: snapshots read its head rev.
+	migrateConsumption(conn)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,

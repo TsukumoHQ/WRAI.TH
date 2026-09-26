@@ -134,6 +134,8 @@ func (h *Handlers) HandleGetMemory(ctx context.Context, req mcp.CallToolRequest)
 	if len(memories) == 1 {
 		h.memReads.record(project, agent, memories[0].Scope, key, memories[0].ID)
 	}
+	// Consumption capture (design 54e529d8): buffered, flushed off the read path.
+	h.recalls.record(project, agent, memoryIDs(memories))
 
 	result := map[string]any{
 		"key":      key,
@@ -249,6 +251,7 @@ func (h *Handlers) HandleRecallDecisions(ctx context.Context, req mcp.CallToolRe
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to recall decisions: %v", err)), nil
 	}
+	h.recalls.record(project, agent, memoryIDs(decs))
 	return h.resultJSONTracked(project, agent, "recall_decisions", map[string]any{"decisions": decs, "count": len(decs)})
 }
 
@@ -299,11 +302,14 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 			return toolResultError(fmt.Sprintf("failed to search memories: %v", err)), nil
 		}
 		rows := make([]map[string]any, len(results))
+		served := make([]string, len(results))
 		for i := range results {
 			row := compact(&results[i].Memory)
 			row["rank_score"] = roundImportance(results[i].RankScore)
 			rows[i] = row
+			served[i] = results[i].ID
 		}
+		h.recalls.record(project, agent, served)
 		return h.resultJSONTracked(project, agent, "search_memory", map[string]any{
 			"query":         query,
 			"count":         len(rows),
@@ -325,6 +331,7 @@ func (h *Handlers) HandleSearchMemory(ctx context.Context, req mcp.CallToolReque
 	for i := range memories {
 		truncated[i] = compact(&memories[i])
 	}
+	h.recalls.record(project, agent, memoryIDs(memories))
 
 	return h.resultJSONTracked(project, agent, "search_memory", map[string]any{
 		"query":         query,
@@ -500,4 +507,13 @@ func (h *Handlers) HandleResolveConflict(ctx context.Context, req mcp.CallToolRe
 		"resolved": true,
 		"memory":   winner,
 	})
+}
+
+// memoryIDs returns the row ids (= versions) of memories, for recall capture.
+func memoryIDs(mems []models.Memory) []string {
+	ids := make([]string, len(mems))
+	for i := range mems {
+		ids[i] = mems[i].ID
+	}
+	return ids
 }

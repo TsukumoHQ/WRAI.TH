@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -1992,5 +1993,186 @@ func TestEscapeHatchesCarryDroppedFields_R2(t *testing.T) {
 	})))
 	if da, _ := task["dispatched_at"].(string); da == "" {
 		t.Error("get_task dropped dispatched_at — escape hatch broken")
+	}
+}
+
+// TestConsumptionServedIdsArePostProjection is 255947cd AC2: the boot snapshot
+// holds exactly the memories and decisions the payload served (post
+// projection), not the 50 candidates, and the payload carries the basis.
+func TestConsumptionServedIdsArePostProjection(t *testing.T) {
+	h, project, agent := seedBootFixture(t) // 20 fat constraints + 60 decisions
+	sc := h.buildSessionContext(project, agent, strptr("wraith-backend"))
+	basis, _ := sc["basis"].(string)
+	if basis == "" {
+		t.Fatal("full boot payload has no basis")
+	}
+	want := map[string]bool{}
+	for _, m := range sc["relevant_memories"].([]MemorySummary) {
+		want[m.Key] = true
+	}
+	for _, d := range sc["decisions"].([]DecisionSummary) {
+		want[d.Key] = true
+	}
+	head, mems, err := h.db.ContextBasis(project, agent)
+	if err != nil || head == nil {
+		t.Fatalf("context basis: %v", err)
+	}
+	if head.Basis() != basis {
+		t.Fatalf("payload basis %q != head basis %q", basis, head.Basis())
+	}
+	got := map[string]bool{}
+	for _, m := range mems {
+		got[m.Key] = true
+	}
+	if len(got) != len(want) || len(got) >= 20+60 {
+		t.Fatalf("snapshot holds %d keys, payload served %d (candidates 80)", len(got), len(want))
+	}
+	for k := range want {
+		if !got[k] {
+			t.Fatalf("served %s missing from the snapshot", k)
+		}
+	}
+	// Same boot again: same basis, nothing written.
+	if again, _ := h.buildSessionContext(project, agent, strptr("wraith-backend"))["basis"].(string); again != basis {
+		t.Fatalf("unchanged boot moved the basis: %s -> %s", basis, again)
+	}
+}
+
+// TestConsumptionCaptureFailureDoesNotFailBoot is 255947cd AC2: a failing
+// capture leaves the boot payload intact (minus the basis) and is counted.
+func TestConsumptionCaptureFailureDoesNotFailBoot(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.NewTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	h := NewHandlers(database, NewSessionRegistry(server.NewMCPServer("test", "0.0.0")), nil, NewEventBus())
+	t.Cleanup(h.Close)
+	if _, err := database.SetMemory("p", "cto", "rule", "v", "[]", "project", "", "constraints"); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`DROP TABLE context_sets`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	before := consumptionCaptureErrors.Load()
+	sc := h.buildSessionContext("p", "dev", nil)
+	if _, ok := sc["basis"]; ok {
+		t.Fatal("failed capture must not stamp a basis")
+	}
+	if mems, _ := sc["relevant_memories"].([]MemorySummary); len(mems) != 1 {
+		t.Fatalf("boot payload damaged by a failed capture: %v", sc["relevant_memories"])
+	}
+	if consumptionCaptureErrors.Load() != before+1 {
+		t.Fatal("capture failure not counted")
+	}
+}
+
+// TestRecallBufferBoundedDropsCounted is 255947cd AC3: the recall buffer holds
+// at most recallBufferCap ids between flushes and counts what it drops.
+func TestRecallBufferBoundedDropsCounted(t *testing.T) {
+	var b recallBuffer
+	ids := make([]string, recallBufferCap+10)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("m%05d", i)
+	}
+	b.record("p", "a", ids)
+	b.record("p", "a", ids[:5]) // already held: neither added nor dropped
+	if got := b.dropped.Load(); got != 10 {
+		t.Fatalf("dropped = %d, want 10", got)
+	}
+	batch := b.drain()
+	if n := len(batch[db.RecallKey{Project: "p", Agent: "a"}]); n != recallBufferCap {
+		t.Fatalf("drained %d ids, want %d", n, recallBufferCap)
+	}
+	if b.drain() != nil {
+		t.Fatal("drain must empty the buffer")
+	}
+}
+
+// TestRecallCaptureEndToEnd is 255947cd AC3 (review round 1): get_memory,
+// search_memory and recall_decisions feed the recall buffer with zero DB
+// writes on the call; the flusher then writes one recall snapshot holding the
+// served ids that were not already in the agent's boot head.
+func TestRecallCaptureEndToEnd(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	database, err := db.NewTestDB(dbPath)
+	if err != nil {
+		t.Fatalf("create test db: %v", err)
+	}
+	t.Cleanup(func() { _ = database.Close() })
+	h := NewHandlers(database, NewSessionRegistry(server.NewMCPServer("test", "0.0.0")), nil, NewEventBus())
+	t.Cleanup(h.Close)
+	ctx := context.Background()
+
+	k1, err := database.SetMemory("p1", "cto", "auth-policy", "jwt banned", "[]", "project", "", "behavior")
+	if err != nil {
+		t.Fatal(err)
+	}
+	k2, err := database.SetMemory("p1", "cto", "deploy-window", "fridays off", "[]", "project", "", "behavior")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dec, err := database.RememberDecision("p1", "cto", "ops/boot", "settled", "why", nil, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshots := func() int {
+		raw, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = raw.Close() }()
+		var n int
+		_ = raw.QueryRow(`SELECT COUNT(*) FROM context_snapshots WHERE kind = 'recall' AND agent_name = 'dev'`).Scan(&n)
+		return n
+	}
+
+	if _, err := h.HandleGetMemory(ctx, call(map[string]any{"project": "p1", "as": "dev", "key": "auth-policy"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.HandleSearchMemory(ctx, call(map[string]any{"project": "p1", "as": "dev", "query": "fridays"})); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.HandleRecallDecisions(ctx, call(map[string]any{"project": "p1", "as": "dev"})); err != nil {
+		t.Fatal(err)
+	}
+	if n := snapshots(); n != 0 {
+		t.Fatalf("recall wrote %d snapshots on the read path", n)
+	}
+
+	h.flushRecalls()
+	if n := snapshots(); n != 1 {
+		t.Fatalf("flush wrote %d recall snapshots, want 1", n)
+	}
+	// dev never booted: its head-less recall snapshot makes it a holder.
+	got := map[string]bool{}
+	for _, c := range []string{"auth-policy", "deploy-window"} {
+		cons, err := database.WhoConsumed("p1", c, "", false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, x := range cons {
+			if x.Agent == "dev" {
+				got[x.MemoryID] = true
+			}
+		}
+	}
+	if !got[k1.ID] || !got[k2.ID] {
+		t.Fatalf("recall capture missed a served memory: %v", got)
+	}
+	if cons, _ := database.WhoConsumed("p1", dec.Key, "", false); len(cons) != 1 || cons[0].Agent != "dev" || cons[0].Via != "recall" {
+		t.Fatalf("recall_decisions not captured: %+v", cons)
+	}
+	h.flushRecalls()
+	if n := snapshots(); n != 1 {
+		t.Fatalf("empty flush wrote a snapshot (%d)", n)
 	}
 }
