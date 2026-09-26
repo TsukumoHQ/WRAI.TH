@@ -44,6 +44,10 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			return validationError(CodeInvalidArgument, "action_required must be one of ask|do|decide|none"), nil
 		}
 	}
+	// Only a declared tag or a question type arms an answer obligation: a
+	// response that inherits ask/decide from its parent keeps that stored tag
+	// (wake unchanged) but owes nothing back (task 9dacb162).
+	answerable := actionRequired != "" || msgType == "question" || msgType == "user_question"
 
 	// A message to a project nobody ever created is a black hole: the row
 	// is written (messages have no project FK), no inbox ever reads it, and
@@ -233,7 +237,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			for _, member := range recipients {
 				h.registry.Notify(project, member, from, subject, msg.ID)
 			}
-			h.trackAnswerObligations(project, from, msg, recipients, true)
+			h.trackAnswerObligations(project, from, msg, recipients, answerable)
 		}
 
 		return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved))
@@ -261,7 +265,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// Answer obligations: direct asks open one per recipient; a broadcast or a
 	// conversation message opens none, but any reply can fulfil one.
 	if !dedupHit {
-		h.trackAnswerObligations(project, from, msg, recipients, to != "*" && conversationID == nil)
+		h.trackAnswerObligations(project, from, msg, recipients, answerable && to != "*" && conversationID == nil)
 	}
 
 	// Push notification. Skipped on a dedup hit — no new message/delivery rows

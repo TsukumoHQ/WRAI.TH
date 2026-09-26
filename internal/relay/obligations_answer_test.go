@@ -225,3 +225,49 @@ func TestAnswerObligationNoneForNonAskAndBroadcast(t *testing.T) {
 		t.Fatalf("ACK obligations differ with answer traffic:\nwithout %q\nwith    %q", without, with)
 	}
 }
+
+// storedTag reads the action_required a message was persisted with.
+func (f *answerFixture) storedTag(t *testing.T, msgID string) string {
+	t.Helper()
+	var tag sql.NullString
+	if err := f.raw.QueryRow(`SELECT action_required FROM messages WHERE id = ?`, msgID).Scan(&tag); err != nil {
+		t.Fatalf("stored tag %s: %v", msgID, err)
+	}
+	return tag.String
+}
+
+// TestResponseInheritedAskOpensNoObligation (task 9dacb162 AC1): a type=response
+// reply to an ask, sent without action_required, still stores the inherited
+// 'ask' tag but opens no answer obligation on the original asker.
+func TestResponseInheritedAskOpensNoObligation(t *testing.T) {
+	f := newAnswerFixture(t, "asker", "alice")
+	ask := f.send(t, map[string]any{"as": "asker", "to": "alice", "action_required": "ask"})
+	reply := f.send(t, map[string]any{"as": "alice", "to": "asker", "type": "response", "reply_to": ask})
+
+	if tag := f.storedTag(t, reply); tag != "ask" {
+		t.Fatalf("stored action_required = %q, want the inherited %q", tag, "ask")
+	}
+	if got := f.answers(t, reply); len(got) != 0 {
+		t.Fatalf("inherited ask opened %v, want none", got)
+	}
+	if got := f.answers(t, ask); got["alice"] != db.ObligationFulfilled {
+		t.Fatalf("original ask: %v, want alice fulfilled by the reply", got)
+	}
+}
+
+// TestResponseExplicitAskStillOpens (task 9dacb162 AC2): a type=response that
+// declares action_required=ask opens one answer.reply per recipient, and a bare
+// type=question opens one from its type alone.
+func TestResponseExplicitAskStillOpens(t *testing.T) {
+	f := newAnswerFixture(t, "asker", "alice")
+	ask := f.send(t, map[string]any{"as": "asker", "to": "alice", "action_required": "ask"})
+	reply := f.send(t, map[string]any{"as": "alice", "to": "asker", "type": "response", "reply_to": ask, "action_required": "ask"})
+	if got := f.answers(t, reply); len(got) != 1 || got["asker"] != db.ObligationActive {
+		t.Fatalf("explicit ask on a response: %v, want asker active only", got)
+	}
+
+	q := f.send(t, map[string]any{"as": "asker", "to": "alice", "type": "question"})
+	if got := f.answers(t, q); len(got) != 1 || got["alice"] != db.ObligationActive {
+		t.Fatalf("type=question: %v, want alice active only", got)
+	}
+}
