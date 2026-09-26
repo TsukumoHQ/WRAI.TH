@@ -346,6 +346,7 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 				evaluateExceptionLadders(database, registry, now)
 				evaluateCoherence(database, registry, now)
 				evaluateContradictions(database, now)
+				evaluateGuards(database, registry, now)
 			}
 		}
 	}()
@@ -736,5 +737,57 @@ func evaluateContradictions(database *db.DB, now time.Time) {
 	}
 	if rep.Conflicts > 0 || rep.Edges > 0 || rep.Expired > 0 || rep.Escalated > 0 {
 		log.Printf("[contradictions] conflicts=%d edges=%d expired=%d escalated=%d", rep.Conflicts, rep.Edges, rep.Expired, rep.Escalated)
+	}
+}
+
+// GuardSweepInterval bounds the compiled-guard lifecycle sweep to one pass
+// per hour (design 4d2e57a3 §6), like knowledge compaction.
+const GuardSweepInterval = time.Hour
+
+const (
+	settingGuardSweepAt       = "guard_sweep_at"
+	settingGuardDemoteNotices = "guard_demote_notified_at"
+)
+
+// evaluateGuards runs SweepGuards at most once per GuardSweepInterval, then,
+// after the sweep's commits, sends one message per guard demotion (sweep or
+// inline) to its creator and challenger, advancing an audit-log cursor so a
+// demotion is never announced twice.
+func evaluateGuards(database *db.DB, notifier ackNotifier, now time.Time) {
+	if last, err := time.Parse(time.RFC3339Nano, database.GetSetting(settingGuardSweepAt)); err == nil && now.Sub(last) < GuardSweepInterval {
+		return
+	}
+	database.SetSetting(settingGuardSweepAt, now.UTC().Format(time.RFC3339Nano))
+	if sw, err := database.SweepGuards(now); err != nil {
+		log.Printf("[guards] sweep: %v", err)
+	} else if len(sw.Demoted)+len(sw.Expired)+len(sw.Retired) > 0 {
+		log.Printf("[guards] demoted=%d expired=%d retired=%d", len(sw.Demoted), len(sw.Expired), len(sw.Retired))
+	}
+	demotions, err := database.GuardDemotionsSince(database.GetSetting(settingGuardDemoteNotices))
+	if err != nil {
+		log.Printf("[guards] demotions: %v", err)
+		return
+	}
+	for _, dm := range demotions {
+		var to []string
+		for _, who := range []string{dm.CreatedBy, dm.ChallengedBy} {
+			if who != "" && who != "system" && (len(to) == 0 || to[0] != who) {
+				to = append(to, who)
+			}
+		}
+		if len(to) > 0 {
+			subject := fmt.Sprintf("guard %s demoted to shadow", dm.GuardID)
+			body := fmt.Sprintf("Compiled guard %s went back to shadow (%s). It needs fresh clean shadow hits and a promotion by another agent to act again.", dm.GuardID, dm.Reason)
+			msg, _, err := database.InsertMessageWithDeliveries(dm.Project, "relay", to[0], "notification", subject, body,
+				"{}", "P2", -1, nil, nil, to, "none")
+			if err != nil {
+				log.Printf("[guards] demotion notice %s: %v", dm.GuardID, err)
+				return
+			}
+			for _, r := range to {
+				notifier.Notify(dm.Project, r, "relay", subject, msg.ID)
+			}
+		}
+		database.SetSetting(settingGuardDemoteNotices, dm.At)
 	}
 }

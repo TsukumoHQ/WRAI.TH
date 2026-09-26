@@ -444,6 +444,7 @@ type GuardCompile struct {
 	ActionParams map[string]string
 	Scope        map[string]any // nil: {class_id, project} of the origin
 	Global       bool           // human generalize scope=global only
+	Lane         bool           // human generalize scope=lane: + the anchor's raised_by_profile
 	ExpiresIn    time.Duration
 	Source       string // GuardSourceAgent (default) | GuardSourceHuman
 	Now          time.Time
@@ -555,11 +556,21 @@ func CompileResolutionTx(q excQ, in GuardCompile) (Guard, error) {
 	} else if prot {
 		return Guard{}, guardErr(GuardErrProtectedClass, "kind %q is a hard-coded safety guard, never compiled", origin.Kind)
 	}
+	human := in.Source == GuardSourceHuman && in.Caller == "human"
 	systemic := origin.SourceKind == excSourceClassBudget
+	// anchor is what the scope, class and replay are read from: the origin,
+	// except when the human generalizes a systemic into an open-point guard
+	// (§7 accept_known), which matches the systemic's instances, not itself.
+	anchor := origin
+	if human && systemic && in.Point == GuardPointOpen {
+		if anchor, err = linkedAnchorTx(q, origin.ID); err != nil {
+			return Guard{}, err
+		}
+		systemic = false
+	}
 	if (in.Point == GuardPointLadder) != systemic {
 		return Guard{}, guardErr(GuardErrBadAction, "point %q does not apply to a %s exception", in.Point, origin.SourceKind)
 	}
-	human := in.Source == GuardSourceHuman && in.Caller == "human"
 	if in.Source == GuardSourceHuman && !human {
 		return Guard{}, guardErr(GuardErrForbidden, "human_generalize is compiled by the relay for the human only")
 	}
@@ -589,9 +600,12 @@ func CompileResolutionTx(q excQ, in GuardCompile) (Guard, error) {
 	}
 	raw := in.Scope
 	if raw == nil {
-		raw = map[string]any{"class_id": origin.RootClassID, "project": origin.Project}
+		raw = map[string]any{"class_id": anchor.RootClassID, "project": origin.Project}
 		if in.Global {
 			delete(raw, "project")
+		}
+		if in.Lane && anchor.RaisedByProfile != "" {
+			raw["raised_by_profile"] = anchor.RaisedByProfile
 		}
 	}
 	scope, err := parseGuardScope(raw)
@@ -605,10 +619,10 @@ func CompileResolutionTx(q excQ, in GuardCompile) (Guard, error) {
 		}
 		project = "*"
 	}
-	if !scope.matches(origin) {
-		return Guard{}, guardErr(GuardErrScopeExcludes, "scope %s does not match its origin %s", scope.json(), origin.ID)
+	if !scope.matches(anchor) {
+		return Guard{}, guardErr(GuardErrScopeExcludes, "scope %s does not match its origin %s", scope.json(), anchor.ID)
 	}
-	replay, err := replayGuardTx(q, origin, scope, in.Action, params, now)
+	replay, err := replayGuardTx(q, anchor, scope, in.Action, params, now)
 	if err != nil {
 		return Guard{}, err
 	}
@@ -727,25 +741,33 @@ func budgetForTx(q excQ, kind, code string) (classBudget, bool) {
 // different actions act on neither and both take a conflict. Any error fails
 // the producer's tx (design §0: same transaction).
 func evaluateOpenGuardsTx(q excQ, excID, at string) error {
+	_, err := evaluateGuardsTx(q, GuardPointOpen, excID, at)
+	return err
+}
+
+// evaluateGuardsTx is the evaluation at one point; it returns the guard that
+// acted (nil when none did). The ladder point runs it on the systemic at
+// match_precedent (S2b).
+func evaluateGuardsTx(q excQ, point, excID, at string) (*Guard, error) {
 	f, err := excFactsTx(q, excID)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if prot, err := protectedTx(q, f); err != nil || prot {
-		return err
+		return nil, err
 	}
 	rows, err := q.Query(`SELECT `+guardColumns+` FROM compiled_guards
-		WHERE point = 'open' AND mode IN ('shadow', 'active') AND (class_id IN (?, ?) OR class_id IS NULL)
-		  AND project IN (?, '*') AND expires_at > ?`, f.ClassID, f.RootClassID, f.Project, at)
+		WHERE point = ? AND mode IN ('shadow', 'active') AND (class_id IN (?, ?) OR class_id IS NULL)
+		  AND project IN (?, '*') AND expires_at > ?`, point, f.ClassID, f.RootClassID, f.Project, at)
 	if err != nil {
-		return fmt.Errorf("guard candidates: %w", err)
+		return nil, fmt.Errorf("guard candidates: %w", err)
 	}
 	var matched []Guard
 	for rows.Next() {
 		g, err := scanGuard(rows)
 		if err != nil {
 			_ = rows.Close()
-			return err
+			return nil, err
 		}
 		if g.Scope.matches(f) {
 			matched = append(matched, g)
@@ -753,10 +775,10 @@ func evaluateOpenGuardsTx(q excQ, excID, at string) error {
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	if len(matched) == 0 {
-		return nil
+		return nil, nil
 	}
 	var active []Guard
 	for _, g := range matched {
@@ -791,11 +813,11 @@ func evaluateOpenGuardsTx(q excQ, excID, at string) error {
 	if actor != "" && active[0].Action == GuardActionSuppress {
 		mass, err := suppressMassTx(q, active[0], f, at)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if mass {
 			if err := demoteGuardTx(q, active[0], guardEndedDemotedMass, "system", at); err != nil {
-				return err
+				return nil, err
 			}
 			massDemoted, actor = actor, ""
 		}
@@ -811,7 +833,7 @@ func evaluateOpenGuardsTx(q excQ, excID, at string) error {
 		}
 		if _, err := q.Exec(`INSERT INTO guard_hits (guard_id, exception_id, mode, acted, at) VALUES (?, ?, ?, ?, ?)`,
 			g.ID, excID, mode, acted, at); err != nil {
-			return fmt.Errorf("guard hit: %w", err)
+			return nil, fmt.Errorf("guard hit: %w", err)
 		}
 		set := `shadow_hits = shadow_hits + 1`
 		if acted == 1 {
@@ -823,21 +845,24 @@ func evaluateOpenGuardsTx(q excQ, excID, at string) error {
 			set += `, shadow_conflicts = shadow_conflicts + 1`
 		}
 		if _, err := q.Exec(`UPDATE compiled_guards SET `+set+`, last_hit_at = ? WHERE id = ?`, at, g.ID); err != nil {
-			return fmt.Errorf("guard counters: %w", err)
+			return nil, fmt.Errorf("guard counters: %w", err)
 		}
 	}
 	for id := range conflicted {
 		g, err := getGuardTx(q, id)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if g.Mode == GuardModeActive {
 			if err := demoteGuardTx(q, g, guardEndedDemotedConflct, "system", at); err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
-	return nil
+	if actor == "" {
+		return nil, nil
+	}
+	return &active[0], nil
 }
 
 func sameParams(a, b map[string]string) bool {
