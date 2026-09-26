@@ -73,6 +73,8 @@ const (
 	GuardErrNotFound         = "GUARD_NOT_FOUND"
 	GuardErrPromoteRefused   = "GUARD_PROMOTE_REFUSED"
 	GuardErrRenewRefused     = "GUARD_RENEW_REFUSED"
+	GuardErrWithdrawRefused  = "GUARD_WITHDRAW_REFUSED"
+	guardEndedWithdrawn      = "withdrawn"
 	guardEndedDemoted        = "demoted(regressions)"
 	guardEndedDemotedMass    = "demoted(suppress_mass)"
 	guardEndedExpired        = "expired"
@@ -451,16 +453,31 @@ type GuardCompile struct {
 
 // Guard is one compiled_guards row.
 type Guard struct {
-	ID, Project, ClassID, FromExceptionID, Point, Action string
-	ActionParams                                         map[string]string
-	Scope                                                guardScope
-	Specificity                                          int
-	Mode                                                 string
-	Replay                                               GuardReplay
-	ShadowHits, ShadowConflicts, LiveHits, Regressions   int
-	AnchorAt, CreatedBy, ChallengedBy, Source            string
-	CreatedAt, PromotedAt, LastHitAt, ExpiresAt          string
-	EndedAt, EndedReason                                 string
+	ID              string            `json:"id"`
+	Project         string            `json:"project"`
+	ClassID         string            `json:"class_id"`
+	FromExceptionID string            `json:"from_exception_id"`
+	Point           string            `json:"point"`
+	Action          string            `json:"action"`
+	ActionParams    map[string]string `json:"action_params"`
+	Scope           guardScope        `json:"scope"`
+	Specificity     int               `json:"specificity"`
+	Mode            string            `json:"mode"`
+	Replay          GuardReplay       `json:"replay"`
+	ShadowHits      int               `json:"shadow_hits"`
+	ShadowConflicts int               `json:"shadow_conflicts"`
+	LiveHits        int               `json:"live_hits"`
+	Regressions     int               `json:"regressions"`
+	AnchorAt        string            `json:"anchor_at,omitempty"`
+	CreatedBy       string            `json:"created_by"`
+	ChallengedBy    string            `json:"challenged_by,omitempty"`
+	Source          string            `json:"source"`
+	CreatedAt       string            `json:"created_at"`
+	PromotedAt      string            `json:"promoted_at,omitempty"`
+	LastHitAt       string            `json:"last_hit_at,omitempty"`
+	ExpiresAt       string            `json:"expires_at"`
+	EndedAt         string            `json:"ended_at,omitempty"`
+	EndedReason     string            `json:"ended_reason,omitempty"`
 }
 
 // guardShort is the 8-char id prefix used in summaries (safe on short ids).
@@ -1060,6 +1077,49 @@ func (d *DB) RenewGuard(id, caller string, expiresIn time.Duration, now time.Tim
 	}
 	if err := guardAuditTx(tx, g.Project, caller, "guard_renew", id,
 		fmt.Sprintf("guard %s renewed to %s by %s", guardShort(id), expires, caller), nil, ts); err != nil {
+		return Guard{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Guard{}, err
+	}
+	return d.GetGuard(id)
+}
+
+// WithdrawGuard retires a shadow or active guard at once. Only its creator,
+// its challenger, the origin's resolver or the systemic owner may withdraw;
+// withdrawal only stops a guard from matching, it never relaxes anything.
+func (d *DB) WithdrawGuard(id, caller string, now time.Time) (Guard, error) {
+	ts := now.UTC().Format(memoryTimeFmt)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return Guard{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	g, err := getGuardTx(tx, id)
+	if err != nil {
+		return Guard{}, err
+	}
+	origin, err := excFactsTx(tx, g.FromExceptionID)
+	if err != nil {
+		return Guard{}, err
+	}
+	allowed := false
+	for _, who := range []string{g.CreatedBy, g.ChallengedBy, originResolverTx(tx, origin), origin.Owner} {
+		allowed = allowed || (who != "" && strings.EqualFold(caller, who))
+	}
+	if !allowed {
+		return Guard{}, guardErr(GuardErrForbidden, "only the creator, challenger, origin resolver or systemic owner may withdraw")
+	}
+	res, err := tx.Exec(`UPDATE compiled_guards SET mode = 'retired', ended_at = ?, ended_reason = ?
+		WHERE id = ? AND mode IN ('shadow', 'active')`, ts, guardEndedWithdrawn, id)
+	if err != nil {
+		return Guard{}, fmt.Errorf("withdraw guard: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return Guard{}, guardErr(GuardErrWithdrawRefused, "guard is %s", g.Mode)
+	}
+	if err := guardAuditTx(tx, g.Project, caller, "guard_withdraw", id,
+		fmt.Sprintf("guard %s withdrawn by %s", guardShort(id), caller), nil, ts); err != nil {
 		return Guard{}, err
 	}
 	if err := tx.Commit(); err != nil {

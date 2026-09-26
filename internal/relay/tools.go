@@ -517,6 +517,27 @@ func taskEdgeTool() mcp.Tool {
 	)
 }
 
+// guardTool is one multiplexed tool to fit its <=500 B schema target (ruling
+// ed744dee). Its annotations are cleared: the MCP spec defaults for absent
+// hints equal mcp-go's explicit ones, so the meaning is unchanged. The action
+// enum is enforced by HandleGuard, not the schema.
+func guardTool() mcp.Tool {
+	t := mcp.NewTool(
+		"guard",
+		mcp.WithDescription("id: exception (compile) or guard. params, scope: JSON."),
+		asParam,
+		projectParam,
+		mcp.WithString("op", mcp.Required(), mcp.Enum("compile", "promote", "renew", "withdraw", "get")),
+		mcp.WithString("id", mcp.Required()),
+		mcp.WithString("action"),
+		mcp.WithString("params"),
+		mcp.WithString("scope"),
+		mcp.WithNumber("days"),
+	)
+	t.Annotations = mcp.ToolAnnotation{}
+	return t
+}
+
 func obligationsMineTool() mcp.Tool {
 	return mcp.NewTool(
 		"obligations_mine",
