@@ -47,6 +47,7 @@ func (r *Relay) StartTaskMaintenanceSweeper(done <-chan struct{}) {
 				r.sweepReferentialIntegrity()
 				r.sweepLimboAssignees()
 				r.sweepDanglingBoards()
+				releaseHeldTasks(r.Handlers, r.DB.Now())
 			}
 		}
 	}()

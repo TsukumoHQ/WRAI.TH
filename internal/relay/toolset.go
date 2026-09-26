@@ -174,6 +174,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 
 		{server.ServerTool{Tool: dispatchTaskTool(), Handler: h.HandleDispatchTask}, "tasks"},
 		{server.ServerTool{Tool: claimTaskTool(), Handler: h.HandleClaimTask}, "tasks"},
+		{server.ServerTool{Tool: taskEdgeTool(), Handler: h.HandleTaskEdge}, "tasks"},
 		{server.ServerTool{Tool: promoteTaskTool(), Handler: h.HandlePromoteTask}, "tasks"},
 		{server.ServerTool{Tool: obligationsMineTool(), Handler: h.HandleObligationsMine}, "tasks"},
 		{server.ServerTool{Tool: obligationDischargeTool(), Handler: h.HandleObligationDischarge}, "tasks"},

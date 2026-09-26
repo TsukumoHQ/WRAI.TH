@@ -489,8 +489,14 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 	}
 
 	sanctioned := map[string]bool{} // one rung per task per tick
+	// A held task (blocked_by an unmet prerequisite) is deliberately
+	// unannounced: no rung fires until its release restarts the ACK clock.
+	var held map[string]bool
+	if len(obligations) > 0 {
+		held, _ = database.HeldTaskIDs()
+	}
 	for _, o := range obligations {
-		if sanctioned[o.TaskID] {
+		if sanctioned[o.TaskID] || held[o.TaskID] {
 			continue
 		}
 		dispatchedAt, err := time.Parse("2006-01-02T15:04:05Z", o.DispatchedAt)
@@ -669,4 +675,46 @@ func sendAnswerSanction(database *db.DB, notifier ackNotifier, a db.AnswerDue, c
 	}
 	notifier.Notify(a.Project, child.Bearer, "relay", text, msg.ID)
 	log.Printf("[obligations] answer %s: msg %s (%s -> %s) -> %s", child.NormID, a.MessageID, a.Asker, a.Recipient, child.Bearer)
+}
+
+// releaseAnnounceGrace is how long a released hold may stay unannounced before
+// the sweeper re-announces it: long enough for the handler that released it
+// to announce first. Either way the announced_at CAS lets only one announce.
+const releaseAnnounceGrace = time.Minute
+
+// releaseHeldTasks is the typed-edge repair path (design d523e74e §3.2), run
+// on the task maintenance tick: it releases every held task that became ready
+// without a settle (beyond a transition's settle limit, an expired edge, a
+// status write that bypassed the handlers such as the Linear sync) and
+// announces it, then re-announces releases whose announcement never happened
+// (a crash between the release commit and the announce). Every announce goes
+// through the announced_at CAS, so none is ever sent twice. Returns how many
+// it announced.
+func releaseHeldTasks(h *Handlers, now time.Time) int {
+	if h == nil || h.db == nil {
+		return 0
+	}
+	announced := 0
+	released, err := h.db.ReleaseReadyHolds(now)
+	if err != nil {
+		log.Printf("held tasks: release: %v", err)
+	}
+	for _, r := range released {
+		if h.announceRelease(r.Project, r.TaskID) {
+			announced++
+		}
+	}
+	missed, err := h.db.UnannouncedReleases(now.Add(-releaseAnnounceGrace))
+	if err != nil {
+		log.Printf("held tasks: unannounced releases: %v", err)
+	}
+	for _, r := range missed {
+		if h.announceRelease(r.Project, r.TaskID) {
+			announced++
+		}
+	}
+	if announced > 0 {
+		log.Printf("held tasks: announced %d released task(s)", announced)
+	}
+	return announced
 }

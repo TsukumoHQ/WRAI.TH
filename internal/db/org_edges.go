@@ -101,6 +101,18 @@ func migrateOrgEdges(conn *sql.DB) {
 		flagged     TEXT
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_task_holds_open ON task_holds(project) WHERE released_at IS NULL`)
+	// announced_at (graph S2) records the release announcement, written by a
+	// CAS so the inline announce and the sweeper announce a release exactly
+	// once. Holds that predate the column were announced at dispatch (the S1
+	// handlers announced every pending dispatch): mark them so a later release
+	// does not announce them a second time.
+	_, missing := conn.Exec(`SELECT announced_at FROM task_holds LIMIT 0`)
+	ensureColumns(conn, "task_holds", map[string]string{"announced_at": "TEXT"})
+	if missing != nil {
+		_, _ = conn.Exec(`UPDATE task_holds SET announced_at = held_at WHERE announced_at IS NULL`)
+	}
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_task_holds_unannounced ON task_holds(released_at)
+		WHERE released_at IS NOT NULL AND announced_at IS NULL`)
 }
 
 type edgeSemantics struct {
@@ -362,7 +374,7 @@ func holdIfNotReadyTx(tx *writerTx, project, taskID, now string) error {
 		return err
 	}
 	_, err = tx.Exec(`INSERT INTO task_holds (task_id, project, reason, held_at) VALUES (?, ?, 'blocked_by', ?)
-		ON CONFLICT(task_id) DO UPDATE SET held_at = excluded.held_at, released_at = NULL, flagged = NULL
+		ON CONFLICT(task_id) DO UPDATE SET held_at = excluded.held_at, released_at = NULL, flagged = NULL, announced_at = NULL
 		WHERE task_holds.released_at IS NOT NULL`, taskID, project, now)
 	return err
 }
@@ -382,8 +394,9 @@ func settleTaskTx(q excQ, project, taskID, now string) (bool, error) {
 		return false, err
 	}
 	if status != "pending" {
-		_, err := q.Exec(`UPDATE task_holds SET released_at = ?, flagged = ? WHERE task_id = ? AND released_at IS NULL`,
-			now, HoldFlagLeftPending, taskID)
+		// Claimed or moved on directly: closed with nothing to announce.
+		_, err := q.Exec(`UPDATE task_holds SET released_at = ?, flagged = ?, announced_at = ? WHERE task_id = ? AND released_at IS NULL`,
+			now, HoldFlagLeftPending, now, taskID)
 		return false, err
 	}
 	ready, err := isReadyTx(q, project, taskID, now)
@@ -404,7 +417,16 @@ func settleTaskTx(q excQ, project, taskID, now string) (bool, error) {
 			return false, err
 		}
 		n, _ := res.RowsAffected()
-		return n == 1, nil
+		if n != 1 {
+			return false, nil
+		}
+		// Released = newly claimable: restart the ACK clock, as a task
+		// re-entering pending does (c933b2f1), so the time spent held never
+		// counts as unacknowledged.
+		if _, err := q.Exec(`UPDATE tasks SET pending_since = ? WHERE id = ? AND status = 'pending'`, now, taskID); err != nil {
+			return false, err
+		}
+		return true, nil
 	}
 	var cancelled int
 	if err := q.QueryRow(`SELECT COUNT(*) FROM org_edges e JOIN tasks p ON p.id = e.dst_id
@@ -468,6 +490,26 @@ func (d *DB) hasBlockingDependentsRO(taskID string) bool {
 	return err == nil
 }
 
+// HeldTaskIDs returns the ids of every task with an open hold. The ACK ladder
+// skips them: a held task is deliberately unannounced, so nobody owes it an
+// acknowledgement until it is released (which restarts its ACK clock).
+func (d *DB) HeldTaskIDs() (map[string]bool, error) {
+	rows, err := d.ro().Query(`SELECT task_id FROM task_holds WHERE released_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := map[string]bool{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
+}
+
 // ReleasedHold is one hold released by the sweep, for the announce.
 type ReleasedHold struct{ TaskID, Project string }
 
@@ -517,6 +559,45 @@ func (d *DB) ReleaseReadyHolds(now time.Time) ([]ReleasedHold, error) {
 		out = append(out, chunk...)
 	}
 	return out, nil
+}
+
+// MarkHoldAnnounced claims the announcement of a released hold: a CAS on
+// announced_at, so of the inline announce (after the releasing transition
+// commits) and the sweeper re-announce, exactly one wins. True = the caller
+// won and must announce; false = not released, or already announced.
+func (d *DB) MarkHoldAnnounced(project, taskID string, now time.Time) (bool, error) {
+	res, err := d.writerExec(`UPDATE task_holds SET announced_at = ?
+		WHERE task_id = ? AND project = ? AND released_at IS NOT NULL AND announced_at IS NULL`,
+		now.UTC().Format(memoryTimeFmt), taskID, project)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
+}
+
+// UnannouncedReleases lists the holds released at or before releasedBefore
+// whose announcement was never claimed (a crash between the release commit
+// and the announce, or a release by a path with no announcer, like a status
+// write from the Linear sync). The sweeper re-announces them; the grace in
+// releasedBefore leaves an in-flight handler its own announce.
+func (d *DB) UnannouncedReleases(releasedBefore time.Time) ([]ReleasedHold, error) {
+	rows, err := d.ro().Query(`SELECT task_id, project FROM task_holds
+		WHERE released_at IS NOT NULL AND announced_at IS NULL AND released_at <= ?
+		ORDER BY released_at, task_id`, releasedBefore.UTC().Format(memoryTimeFmt))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []ReleasedHold
+	for rows.Next() {
+		var h ReleasedHold
+		if err := rows.Scan(&h.TaskID, &h.Project); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
 }
 
 // ListReadyTasks lists the ready tasks of a project through readyPredicate,

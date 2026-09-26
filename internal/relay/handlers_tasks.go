@@ -82,7 +82,16 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 			profile = best.Slug
 		}
 	}
-	if profile == "" {
+	discoveredFrom := strings.TrimSpace(req.GetString("discovered_from", ""))
+	if discoveredFrom != "" {
+		id, err := h.resolveTaskID(discoveredFrom, project)
+		if err != nil {
+			return toolResultError(err.Error()), nil
+		}
+		discoveredFrom = id
+	}
+	// With discovered_from the profile is inherited from the origin when omitted.
+	if profile == "" && discoveredFrom == "" {
 		return toolResultError("profile is required (or provide required_skill)"), nil
 	}
 	title := req.GetString("title", "")
@@ -124,6 +133,23 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		AcceptanceCriteria: req.GetString("acceptance_criteria", ""),
 		Dod:                req.GetString("dod", ""),
 		VerifyCmd:          optionalString(req.GetString("verify_cmd", "")),
+		DiscoveredFrom:     discoveredFrom,
+	}
+	// blocked_by entries are "<id>" or "<id>@in-review"; a short id prefix
+	// resolves like every other task_id argument.
+	for _, raw := range req.GetStringSlice("blocked_by", nil) {
+		id, until, _ := strings.Cut(strings.TrimSpace(raw), "@")
+		if id == "" {
+			continue
+		}
+		full, err := h.resolveTaskID(id, project)
+		if err != nil {
+			return toolResultError(fmt.Sprintf("blocked_by: %v", err)), nil
+		}
+		if until != "" {
+			full += "@" + until
+		}
+		ticket.BlockedBy = append(ticket.BlockedBy, full)
 	}
 
 	// Resolve a truncated board_id UUID prefix, or a board slug, to the full UUID
@@ -154,8 +180,9 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		if errors.As(err, &bre) {
 			return validationError(CodeInvalidArgument, bre.Error()), nil
 		}
-		return toolResultError(fmt.Sprintf("failed to dispatch task: %v", err)), nil
+		return taskOpError(err, "failed to dispatch task: %v", err), nil
 	}
+	profile = task.ProfileSlug
 
 	resp := map[string]any{"task": task}
 	if autoBoard != nil {
@@ -246,8 +273,43 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 		return task, autoBoard, nil
 	}
 
-	h.announceClaimable(project, dispatchedBy, profile, title, description, priority, task)
+	// A task dispatched blocked_by an unfinished prerequisite is held: pending
+	// and visible, but no claim signal until its hold is released, when it is
+	// announced exactly once (announceRelease). Same shape as the backlog skip.
+	if h.db.TaskHeld(project, task.ID) {
+		h.events.Emit(MCPEvent{Type: "task", Action: "held", Agent: dispatchedBy, Project: project, Target: task.ProfileSlug, Label: title})
+		return task, autoBoard, nil
+	}
+
+	h.announceClaimable(project, dispatchedBy, task.ProfileSlug, title, description, priority, task)
 	return task, autoBoard, nil
+}
+
+// announceReleased announces the held tasks a transition released
+// (task.Released, settled in the transition's own tx). Called after commit by
+// every handler that can release a hold.
+func (h *Handlers) announceReleased(project string, ids []string) {
+	for _, id := range ids {
+		h.announceRelease(project, id)
+	}
+}
+
+// announceRelease fires the claim signals of one released hold, exactly once:
+// the announced_at CAS decides between the inline path and the sweeper, and
+// only the winner announces (never read-then-emit). A task that is no longer
+// pending by then is marked but not announced. True = announced now.
+func (h *Handlers) announceRelease(project, taskID string) bool {
+	won, err := h.db.MarkHoldAnnounced(project, taskID, h.db.Now())
+	if err != nil || !won {
+		return false
+	}
+	task, err := h.db.GetTask(taskID, project)
+	if err != nil || task == nil || task.Status != "pending" || task.ArchivedAt != nil {
+		return false
+	}
+	h.announceClaimable(project, task.DispatchedBy, task.ProfileSlug, task.Title, task.Description, task.Priority, task)
+	emitTaskEvent(h.events, "task.released", "release", project, task)
+	return true
 }
 
 // announceClaimable fires the claim signals for a now-claimable task: the P0/P1
@@ -280,24 +342,74 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
 	taskID := req.GetString("task_id", "")
+	if req.GetBool("next", false) && taskID == "" {
+		return h.claimNext(project, agent, req.GetString("sort", db.SortPriority))
+	}
 	if taskID == "" {
-		return toolResultError("task_id is required"), nil
+		return toolResultError("task_id is required (or next=true)"), nil
 	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
 		return toolResultError(err.Error()), nil
 	}
 
+	// Readiness is a projection, not a gate (ruling b3a6ab43 OQ3): a claim of a
+	// task with unsatisfied prerequisites succeeds, and the response names
+	// them. Read before the claim: once accepted the task is no longer pending.
+	_, blockers, _ := h.db.TaskReadiness(project, taskID)
+
 	task, err := h.db.ClaimTask(taskID, agent, project)
 	if err != nil {
 		return taskOpError(err, "failed to claim task: %v", err), nil
 	}
+	return h.claimed(project, agent, task, blockers)
+}
+
+// claimed emits the claim signals and renders the claim_task response, with
+// the readiness warning when the task had unsatisfied prerequisites.
+func (h *Handlers) claimed(project, agent string, task *models.Task, blockers []models.EdgeRef) (*mcp.CallToolResult, error) {
 	h.events.Emit(MCPEvent{Type: "task", Action: "claim", Agent: agent, Project: project, Label: task.Title})
 	emitTaskEvent(h.events, "task.claimed", "claim", project, task)
 	pushStatusAsync(h.getConnector(), task, "accepted", nil)
 	// Basis stamp in its own tx after the transition (design 54e529d8 §4.3).
 	basis := h.stampBasis(project, agent, db.BasisClaim, []string{task.ID})
-	return h.resultJSONTracked(project, agent, "claim_task", withBasis(task, basis))
+	out := withBasis(task, basis)
+	if m, ok := out.(map[string]any); ok && len(blockers) > 0 {
+		list := make([]map[string]any, 0, len(blockers))
+		for _, b := range blockers {
+			entry := map[string]any{"id": b.ID, "status": b.Status, "until": b.Until}
+			if p, _ := h.db.GetTask(b.ID, project); p != nil {
+				entry["title"] = p.Title
+			}
+			list = append(list, entry)
+		}
+		m["readiness"] = map[string]any{"ready": false, "blockers": list}
+	}
+	return h.resultJSONTracked(project, agent, "claim_task", out)
+}
+
+// claimNext claims the caller's next ready task (claim_task next=true): only
+// tasks routed to the caller's registered profile, through the one readiness
+// predicate, walking past candidates a racing claimer took.
+func (h *Handlers) claimNext(project, agent, sortBy string) (*mcp.CallToolResult, error) {
+	switch sortBy {
+	case db.SortPriority, db.SortOldest, db.SortUnblockImpact:
+	default:
+		return validationError(CodeInvalidArgument, fmt.Sprintf("sort must be priority, oldest or unblock_impact (got %q)", sortBy)), nil
+	}
+	a, err := h.db.GetAgent(project, agent)
+	if err != nil || a == nil || a.ProfileSlug == nil || *a.ProfileSlug == "" {
+		return validationError(CodeInvalidArgument, "next=true claims from your registered profile; register with profile_slug or pass task_id"), nil
+	}
+	task, err := h.db.ClaimNextTask(project, agent, *a.ProfileSlug, "", sortBy)
+	if err != nil {
+		return taskOpError(err, "failed to claim next task: %v", err), nil
+	}
+	if task == nil {
+		ready, _ := h.db.ListReadyTasks(project, *a.ProfileSlug, "", 0)
+		return h.resultJSONTracked(project, agent, "claim_task", map[string]any{"task": nil, "ready_count": len(ready)})
+	}
+	return h.claimed(project, agent, task, nil)
 }
 
 // HandlePromoteTask lifts a groomed 'backlog' task to 'pending' (claimable) and
@@ -668,6 +780,7 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return taskOpError(err, "failed to mark task in-review: %v", err), nil
 	}
+	h.announceReleased(project, task.Released)
 	h.events.Emit(MCPEvent{Type: "task", Action: "review", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
 	// The in_review event carries the git zone + the submitting agent, so a
 	// gate subscribed to the stream can act without a follow-up GET.
@@ -747,6 +860,7 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 	if err != nil {
 		return taskOpError(err, "failed to complete task: %v", err), nil
 	}
+	h.announceReleased(project, task.Released)
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "complete", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
 	emitTaskEvent(h.events, "task.done", "complete", project, task)
@@ -845,6 +959,7 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 	if err != nil {
 		return taskOpError(err, "failed to cancel task: %v", err), nil
 	}
+	h.announceReleased(project, task.Released)
 	pushStatusAsync(h.getConnector(), task, "cancelled", reason)
 
 	// Notify dispatcher
@@ -1289,6 +1404,7 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 		}
 		completed = append(completed, taskID)
 		h.events.Emit(MCPEvent{Type: "task", Action: "complete", Agent: agent, Project: project, Label: task.Title})
+		h.announceReleased(project, task.Released)
 	}
 
 	// One stamp tx for the whole batch.
@@ -1403,7 +1519,15 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 	limit := clampLimit(req.GetInt("limit", 50))
 	includeArchived := req.GetBool("include_archived", false)
 
-	tasks, err := h.db.ListTasks(project, status, profile, priority, assignedTo, boardID, limit, includeArchived)
+	var tasks []models.Task
+	var err error
+	if req.GetBool("ready", false) {
+		// The one readiness predicate (same as claim next=true); ready implies
+		// pending and not archived, so status and include_archived do not apply.
+		tasks, err = h.db.ListReadyTasks(project, profile, boardID, limit)
+	} else {
+		tasks, err = h.db.ListTasks(project, status, profile, priority, assignedTo, boardID, limit, includeArchived)
+	}
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to list tasks: %v", err)), nil
 	}
@@ -1442,4 +1566,58 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 		"count": len(tasks),
 		"tasks": tasks,
 	})
+}
+
+// HandleTaskEdge adds or removes one typed edge out of a task (design d523e74e
+// §4.2). The type must be registered (unknown -> INVALID_ARGUMENT); a blocking
+// edge that would close a cycle -> EDGE_CYCLE naming the path. Adding a
+// blocked_by to a pending task holds it; it cannot un-send an announcement
+// already made. Removing an edge settles the task in the same tx, and a hold
+// it released is announced here.
+func (h *Handlers) HandleTaskEdge(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	op := req.GetString("op", "")
+	typ := strings.TrimSpace(req.GetString("type", ""))
+	taskID := req.GetString("task_id", "")
+	targetID := req.GetString("target_id", "")
+	if taskID == "" || targetID == "" || typ == "" {
+		return validationError(CodeInvalidArgument, "task_id, type and target_id are required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+	targetID, err = h.resolveTaskID(targetID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+	resp := map[string]any{"op": op, "task_id": taskID, "type": typ, "target_id": targetID}
+	switch op {
+	case "add":
+		meta := map[string]any{}
+		if until := req.GetString("until", ""); until != "" {
+			meta["until"] = until
+		}
+		if err := h.db.AddEdge(project, db.EdgeInput{SrcKind: "task", SrcID: taskID, Type: typ,
+			DstKind: "task", DstID: targetID, Metadata: meta, CreatedBy: agent}); err != nil {
+			return taskOpError(err, "failed to add edge: %v", err), nil
+		}
+	case "remove":
+		released, err := h.db.RemoveEdge(project, taskID, typ, targetID, agent)
+		if err != nil {
+			return taskOpError(err, "failed to remove edge: %v", err), nil
+		}
+		h.announceReleased(project, released)
+		resp["released"] = released
+	default:
+		return validationError(CodeInvalidArgument, fmt.Sprintf("op must be add or remove (got %q)", op)), nil
+	}
+	if ready, blockers, err := h.db.TaskReadiness(project, taskID); err == nil {
+		resp["ready"] = ready
+		if len(blockers) > 0 {
+			resp["blocked_by"] = blockers
+		}
+	}
+	return h.resultJSONTracked(project, agent, "task_edge", resp)
 }

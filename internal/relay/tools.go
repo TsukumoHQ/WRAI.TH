@@ -486,16 +486,34 @@ func dispatchTaskTool() mcp.Tool {
 		mcp.WithString("verify_cmd", mcp.Description("Optional command the gate reviewer runs to validate this ticket; never required, even where typed tickets are enforced.")),
 		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog' (groomed; promote_task lifts it to pending). Default false.")),
 		mcp.WithString("trace_id", mcp.Description("32-hex correlation id; auto-minted if omitted.")),
+		mcp.WithArray("blocked_by", mcp.Description("Prerequisite ids ('id' or 'id@in-review'); held until met"), mcp.WithStringItems()),
+		mcp.WithString("discovered_from", mcp.Description("Origin task id; inherits board/trace/profile")),
 	)
 }
 
 func claimTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"claim_task",
-		mcp.WithDescription("Claim a pending task → 'accepted'."),
+		mcp.WithDescription("Claim a pending task → 'accepted'. Unmet prerequisites: listed in readiness."),
 		asParam,
 		projectParam,
-		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+		mcp.WithString("task_id", mcp.Description("Task ID, or next")),
+		mcp.WithBoolean("next", mcp.Description("Claim your profile's next ready task")),
+		mcp.WithString("sort", mcp.Enum("priority", "oldest", "unblock_impact")),
+	)
+}
+
+func taskEdgeTool() mcp.Tool {
+	return mcp.NewTool(
+		"task_edge",
+		mcp.WithDescription("Add/remove edge task_id->target_id. type: blocked_by (not ready until target done) or discovered_from."),
+		asParam,
+		projectParam,
+		mcp.WithString("op", mcp.Required(), mcp.Enum("add", "remove")),
+		mcp.WithString("task_id", mcp.Required()),
+		mcp.WithString("type", mcp.Required()),
+		mcp.WithString("target_id", mcp.Required()),
+		mcp.WithString("until", mcp.Enum("done", "in-review")),
 	)
 }
 
@@ -706,6 +724,7 @@ func listTasksTool() mcp.Tool {
 		mcp.WithString("board_id", mcp.Description("Filter by board")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
 		mcp.WithBoolean("include_archived", mcp.Description("Include archived (default false)")),
+		mcp.WithBoolean("ready", mcp.Description("Pending, prerequisites met")),
 		formatParam,
 	)
 }
