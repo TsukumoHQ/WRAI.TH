@@ -22,26 +22,26 @@ var sessionContextParam = mcp.WithString("session_context", mcp.Description("'fu
 func whoamiTool() mcp.Tool {
 	return mcp.NewTool(
 		"whoami",
-		mcp.WithDescription("Find your session ID: write a salt (3+ random words) in your conversation, then call with it; returns session_id for register_agent."),
-		mcp.WithString("salt", mcp.Description("Unique string of 3+ random words you just wrote in your conversation (e.g. 'purple-falcon-nebula')."), mcp.Required()),
+		mcp.WithDescription("Returns your session_id for register_agent: write a salt in your conversation, then pass it."),
+		mcp.WithString("salt", mcp.Description("3+ random words you just wrote in your conversation."), mcp.Required()),
 	)
 }
 
 func registerAgentTool() mcp.Tool {
 	return mcp.NewTool(
 		"register_agent",
-		mcp.WithDescription("Register or update an agent; returns session_context. On re-register, omitted reports_to/profile_slug/is_executive/session_id are kept. is_executive=true creates the 'leadership' admin team (broadcast to='*')."),
+		mcp.WithDescription("Register/update an agent; returns session_context. Re-register keeps omitted reports_to/profile_slug/is_executive/session_id. is_executive=true creates the 'leadership' admin team (can broadcast)."),
 		projectParam,
-		mcp.WithString("name", mcp.Description("Unique agent name (e.g. 'backend'). Re-register same name to update. To rename: register new name, deactivate_agent the old."), mcp.Required()),
+		mcp.WithString("name", mcp.Description("Unique agent name; re-register to update. Rename: register the new name, deactivate_agent the old."), mcp.Required()),
 		mcp.WithString("role", mcp.Description("Role (e.g. 'FastAPI backend developer')")),
 		mcp.WithString("description", mcp.Description("What this agent is currently working on")),
 		mcp.WithString("reports_to", mcp.Description("Manager agent name (org hierarchy)")),
 		mcp.WithBoolean("is_executive", mcp.Description("Executive flag (crown in UI)")),
-		mcp.WithBoolean("is_service", mcp.Description("Service/daemon identity (monitoring/QA): always eligible to send, exempt from the liveness gate. Preserved when omitted.")),
+		mcp.WithBoolean("is_service", mcp.Description("Service/daemon identity: exempt from the send liveness gate. Kept when omitted.")),
 		mcp.WithString("profile_slug", mcp.Description("Profile archetype this agent runs")),
 		mcp.WithString("session_id", mcp.Description("Claude Code session ID ($CLAUDE_SESSION_ID) for activity tracking")),
-		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD), stable identity key: rebinds session_id after /clear. Agents may share a cwd (resolved by name; a rebind needs the name).")),
-		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering (e.g. '[\"database\",\"auth\"]')")),
+		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD): identity key that rebinds session_id after /clear. A shared cwd resolves by name.")),
+		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
 		sessionContextParam,
 	)
@@ -60,7 +60,7 @@ func sendMessageTool() mcp.Tool {
 		),
 		mcp.WithString("subject", mcp.Description("Subject line"), mcp.Required()),
 		mcp.WithString("content", mcp.Description("Message body"), mcp.Required()),
-		mcp.WithString("reply_to", mcp.Description("Message ID to reply to (threading). A purged parent is accepted; the result then says reply_to_resolved:false.")),
+		mcp.WithString("reply_to", mcp.Description("Message ID to reply to. A purged parent is accepted (reply_to_resolved:false).")),
 		mcp.WithString("task_id", mcp.Description("Task this message is about (full id, must exist in the project). Stored as the message's task link.")),
 		mcp.WithString("metadata", mcp.Description("JSON string of additional metadata")),
 		mcp.WithString("conversation_id", mcp.Description("Send to a conversation instead of a single agent")),
@@ -69,7 +69,7 @@ func sendMessageTool() mcp.Tool {
 			mcp.Enum("P0", "P1", "P2", "P3"),
 		),
 		mcp.WithNumber("ttl_seconds", mcp.Description("Seconds before expiry (default 14400 = 4h, 0 = never).")),
-		mcp.WithString("target_project", mcp.Description("Cross-project DM to this agent in target_project. Both sender and recipient must be is_executive. Message lives in target_project; metadata records the source.")),
+		mcp.WithString("target_project", mcp.Description("Cross-project DM; sender and recipient must both be executives. Stored in target_project.")),
 		mcp.WithString("action_required",
 			mcp.Description("'none' = no-wake FYI (stays in inbox); ask/do/decide may wake per priority. Omit: derived from type. A question/blocker always wakes."),
 			mcp.Enum("ask", "do", "decide", "none"),
@@ -81,7 +81,7 @@ func sendMessageTool() mcp.Tool {
 func sendStatusTool() mcp.Tool {
 	return mcp.NewTool(
 		"send_status",
-		mcp.WithDescription("Post a typed status (done/doing/blockers + note). No-wake: surfaced, never wakes. A blocker here is not an escalation — send a question to escalate."),
+		mcp.WithDescription("Post a typed status (done/doing/blockers + note). Never wakes; to escalate a blocker, send a question."),
 		asParam,
 		projectParam,
 		mcp.WithString("to", mcp.Description("Agent name, '*', or a conversation_id."), mcp.Required()),
@@ -104,7 +104,7 @@ func getInboxTool() mcp.Tool {
 		mcp.WithBoolean("unread_only", mcp.Description("Only unread (default true)")),
 		mcp.WithNumber("limit", mcp.Description("Max messages (default 10)")),
 		mcp.WithBoolean("full_content", mcp.Description("Full content, not 300-char truncated (default false)")),
-		mcp.WithBoolean("apply_budget", mcp.Description("Prune by priority, tag relevance and freshness to fit max_context_bytes (default false)")),
+		mcp.WithBoolean("apply_budget", mcp.Description("Prune to fit max_context_bytes (default false)")),
 		mcp.WithString("min_priority", mcp.Description("Minimum priority (e.g. 'P1' returns P0+P1)"), mcp.Enum("P0", "P1", "P2", "P3")),
 		mcp.WithString("from", mcp.Description("Filter by sender")),
 		mcp.WithString("since", mcp.Description("Only messages after this ISO timestamp")),
@@ -136,7 +136,7 @@ func deliveryStatusTool() mcp.Tool {
 func deadletterTool() mcp.Tool {
 	return mcp.NewTool(
 		"deadletter",
-		mcp.WithDescription("List messages that TTL-expired while still unread (so a P0/P1 never vanishes silently). Read-only; defaults to caller."),
+		mcp.WithDescription("Read-only: messages that TTL-expired unread. Defaults to caller."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Recipient (default caller)")),
@@ -178,7 +178,7 @@ func listAgentsTool() mcp.Tool {
 func isEligibleTool() mcp.Tool {
 	return mcp.NewTool(
 		"is_eligible",
-		mcp.WithDescription("Read-only: the {eligible, reason} send_message would give this agent, so a client parks instead of retrying. Service identities are always eligible."),
+		mcp.WithDescription("Read-only: send_message's {eligible, reason} for this agent, so a client parks instead of retrying. Services are always eligible."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Agent name to check (default: yourself, i.e. the `as` identity)")),
@@ -188,7 +188,7 @@ func isEligibleTool() mcp.Tool {
 func identityCheckTool() mcp.Tool {
 	return mcp.NewTool(
 		"identity_check",
-		mcp.WithDescription("Read-only: is a name wake-resolvable, or an unbound ghost that drops wakes? conflicting_agents (others on this cwd) is informational, not a failure."),
+		mcp.WithDescription("Read-only: is a name wake-resolvable or an unbound ghost that drops wakes? conflicting_agents (same cwd) is informational."),
 		asParam,
 		projectParam,
 		mcp.WithString("agent", mcp.Description("Name to check (default caller)")),
@@ -359,7 +359,7 @@ func getMemoryTool() mcp.Tool {
 func searchMemoryTool() mcp.Tool {
 	return mcp.NewTool(
 		"search_memory",
-		mcp.WithDescription("Full-text search across memories. Ranked results with provenance and confidence. Cross-scope by default (respects agent privacy)."),
+		mcp.WithDescription("Ranked full-text memory search with provenance. Cross-scope by default (agent privacy kept)."),
 		asParam,
 		projectParam,
 		mcp.WithString("query", mcp.Description("Full-text search query"), mcp.Required()),
@@ -404,7 +404,7 @@ func deleteMemoryTool() mcp.Tool {
 			mcp.Enum("agent", "project", "global"),
 		),
 		mcp.WithString("reason", mcp.Description("Tombstone 'why' (with who/when). Default 'deleted'.")),
-		mcp.WithString("agent", mcp.Description("Author of an agent-scope memory you did not write. Allowed for executives, or when that author is inactive. Default: you.")),
+		mcp.WithString("agent", mcp.Description("Author of an agent-scope memory not yours (executives only, or the author is inactive). Default: you.")),
 	)
 }
 
@@ -428,12 +428,12 @@ func resolveConflictTool() mcp.Tool {
 func registerProfileTool() mcp.Tool {
 	return mcp.NewTool(
 		"register_profile",
-		mcp.WithDescription("Create or update a profile — an identity card for an agent role (name, role, advertised skills). Discoverable via find_profiles."),
+		mcp.WithDescription("Create or update an agent-role profile (name, role, skills), discoverable via find_profiles."),
 		projectParam,
 		mcp.WithString("slug", mcp.Description("Unique profile identifier (e.g. 'backend')"), mcp.Required()),
 		mcp.WithString("name", mcp.Description("Display name"), mcp.Required()),
 		mcp.WithString("role", mcp.Description("Role description")),
-		mcp.WithString("skills", mcp.Description("Skill objects, JSON string or array: [{\"id\":\"...\",\"name\":\"...\",\"tags\":[...]}]")),
+		mcp.WithString("skills", mcp.Description("Skills as a JSON array (or its string) of {id, name, tags[]}")),
 	)
 }
 
@@ -468,7 +468,7 @@ func findProfilesTool() mcp.Tool {
 func dispatchTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"dispatch_task",
-		mcp.WithDescription("Dispatch a task to a profile (pending, claimable by its agents). profile='human' = human-action task. No board_id: auto on 0/1 boards ('backlog' if 0); refused, listing boards, if several."),
+		mcp.WithDescription("Dispatch a pending task to a profile (claimable by its agents); profile='human' for a human action. No board_id: auto with 0-1 boards, refused if several."),
 		asParam,
 		projectParam,
 		mcp.WithString("profile", mcp.Description("Profile slug to dispatch to"), mcp.Required()),
@@ -481,9 +481,9 @@ func dispatchTaskTool() mcp.Tool {
 		mcp.WithString("parent_task_id", mcp.Description("Parent task ID (subtasks)")),
 		mcp.WithString("board_id", mcp.Description("Board to assign to")),
 		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required where typed tickets are enforced, else optional.")),
-		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array of testable items, e.g. '[\"builds green\"]'. Review gate verdicts per item. Required where enforced.")),
+		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array of testable items, one gate verdict each. Required where enforced.")),
 		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done. Required where enforced.")),
-		mcp.WithString("verify_cmd", mcp.Description("Optional command the gate reviewer runs to validate this ticket; never required, even where typed tickets are enforced.")),
+		mcp.WithString("verify_cmd", mcp.Description("Optional command the gate reviewer runs; never required.")),
 		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog' (groomed; promote_task lifts it to pending). Default false.")),
 		mcp.WithString("trace_id", mcp.Description("32-hex correlation id; auto-minted if omitted.")),
 		mcp.WithArray("blocked_by", mcp.Description("Prerequisite ids ('id' or 'id@in-review'); held until met"), mcp.WithStringItems()),
@@ -575,7 +575,7 @@ func startTaskTool() mcp.Tool {
 func commentTool() mcp.Tool {
 	return mcp.NewTool(
 		"comment",
-		mcp.WithDescription("Comment on a task: posted to the Linear issue for a Linear-mirrored task, else saved as a progress note."),
+		mcp.WithDescription("Comment on a task (the Linear issue if mirrored, else a progress note)."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -653,7 +653,7 @@ func reclaimTaskTool() mcp.Tool {
 func linkPrTool() mcp.Tool {
 	return mcp.NewTool(
 		"link_pr",
-		mcp.WithDescription("Link a GitHub PR to a task (pr_url/number/repo/state) so it syncs from GitHub. Additive, idempotent: omitted fields keep their value."),
+		mcp.WithDescription("Link a GitHub PR to a task so it syncs. Idempotent; omitted fields keep their value."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -667,7 +667,7 @@ func linkPrTool() mcp.Tool {
 func reconcilePrTool() mcp.Tool {
 	return mcp.NewTool(
 		"reconcile_pr",
-		mcp.WithDescription("Poll-side PR convergence: pass the observed pr_state; maps open→in-review, merged→done, closed-unmerged→blocked. No-resurrect, idempotent."),
+		mcp.WithDescription("Apply an observed pr_state: open=in-review, merged=done, closed-unmerged=blocked. Never resurrects; idempotent."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID (a pr-reconcile candidate)"), mcp.Required()),
@@ -680,7 +680,7 @@ func reconcilePrTool() mcp.Tool {
 func setRunTool() mcp.Tool {
 	return mcp.NewTool(
 		"set_run",
-		mcp.WithDescription("Stamp the run zone on a PARENT (container, not claimable) task: integration_branch and/or run_state (open→gating→merging→merged | blocked | amputated). Transition-enforced, idempotent."),
+		mcp.WithDescription("Set integration_branch and/or run_state on a PARENT (container) task. Transitions enforced; idempotent."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Parent task ID (the run)"), mcp.Required()),
@@ -748,7 +748,7 @@ func batchDispatchTasksTool() mcp.Tool {
 		mcp.WithDescription("Dispatch many tasks. Where typed tickets are enforced, an item missing goal/acceptance_criteria/dod is skipped and listed in errors."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array of {profile, title, description, priority, board_id, goal, acceptance_criteria[], dod, verify_cmd}. profile, title required; goal/acceptance_criteria/dod only where typed tickets are enforced."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array of dispatch_task args (profile, title required; description, priority, board_id, goal, acceptance_criteria[], dod, verify_cmd)."), mcp.Required()),
 	)
 }
 
@@ -808,7 +808,7 @@ func deleteBoardTool() mcp.Tool {
 func updateTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"update_task",
-		mcp.WithDescription("Update task fields (not status). progress_note appends a note. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited. assigned_to moves a claimed lease and notifies the old doer; profile_slug alone on a claimed task is refused. Unknown fields refused."),
+		mcp.WithDescription("Update fields (not status); progress_note appends. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited. assigned_to moves a claimed lease (old doer notified); profile_slug alone on a claimed task is refused. Unknown fields refused."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -879,7 +879,7 @@ func listLocksTool() mcp.Tool {
 func deactivateAgentTool() mcp.Tool {
 	return mcp.NewTool(
 		"deactivate_agent",
-		mcp.WithDescription("Deactivate an agent (gone from list_agents, no more messages). Reactivate via register_agent. For temporary pause use sleep_agent."),
+		mcp.WithDescription("Deactivate an agent (unlisted, no messages); register_agent reactivates. To pause, use sleep_agent."),
 		projectParam,
 		mcp.WithString("name", mcp.Description("Agent name"), mcp.Required()),
 	)
@@ -908,7 +908,7 @@ func sleepAgentTool() mcp.Tool {
 func deleteProjectTool() mcp.Tool {
 	return mcp.NewTool(
 		"delete_project",
-		mcp.WithDescription("Permanently delete a project and ALL its data (agents, tasks, messages, memories, boards). Irreversible."),
+		mcp.WithDescription("Permanently delete a project and ALL its data. Irreversible."),
 		mcp.WithString("project", mcp.Description("Project name"), mcp.Required()),
 	)
 }
@@ -934,7 +934,7 @@ func unarchiveProjectTool() mcp.Tool {
 func createProjectTool() mcp.Tool {
 	return mcp.NewTool(
 		"create_project",
-		mcp.WithDescription("Set up a new project (call first). Returns an onboarding plan: analyze the codebase, store knowledge, create org, profiles, board."),
+		mcp.WithDescription("Create a project (call first). Returns an onboarding plan."),
 		mcp.WithString("name", mcp.Description("Project name (lowercase, no spaces)"), mcp.Required()),
 		mcp.WithString("description", mcp.Description("One-line description")),
 		mcp.WithString("cwd", mcp.Description("Absolute path to the project root")),
@@ -947,7 +947,7 @@ func createProjectTool() mcp.Tool {
 func queryContextTool() mcp.Tool {
 	return mcp.NewTool(
 		"query_context",
-		mcp.WithDescription("Query context for a task: ranked memories + completed task results. Use at boot or before starting work."),
+		mcp.WithDescription("Ranked memories + completed task results for a task."),
 		asParam,
 		projectParam,
 		mcp.WithString("query", mcp.Description("What context do you need? (e.g. 'supabase migration patterns')"), mcp.Required()),
@@ -1041,7 +1041,7 @@ func removeTeamMemberTool() mcp.Tool {
 func deleteTeamTool() mcp.Tool {
 	return mcp.NewTool(
 		"delete_team",
-		mcp.WithDescription("Retire a team: removes it, its memberships and inbox refs; delivered messages untouched. To deprecate instead, leave it memberless."),
+		mcp.WithDescription("Delete a team, its memberships and inbox refs; delivered messages stay."),
 		asParam,
 		projectParam,
 		mcp.WithString("team", mcp.Description("Team slug"), mcp.Required()),
