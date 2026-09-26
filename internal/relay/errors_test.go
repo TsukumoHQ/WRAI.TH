@@ -57,6 +57,7 @@ func TestClassifyMessageTaxonomy(t *testing.T) {
 		{"board not found", CodeNotFound, CategoryValidation, false},
 		{"task already claimed by another agent", CodeInvalidArgument, CategoryValidation, false},
 		{"status changed before claim could apply", CodeInvalidArgument, CategoryValidation, false},
+		{"task is not blocked (status=done)", CodeInvalidArgument, CategoryValidation, false},
 		{"agent is not a member of this team", CodeForbidden, CategoryPermission, false},
 		{"broadcast is not allowed for non-admins", CodeForbidden, CategoryPermission, false},
 		{"failed to dispatch task: disk error", CodeInternal, CategoryTransient, true},

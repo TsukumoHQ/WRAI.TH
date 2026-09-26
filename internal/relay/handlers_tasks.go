@@ -562,7 +562,7 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 		return toolResultError("task not found"), nil
 	}
 	if existing.Status != "blocked" {
-		return toolResultError(fmt.Sprintf("task is not blocked (status=%s)", existing.Status)), nil
+		return validationError(CodeInvalidArgument, fmt.Sprintf("task is not blocked (status=%s)", existing.Status)), nil
 	}
 
 	task, err := h.db.StartTask(taskID, agent, project)

@@ -114,7 +114,7 @@ func classifyMessage(message string) (code, category string, retryable bool) {
 		// Lost-race / state-conflict wording: the same call as-is keeps failing
 		// (the state moved or the row already exists) — never retryable.
 		"conflict", "already claimed", "already exists", "already in",
-		"status changed", "changed from"):
+		"status changed", "changed from", "(status="):
 		return CodeInvalidArgument, CategoryValidation, false
 	default:
 		return CodeInternal, CategoryTransient, true

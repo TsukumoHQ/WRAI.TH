@@ -349,3 +349,29 @@ func TestReleaseTaskOverMCP(t *testing.T) {
 		t.Fatalf("release of an in-progress task: %s, want TASK_STATE_CONFLICT", msg)
 	}
 }
+
+// resume_task on a task that is not blocked is a typed, non-retryable
+// validation refusal naming the current status (the gate retried the old
+// INTERNAL/transient answer); a blocked task still resumes to in-progress.
+func TestResumeTaskNotBlockedIsInvalidArgument(t *testing.T) {
+	h := testHandlers(t)
+	regAgent(t, h, "p1", "cto")
+	regAgent(t, h, "p1", "doer")
+	id := dispatchClaimedIn(t, h, "p1", "doer")
+	parseJSON(t, result(h.HandleStartTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id}))))
+
+	res, _ := h.HandleResumeTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id}))
+	body := decodeToolError(t, res)
+	if body["code"] != CodeInvalidArgument || body["errorCategory"] != CategoryValidation || body["isRetryable"] != false {
+		t.Fatalf("resume of an in-progress task = %v, want INVALID_ARGUMENT/validation/retryable=false", body)
+	}
+	if msg, _ := body["message"].(string); !strings.Contains(msg, "status=in-progress") {
+		t.Fatalf("message %q does not name status=in-progress", msg)
+	}
+
+	parseJSON(t, result(h.HandleBlockTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id, "reason": "waiting for API"}))))
+	resumed := parseJSON(t, result(h.HandleResumeTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id}))))
+	if resumed["status"] != "in-progress" {
+		t.Fatalf("resume of a blocked task: status %v, want in-progress", resumed["status"])
+	}
+}
