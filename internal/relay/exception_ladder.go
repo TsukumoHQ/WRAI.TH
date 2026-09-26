@@ -65,8 +65,8 @@ func stepRung(database *db.DB, notifier ackNotifier, a db.ActiveRung, now time.T
 	}
 	switch name {
 	case db.RungMatchPrecedent:
-		ev := map[string]any{"precedent": database.PrecedentFor(a.ReasonCode, a.ExceptionID)}
-		_, err := database.AdvanceRung(a, db.ObligationFulfilled, ev, ladderNext(a), now)
+		// Ladder-point guards (S2b): an active one resolves or routes here.
+		_, err := database.MatchPrecedent(a, now)
 		return err
 	case db.RungConsultKnowledge:
 		return consultKnowledge(database, a, now)
@@ -181,6 +181,17 @@ func taskTarget(database *db.DB, a db.ActiveRung) (agent, profile, why string) {
 	candidate := a.Owner
 	if a.Name() == db.RungAdversarialReview {
 		candidate = database.LiveSupervisor(a.Project, a.Owner)
+	} else if p := a.Params()["profile"]; p != "" {
+		// A route guard chose the specialist profile (S2b): its first live agent.
+		candidate = ""
+		if agents, err := database.GetAgentsByProfile(a.Project, p); err == nil {
+			for _, ag := range agents {
+				if database.IsLiveAgent(a.Project, ag.Name) {
+					candidate = ag.Name
+					break
+				}
+			}
+		}
 	}
 	if !database.IsLiveAgent(a.Project, candidate) {
 		return "", "", "no_live_owner"
@@ -438,6 +449,7 @@ func humanOutcome(database *db.DB, notifier ackNotifier, a db.ActiveRung, replie
 			continue
 		}
 		ev := map[string]any{"reply": r.ID, "decision": h.Decision, "scope": h.Scope, "generalize": *h.Generalize, "expires_in": h.ExpiresIn}
+		gc := generalizeCompile(database, a, h)
 		switch h.Decision {
 		case "accept_known":
 			until := now.Add(h.expires).UTC().Format("2006-01-02T15:04:05.000000Z")
@@ -445,17 +457,17 @@ func humanOutcome(database *db.DB, notifier ackNotifier, a db.ActiveRung, replie
 				return fmt.Errorf("suppress: %w", err)
 			}
 			ev["suppressed_until"] = until
-			_, err := database.ResolveAtRung(a, "human", "known", ev, now)
+			_, err := database.ResolveHumanAtRung(a, "known", ev, gc, now)
 			return err
 		case "wont_fix":
-			_, err := database.ResolveAtRung(a, "human", "wont_fix", ev, now)
+			_, err := database.ResolveHumanAtRung(a, "wont_fix", ev, gc, now)
 			return err
 		case "reassign":
 			ev["reassign_to"] = h.ReassignTo
-			_, err := database.ResolveAtRung(a, "human", "reassigned", ev, now)
+			_, err := database.ResolveHumanAtRung(a, "reassigned", ev, gc, now)
 			return err
 		default:
-			_, err := database.ResolveAtRung(a, "human", "fixed", ev, now)
+			_, err := database.ResolveHumanAtRung(a, "fixed", ev, gc, now)
 			return err
 		}
 	}
@@ -474,6 +486,35 @@ func humanOutcome(database *db.DB, notifier ackNotifier, a db.ActiveRung, replie
 		return err
 	}
 	return nil
+}
+
+// generalizeCompile maps a generalize=true human answer to the shadow guard
+// it compiles (design 4d2e57a3 §7); nil when generalize is false.
+// accept_known -> open suppress; wont_fix -> ladder resolve_systemic{wont_fix};
+// fix_doctrine / reassign -> ladder route{profile of the owner / reassign_to}.
+func generalizeCompile(database *db.DB, a db.ActiveRung, h HumanDecision) *db.GuardCompile {
+	if !*h.Generalize {
+		return nil
+	}
+	gc := &db.GuardCompile{Point: db.GuardPointLadder, ExpiresIn: h.expires,
+		Lane: h.Scope == "lane", Global: h.Scope == "global"}
+	switch h.Decision {
+	case "accept_known":
+		gc.Point, gc.Action = db.GuardPointOpen, db.GuardActionSuppress
+	case "wont_fix":
+		gc.Action, gc.ActionParams = db.GuardActionResolveSystemic, map[string]string{"reason": "wont_fix"}
+	default:
+		who := a.Owner
+		if h.Decision == "reassign" {
+			who = h.ReassignTo
+		}
+		profile := ""
+		if ag, err := database.GetAgent(a.Project, who); err == nil && ag != nil && ag.ProfileSlug != nil {
+			profile = *ag.ProfileSlug
+		}
+		gc.Action, gc.ActionParams = db.GuardActionRoute, map[string]string{"profile": profile}
+	}
+	return gc
 }
 
 func strPtrOrNil(s string) *string {

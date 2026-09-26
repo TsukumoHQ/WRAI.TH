@@ -458,15 +458,29 @@ func (d *DB) SetRungAction(a ActiveRung, bearer string, add map[string]any) erro
 // (unfulfilled | inactive | fulfilled) and opens rung `to`, CAS on the cursor.
 // ok is false when another writer already moved it.
 func (d *DB) AdvanceRung(a ActiveRung, closeState string, add map[string]any, to int, now time.Time) (bool, error) {
-	if to <= a.Rung || to >= len(a.Snapshot.Rungs) {
-		return false, fmt.Errorf("advance %s: rung %d -> %d out of ladder", a.ExceptionID, a.Rung, to)
-	}
-	ts := now.UTC().Format(memoryTimeFmt)
 	tx, err := d.beginWriterTx()
 	if err != nil {
 		return false, fmt.Errorf("advance begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	ok, err := d.advanceRungTx(tx, a, closeState, add, to, "hard_stop", now)
+	if !ok || err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("advance commit: %w", err)
+	}
+	return true, nil
+}
+
+// advanceRungTx is AdvanceRung on the caller's writer tx; rungs jumped over
+// are recorded inactive with {"skipped": skipped}.
+func (d *DB) advanceRungTx(tx *writerTx, a ActiveRung, closeState string, add map[string]any, to int, skipped string, now time.Time) (bool, error) {
+	if to <= a.Rung || to >= len(a.Snapshot.Rungs) {
+		return false, fmt.Errorf("advance %s: rung %d -> %d out of ladder", a.ExceptionID, a.Rung, to)
+	}
+	ts := now.UTC().Format(memoryTimeFmt)
+	skipEv, _ := json.Marshal(map[string]string{"skipped": skipped})
 	res, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = ? WHERE id = ? AND state = 'active'`,
 		closeState, ts, mergeEvidence(a.Evidence, add), a.ObligationID)
 	if err != nil {
@@ -475,16 +489,16 @@ func (d *DB) AdvanceRung(a ActiveRung, closeState string, add map[string]any, to
 	if n, _ := res.RowsAffected(); n == 0 {
 		return false, nil
 	}
-	// Rungs jumped over (hard stop) are recorded as skipped, so the attempt
-	// view shows every rung of the ladder.
+	// Rungs jumped over (hard stop, guard route) are recorded as skipped, so
+	// the attempt view shows every rung of the ladder.
 	for skip := a.Rung + 1; skip < to; skip++ {
 		r := a.Snapshot.Rungs[skip]
 		if _, err := tx.Exec(`INSERT OR IGNORE INTO obligations
 			(id, project, norm_id, norm_version, bindings_hash, subject_kind, subject_id, bearer_kind, bearer, state,
 			 created_at, closed_at, escalation_depth, parent_obligation_id, discharge_evidence)
-			VALUES (?, ?, ?, ?, ?, 'exception', ?, ?, '', 'inactive', ?, ?, ?, ?, '{"skipped":"hard_stop"}')`,
+			VALUES (?, ?, ?, ?, ?, 'exception', ?, ?, '', 'inactive', ?, ?, ?, ?, ?)`,
 			uuid.New().String(), a.Project, r.NormID, r.NormVersion, bindingsHash(r.NormID, "exception", a.ExceptionID, skip),
-			a.ExceptionID, rungBearerKind(r.Rung), ts, ts, skip, a.ObligationID); err != nil {
+			a.ExceptionID, rungBearerKind(r.Rung), ts, ts, skip, a.ObligationID, string(skipEv)); err != nil {
 			return false, fmt.Errorf("advance skip: %w", err)
 		}
 	}
@@ -498,21 +512,30 @@ func (d *DB) AdvanceRung(a ActiveRung, closeState string, add map[string]any, to
 	if err := d.openRungTx(tx, a.Project, a.ExceptionID, a.Snapshot, to, a.ObligationID, now); err != nil {
 		return false, err
 	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("advance commit: %w", err)
-	}
 	return true, nil
 }
 
 // ResolveAtRung fulfils the current rung and resolves the systemic, CAS on the
 // cursor.
 func (d *DB) ResolveAtRung(a ActiveRung, resolvedBy, reason string, add map[string]any, now time.Time) (bool, error) {
-	ts := now.UTC().Format(memoryTimeFmt)
 	tx, err := d.beginWriterTx()
 	if err != nil {
 		return false, fmt.Errorf("resolve begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	ok, err := resolveAtRungTx(tx, a, resolvedBy, reason, add, now)
+	if !ok || err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("resolve commit: %w", err)
+	}
+	return true, nil
+}
+
+// resolveAtRungTx is ResolveAtRung on the caller's writer tx.
+func resolveAtRungTx(tx *writerTx, a ActiveRung, resolvedBy, reason string, add map[string]any, now time.Time) (bool, error) {
+	ts := now.UTC().Format(memoryTimeFmt)
 	state := ObligationFulfilled
 	if resolvedBy == "expired" {
 		state = ObligationUnfulfilled
@@ -532,9 +555,6 @@ func (d *DB) ResolveAtRung(a ActiveRung, resolvedBy, reason string, add map[stri
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return false, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("resolve commit: %w", err)
 	}
 	return true, nil
 }
