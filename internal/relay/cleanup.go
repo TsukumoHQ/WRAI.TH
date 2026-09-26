@@ -338,6 +338,7 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 				now := database.Now()
 				evaluateObligations(database, registry, now)
 				evaluateClassBudgets(database, registry, now)
+				evaluateExceptionLadders(database, registry, now)
 			}
 		}
 	}()
@@ -345,8 +346,8 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 
 // evaluateClassBudgets opens one systemic exception per exception class over
 // its rate budget (design 1111292b T1). class_budget_mode: off skips; shadow
-// (default) and on record and attribute only. T1 never sends, dispatches or
-// opens an obligation: notifier is taken for the T2 ladder and unused here.
+// (default) and on record and attribute only; the ladder that acts on the
+// systemic exceptions is evaluateExceptionLadders, which runs only when on.
 func evaluateClassBudgets(database *db.DB, _ ackNotifier, now time.Time) {
 	if database.GetSetting(db.SettingClassBudgetMode) == db.ClassBudgetModeOff {
 		return
