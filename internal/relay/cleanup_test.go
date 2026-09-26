@@ -414,3 +414,62 @@ func TestTickEmptySettingsMatchConstsAndSpecDefaults(t *testing.T) {
 		}
 	}
 }
+
+// TestClassBudgetsShadowRunsNoLadder is b05cce16 AC3 (shadow): three blocked
+// tasks with a dead-lane reason (the S1 producer path) breach the routing
+// budget; the tick opens one systemic exception and does nothing else — rung
+// stays NULL, no obligation on an exception, no message. Mode off: nothing.
+func TestClassBudgetsShadowRunsNoLadder(t *testing.T) {
+	run := func(t *testing.T, mode string) (systemic, rungSet, obligations int, notices []string) {
+		dbPath := filepath.Join(t.TempDir(), "test.db")
+		database, err := db.NewTestDB(dbPath)
+		if err != nil {
+			t.Fatalf("create test db: %v", err)
+		}
+		t.Cleanup(func() { _ = database.Close() })
+		database.SetSetting("budget_epoch", "2000-01-01T00:00:00.000000Z")
+		if mode != "" {
+			database.SetSetting(db.SettingClassBudgetMode, mode)
+		}
+		reason := "B2 dead-lane disposition: daemon-side cancel+archive"
+		for i := 0; i < 3; i++ {
+			task, err := database.DispatchTask("p", "dev", "cmo", fmt.Sprintf("t%d", i), "", "P2", nil, nil, db.TypedTicket{}, false, nil)
+			if err != nil {
+				t.Fatalf("dispatch: %v", err)
+			}
+			if _, err := database.StartTask(task.ID, fmt.Sprintf("dev-%d", i), "p"); err != nil {
+				t.Fatalf("start: %v", err)
+			}
+			if _, err := database.BlockTask(task.ID, fmt.Sprintf("dev-%d", i), "p", &reason); err != nil {
+				t.Fatalf("block: %v", err)
+			}
+		}
+		rec := &recordingNotifier{}
+		evaluateClassBudgets(database, rec, time.Now())
+
+		raw, err := sql.Open("sqlite3", dbPath+"?_busy_timeout=5000")
+		if err != nil {
+			t.Fatalf("open raw handle: %v", err)
+		}
+		defer func() { _ = raw.Close() }()
+		_ = raw.QueryRow(`SELECT COUNT(*) FROM exceptions WHERE source_kind = 'class_budget' AND status = 'open'`).Scan(&systemic)
+		_ = raw.QueryRow(`SELECT COUNT(*) FROM exceptions WHERE rung IS NOT NULL OR ladder_snapshot_json IS NOT NULL`).Scan(&rungSet)
+		_ = raw.QueryRow(`SELECT COUNT(*) FROM obligations WHERE subject_kind = 'exception'`).Scan(&obligations)
+		return systemic, rungSet, obligations, rec.drain()
+	}
+
+	t.Run("shadow", func(t *testing.T) {
+		systemic, rungSet, obligations, notices := run(t, "")
+		if systemic != 1 {
+			t.Fatalf("default (shadow) mode: open systemic = %d, want 1", systemic)
+		}
+		if rungSet != 0 || obligations != 0 || len(notices) != 0 {
+			t.Fatalf("shadow ran a ladder: rung rows %d, exception obligations %d, notices %v", rungSet, obligations, notices)
+		}
+	})
+	t.Run("off", func(t *testing.T) {
+		if systemic, _, _, _ := run(t, db.ClassBudgetModeOff); systemic != 0 {
+			t.Fatalf("mode off opened %d systemic", systemic)
+		}
+	})
+}

@@ -110,6 +110,8 @@ func migrateExceptions(conn *sql.DB) {
 		SELECT 'q:' || id, project, 'integrity:' || class, 'quarantine', table_name || ':' || row_id, 'integrity', class,
 		       CASE WHEN resolved_at IS NULL THEN 'open' ELSE 'resolved' END, detected_at, resolved_at
 		FROM integrity_quarantine`)
+	// Class budgets + the inert escalation-ladder schema (design 1111292b T1).
+	migrateClassBudgets(conn)
 }
 
 // excQ is the statement surface classification and the exception writes run

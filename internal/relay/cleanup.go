@@ -335,10 +335,31 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 			case <-done:
 				return
 			case <-ticker.C:
-				evaluateObligations(database, registry, database.Now())
+				now := database.Now()
+				evaluateObligations(database, registry, now)
+				evaluateClassBudgets(database, registry, now)
 			}
 		}
 	}()
+}
+
+// evaluateClassBudgets opens one systemic exception per exception class over
+// its rate budget (design 1111292b T1). class_budget_mode: off skips; shadow
+// (default) and on record and attribute only. T1 never sends, dispatches or
+// opens an obligation: notifier is taken for the T2 ladder and unused here.
+func evaluateClassBudgets(database *db.DB, _ ackNotifier, now time.Time) {
+	if database.GetSetting(db.SettingClassBudgetMode) == db.ClassBudgetModeOff {
+		return
+	}
+	opened, err := database.EvaluateClassBudgets(now)
+	if err != nil {
+		log.Printf("class budgets: %v", err)
+	}
+	for _, s := range opened {
+		log.Printf("[class-budget] systemic %s %s/%s n=%d owner=%s (%s %s %.2f) regression_of=%s",
+			s.ID, s.Project, s.ReasonCode, s.Instances, s.Attribution.Owner, s.Attribution.OwnerRule,
+			s.Attribution.Dimension, s.Attribution.Share, s.RegressionOf)
+	}
 }
 
 // ackNotifier is the push channel the ACK sanctions use (*SessionRegistry in
