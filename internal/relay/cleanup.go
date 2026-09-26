@@ -344,6 +344,7 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 				evaluateObligations(database, registry, now)
 				evaluateClassBudgets(database, registry, now)
 				evaluateExceptionLadders(database, registry, now)
+				evaluateCoherence(database, registry, now)
 			}
 		}
 	}()
@@ -407,6 +408,34 @@ func evaluateClassBudgets(database *db.DB, _ ackNotifier, now time.Time) {
 		log.Printf("[class-budget] systemic %s %s/%s n=%d owner=%s (%s %s %.2f) regression_of=%s",
 			s.ID, s.Project, s.ReasonCode, s.Instances, s.Attribution.Owner, s.Attribution.OwnerRule,
 			s.Attribution.Dimension, s.Attribution.Share, s.RegressionOf)
+	}
+}
+
+// evaluateCoherence runs the knowledge coherence sweep (design e731f3c9 T1):
+// rollouts for breaking / narrowing / retraction changes, one reassess
+// obligation per active consumer, closure by maintenance condition, reboot or
+// lease expiry, and one supervisor rung on a breach (never the human).
+// coherence_mode off skips; advisory (default) never refuses anything.
+func evaluateCoherence(database *db.DB, notifier ackNotifier, now time.Time) {
+	if database.GetSetting(db.SettingCoherenceMode) == db.CoherenceModeOff {
+		return
+	}
+	rep, err := database.EvaluateCoherence(now)
+	if err != nil {
+		log.Printf("[coherence] %v", err)
+	}
+	for _, n := range rep.Notices {
+		meta := fmt.Sprintf(`{"obligation_id":%q}`, n.ObligationID)
+		msg, _, err := database.InsertMessageWithDeliveries(n.Project, "relay", n.To, "notification", n.Subject, n.Body, meta,
+			"P2", -1, nil, nil, []string{n.To}, "do")
+		if err != nil {
+			log.Printf("[coherence] notice %s: %v", n.ObligationID, err)
+			continue
+		}
+		notifier.Notify(n.Project, n.To, "relay", n.Subject, msg.ID)
+	}
+	if rep.Rollouts > 0 || rep.Closed > 0 || rep.Committed > 0 {
+		log.Printf("[coherence] rollouts=%d obligations=%d closed=%d committed=%d", rep.Rollouts, rep.Opened, rep.Closed, rep.Committed)
 	}
 }
 

@@ -38,6 +38,11 @@ func (h *Handlers) HandleObligationsMine(ctx context.Context, req mcp.CallToolRe
 		return toolResultError(fmt.Sprintf("failed to list obligations: %v", err)), nil
 	}
 	obs = append(obs, answers...)
+	knowledge, err := h.db.MyCoherenceObligations(project, agent)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to list obligations: %v", err)), nil
+	}
+	obs = append(obs, knowledge...)
 	return h.resultJSONTracked(project, agent, "obligations_mine", map[string]any{"obligations": obs, "count": len(obs)})
 }
 
@@ -51,6 +56,13 @@ func (h *Handlers) HandleObligationDischarge(ctx context.Context, req mcp.CallTo
 		return validationError(CodeInvalidArgument, "id is required"), nil
 	}
 	ok, reason, err := h.db.DischargeTaskObligation(project, id, agent, req.GetString("evidence", ""), h.db.Now())
+	if err == nil && !ok && reason == "unknown obligation" {
+		// A knowledge reassess obligation (coherence): discharging it means
+		// "prepared". Flush buffered recalls first so a get_memory made just
+		// before counts as having read the new version.
+		h.flushRecalls()
+		ok, reason, err = h.db.DischargeReassess(project, id, agent, req.GetString("evidence", ""), h.db.Now())
+	}
 	if err == nil && !ok && reason == "unknown obligation" {
 		// Not a task obligation: an answer obligation re-checks the bearer's reply.
 		ok, reason, err = h.db.DischargeAnswerObligation(project, id, agent, req.GetString("evidence", ""), h.db.Now())

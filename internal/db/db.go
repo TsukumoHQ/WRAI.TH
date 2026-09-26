@@ -1124,6 +1124,10 @@ func migrate(conn *sql.DB) error {
 	// was served. Side tables only. After knowledge_log: snapshots read its head rev.
 	migrateConsumption(conn)
 
+	// Knowledge coherence rollouts (design e731f3c9). After knowledge_log and
+	// consumption: the cursor starts at the log head, holders come from heads.
+	migrateCoherence(conn)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,
