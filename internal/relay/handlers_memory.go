@@ -61,7 +61,11 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 			basedOn, causal = cached, "cache"
 		}
 	}
-	mem, err := h.db.SetMemoryWith(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert, db.SetMemoryOpts{BasedOn: basedOn})
+	// change_class is the writer's declared class for the knowledge_log
+	// (design af783f93); the relay's override checks decide the effective one.
+	changeClass := req.GetString("change_class", "")
+	mem, err := h.db.SetMemoryWith(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert,
+		db.SetMemoryOpts{BasedOn: basedOn, Causal: causal, ChangeClass: changeClass})
 	if errors.Is(err, db.ErrBasedOnMismatch) {
 		if causal == "arg" {
 			return validationError(CodeInvalidArgument, err.Error()), nil
@@ -69,7 +73,11 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 		// A cached read that no longer resolves degrades to legacy, never to
 		// a refused write or a false conflict.
 		causal = "none"
-		mem, err = h.db.SetMemoryWith(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert, db.SetMemoryOpts{})
+		mem, err = h.db.SetMemoryWith(project, agent, key, value, tagsJSON, scope, confidence, layer, upsert,
+			db.SetMemoryOpts{Causal: causal, ChangeClass: changeClass})
+	}
+	if errors.Is(err, db.ErrInvalidChangeClass) {
+		return validationError(CodeInvalidArgument, err.Error()), nil
 	}
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to set memory: %v", err)), nil
@@ -516,4 +524,23 @@ func memoryIDs(mems []models.Memory) []string {
 		ids[i] = mems[i].ID
 	}
 	return ids
+}
+
+// HandleKnowledgeDelta returns the non-editorial knowledge changes after
+// since_rev for the project (its own keys plus global ones): {head_rev,
+// changes, compacted}. Read-only (RO pool); compacted=true means history below
+// the watermark was compacted, the delta is still state-complete (design
+// af783f93 §5.2), so the agent re-reads what it holds.
+func (h *Handlers) HandleKnowledgeDelta(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	since := req.GetInt("since_rev", 0)
+	if since < 0 {
+		return validationError(CodeInvalidArgument, "since_rev must be >= 0"), nil
+	}
+	delta, err := h.db.KnowledgeDelta(project, int64(since), false)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("knowledge delta: %v", err)), nil
+	}
+	return h.resultJSONTracked(project, agent, "knowledge_delta", delta)
 }

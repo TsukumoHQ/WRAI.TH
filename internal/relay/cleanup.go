@@ -182,8 +182,9 @@ func pruneStaleBackups(database *db.DB, keep int, minAge time.Duration) {
 // ticks. Extracting it (with runCleanupTick) lets tests drive one tick body
 // directly without a running goroutine or a real ticker.
 type cleanupState struct {
-	lastBackup        time.Time // first snapshot fires BackupInterval after this
-	lastRollupCatchup string    // UTC day of the last full-window rollup ("" => run next tick)
+	lastBackup           time.Time // first snapshot fires BackupInterval after this
+	lastRollupCatchup    string    // UTC day of the last full-window rollup ("" => run next tick)
+	lastKnowledgeCompact time.Time // knowledge_log compaction runs at most once per KnowledgeCompactInterval
 }
 
 // StartCleanup runs a background goroutine that marks stale agents as inactive.
@@ -297,6 +298,10 @@ func runCleanupTick(database *db.DB, st *cleanupState) {
 	} else if purged > 0 {
 		log.Printf("purged %d old deadletter record(s)", purged)
 	}
+	if time.Since(st.lastKnowledgeCompact) >= KnowledgeCompactInterval {
+		compactKnowledgeLogs(database, time.Now())
+		st.lastKnowledgeCompact = time.Now()
+	}
 	database.Optimize()
 
 	if time.Since(st.lastBackup) >= BackupInterval {
@@ -342,6 +347,48 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 			}
 		}
 	}()
+}
+
+// KnowledgeCompactInterval bounds knowledge_log compaction to one pass per
+// hour: it opens one writer tx per project, and rows only become eligible
+// after knowledge_min_compaction_lag (days), so a per-tick pass buys nothing.
+const KnowledgeCompactInterval = time.Hour
+
+// compactKnowledgeLogs compacts the knowledge_log of every project, plus the
+// global ('*') keys, keeping rows younger than knowledge_min_compaction_lag
+// (default 30 d, clamp 7..365 d; design af783f93 §5.1). Idempotent: a second
+// pass over the same state removes nothing. Returns the rows removed.
+func compactKnowledgeLogs(database *db.DB, now time.Time) int64 {
+	lag := database.SettingDuration("knowledge_min_compaction_lag", 30*24*time.Hour, 7*24*time.Hour, 365*24*time.Hour)
+	// Every known project (activity-derived and the projects table, archived
+	// included) plus '*' for global keys. A name with no log rows is a no-op tx.
+	seen := map[string]bool{"*": true}
+	targets := []string{"*"}
+	active, err := database.ListProjectsFiltered(true)
+	if err != nil {
+		log.Printf("knowledge compaction: list projects: %v", err)
+		return 0
+	}
+	named, _ := database.ProjectNames()
+	for _, p := range append(active, named...) {
+		if !seen[p] {
+			seen[p] = true
+			targets = append(targets, p)
+		}
+	}
+	var total int64
+	for _, p := range targets {
+		n, err := database.CompactKnowledgeLog(p, lag, now)
+		if err != nil {
+			log.Printf("knowledge compaction %s: %v", p, err)
+			continue
+		}
+		total += n
+	}
+	if total > 0 {
+		log.Printf("knowledge compaction: removed %d row(s)", total)
+	}
+	return total
 }
 
 // evaluateClassBudgets opens one systemic exception per exception class over

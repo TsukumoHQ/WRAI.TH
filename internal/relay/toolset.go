@@ -137,7 +137,7 @@ var toolCategories = []struct{ name, summary string }{
 	{"conversations", "multi-agent threads: create, list, get messages, invite, leave, archive"},
 	{"tasks", "task lifecycle: dispatch, claim, start, review, complete, block, resume, cancel, get, list, update, move, archive, batch ops"},
 	{"boards", "task boards: create, list, archive, delete"},
-	{"memory", "persistent knowledge: set, get, search, list, delete, resolve_conflict"},
+	{"memory", "persistent knowledge: set, get, search, list, delete, resolve_conflict, knowledge_delta"},
 	{"profiles", "role archetypes: register, get, list, find by skill"},
 	{"agents", "agent lifecycle: list, is_eligible, identity_check, deactivate, delete, sleep"},
 	{"teams", "teams + orgs: create, list, members, notify channels"},
@@ -211,6 +211,7 @@ func (h *Handlers) toolRegistry() []registeredTool {
 		{server.ServerTool{Tool: resolveConflictTool(), Handler: h.HandleResolveConflict}, "memory"},
 		{server.ServerTool{Tool: rememberTool(), Handler: h.HandleRemember}, "memory"},
 		{server.ServerTool{Tool: recallDecisionsTool(), Handler: h.HandleRecallDecisions}, "memory"},
+		{server.ServerTool{Tool: knowledgeDeltaTool(), Handler: h.HandleKnowledgeDelta}, "memory"},
 
 		{server.ServerTool{Tool: registerProfileTool(), Handler: h.HandleRegisterProfile}, "profiles"},
 		{server.ServerTool{Tool: getProfileTool(), Handler: h.HandleGetProfile}, "profiles"},

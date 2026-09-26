@@ -303,6 +303,7 @@ func setMemoryTool() mcp.Tool {
 		mcp.WithBoolean("upsert", mcp.Description("true (default): overwrite. false: flag a conflict if value differs.")),
 		mcp.WithString("based_on", mcp.Description("Memory id you read ('new' = expect none); auto-filled from your last get_memory. If newer exists, both stay live.")),
 		mcp.WithString("valid_until", mcp.Description("Optional ISO-8601 UTC expiry; past it reads 'stale' (hidden unless include_stale).")),
+		mcp.WithString("change_class", mcp.Description("Declared class; relay may raise it"), mcp.Enum("editorial", "additive", "narrowing", "breaking")),
 	)
 }
 
@@ -318,6 +319,16 @@ func rememberTool() mcp.Tool {
 		mcp.WithArray("tags", mcp.Description("Extra tags for search"), mcp.WithStringItems()),
 		mcp.WithString("supersedes", mcp.Description("DEC id this replaces (archives it)")),
 		mcp.WithArray("depends_on", mcp.Description("DEC ids this rests on (graph edges)"), mcp.WithStringItems()),
+	)
+}
+
+func knowledgeDeltaTool() mcp.Tool {
+	return mcp.NewTool(
+		"knowledge_delta",
+		mcp.WithDescription("Knowledge changes after since_rev (non-editorial). compacted=true: re-read."),
+		asParam,
+		projectParam,
+		mcp.WithNumber("since_rev", mcp.Description("Last head_rev seen (0 = all)")),
 	)
 }
 
