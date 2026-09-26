@@ -118,6 +118,9 @@ func migrateExceptions(conn *sql.DB) {
 		FROM integrity_quarantine`)
 	// Class budgets + the inert escalation-ladder schema (design 1111292b T1).
 	migrateClassBudgets(conn)
+	// Compiled guards (design 4d2e57a3 S1): before the backfill, because every
+	// openExceptionTx reads compiled_guards.
+	migrateGuards(conn)
 	// One-shot history backfill (design §6), behind its settings marker. After
 	// the budgets migration: budget_epoch is stamped first, and every
 	// backfilled row predates it, so history never counts toward a budget.
@@ -505,6 +508,11 @@ func openExceptionTx(q excQ, e exceptionOpen) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("insert exception: %w", err)
 	}
+	// Compiled guards evaluate on the same tx: a failed hit write fails the
+	// producer's transition with it (design 4d2e57a3 §0).
+	if err := evaluateOpenGuardsTx(q, id, e.At); err != nil {
+		return "", fmt.Errorf("exception guards: %w", err)
+	}
 	return id, nil
 }
 
@@ -531,7 +539,17 @@ func resolveOpenTx(q excQ, ref string, sources []string, r exceptionResolution) 
 	if err != nil {
 		return 0, fmt.Errorf("resolve exception: %w", err)
 	}
-	return res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil || n == 0 {
+		return n, err
+	}
+	// Settle the guard hits of what just resolved, in the same tx (§5.1).
+	sph, sargs := inPlaceholders(sources)
+	sargs = append([]interface{}{ref}, sargs...)
+	if err := settleGuardHitsTx(q, r.At, `e.source_ref = ? AND e.source_kind IN (`+sph+`)`, sargs...); err != nil {
+		return 0, fmt.Errorf("settle guard hits: %w", err)
+	}
+	return n, nil
 }
 
 // excResolver derives resolved_by from who moved the task, never from a claim:

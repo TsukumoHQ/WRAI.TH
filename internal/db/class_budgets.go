@@ -226,9 +226,10 @@ func (d *DB) EvaluateClassBudgets(now time.Time) ([]SystemicOpened, error) {
 		return nil, nil
 	}
 	from := laterTS(epoch, now.Add(-time.Duration(maxPeriod)*time.Second).UTC().Format(memoryTimeFmt))
-	rows, err := d.ro().Query(`SELECT project, kind, reason_code, opened_at FROM exceptions
+	// An instance an active suppress guard acted on never counts (4d2e57a3 §4.1).
+	rows, err := d.ro().Query(`SELECT project, kind, reason_code, opened_at FROM exceptions e
 		WHERE cause_id IS NULL AND source_kind <> ? AND retry_class <> 'benign' AND reason_code <> ?
-		  AND opened_at >= ? ORDER BY project, kind, reason_code, opened_at`,
+		  AND opened_at >= ? AND NOT `+fmt.Sprintf(guardSuppressedSQL, "e")+` ORDER BY project, kind, reason_code, opened_at`,
 		excSourceClassBudget, excUnclassified, from)
 	if err != nil {
 		return nil, fmt.Errorf("class budgets scan: %w", err)
@@ -288,7 +289,8 @@ func (d *DB) linkOpenSystemics(epoch string) error {
 		WHERE i.cause_id IS NULL AND i.source_kind <> 'class_budget' AND i.opened_at >= ?
 		  AND i.opened_at >= json_extract(s.evidence_json, '$.window_start')`
 	var n int
-	if err := d.ro().QueryRow(`SELECT COUNT(*) `+pending, epoch).Scan(&n); err != nil {
+	pendingSQL := `SELECT COUNT(*) ` + pending + ` AND NOT ` + fmt.Sprintf(guardSuppressedSQL, "i")
+	if err := d.ro().QueryRow(pendingSQL, epoch).Scan(&n); err != nil {
 		return fmt.Errorf("class budgets link check: %w", err)
 	}
 	if n == 0 {
@@ -308,10 +310,12 @@ func (d *DB) linkOpenSystemics(epoch string) error {
 // linkInstancesSQL sets cause_id on every unlinked instance of an open
 // systemic's (project, reason_code) inside that systemic's window. The
 // correlated form works whichever writer opened the systemic.
-const linkInstancesSQL = `UPDATE exceptions SET cause_id = (
+// A suppressed instance is never linked: it was not counted.
+var linkInstancesSQL = `UPDATE exceptions SET cause_id = (
 		SELECT s.id FROM exceptions s WHERE s.source_kind = 'class_budget' AND s.status = 'open'
 		  AND s.project = exceptions.project AND s.reason_code = exceptions.reason_code)
 	WHERE cause_id IS NULL AND source_kind <> 'class_budget'
+	  AND NOT ` + fmt.Sprintf(guardSuppressedSQL, "exceptions") + `
 	  AND EXISTS (SELECT 1 FROM exceptions s WHERE s.source_kind = 'class_budget' AND s.status = 'open'
 	    AND s.project = exceptions.project AND s.reason_code = exceptions.reason_code
 	    AND exceptions.opened_at >= json_extract(s.evidence_json, '$.window_start'))`
@@ -408,7 +412,7 @@ func (d *DB) budgetInstances(project, code, windowStart string) ([]budgetInstanc
 			COALESCE(t.profile_slug, ''), COALESCE(t.dispatched_by, '')
 		FROM exceptions e LEFT JOIN tasks t ON t.id = e.task_id
 		WHERE e.project = ? AND e.reason_code = ? AND e.cause_id IS NULL AND e.source_kind <> ?
-		  AND e.retry_class <> 'benign' AND e.opened_at >= ?
+		  AND e.retry_class <> 'benign' AND e.opened_at >= ? AND NOT `+fmt.Sprintf(guardSuppressedSQL, "e")+`
 		ORDER BY e.opened_at`, project, code, excSourceClassBudget, windowStart)
 	if err != nil {
 		return nil, fmt.Errorf("budget instances: %w", err)
