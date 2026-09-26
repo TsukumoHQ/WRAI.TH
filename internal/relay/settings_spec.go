@@ -236,7 +236,9 @@ func validateValue(s settingSpec, val string) string {
 	// attribution_share is a ratio; the contract has no float kind, so its
 	// range is a per-key rule matching the reader (0 < v <= 1).
 	if s.Key == "attribution_share" {
-		if v, err := strconv.ParseFloat(val, 64); err != nil || v <= 0 || v > 1 {
+		// Written as the reader's accept test negated: NaN fails every
+		// comparison, so it is refused here as the reader would ignore it.
+		if v, err := strconv.ParseFloat(val, 64); err != nil || !(v > 0 && v <= 1) {
 			return "must be a number in (0, 1]"
 		}
 		return ""

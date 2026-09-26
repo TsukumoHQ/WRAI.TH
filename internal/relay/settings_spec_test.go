@@ -386,7 +386,8 @@ func TestSettingsSpecNewNormKeys(t *testing.T) {
 	bad := []struct{ key, val string }{
 		{"ack_manager_age", "49h"}, {"ack_human_age", "30s"}, {"answer_reply_age", "25h"}, {"answer_role_age", "0s"},
 		{"class_budget_mode", "bogus"}, {"attribution_share", "0"}, {"attribution_share", "1.5"},
-		{"attribution_share", "abc"}, {"knowledge_min_compaction_lag", "24h"},
+		{"attribution_share", "abc"}, {"attribution_share", "NaN"}, {"attribution_share", "-0.1"},
+		{"attribution_share", "Inf"}, {"knowledge_min_compaction_lag", "24h"},
 	}
 	for _, b := range bad {
 		before := r.DB.GetSetting(b.key)
@@ -399,6 +400,12 @@ func TestSettingsSpecNewNormKeys(t *testing.T) {
 		}
 		if got := r.DB.GetSetting(b.key); got != before {
 			t.Errorf("PUT %s=%s changed the stored value to %q", b.key, b.val, got)
+		}
+	}
+	// The bounds of attribution_share's (0, 1] are accepted.
+	for _, v := range []string{"0.6", "1"} {
+		if w := doAPI(r, http.MethodPut, "/settings", `{"attribution_share":"`+v+`"}`); w.Code != http.StatusOK {
+			t.Errorf("PUT attribution_share=%s: status %d, want 200", v, w.Code)
 		}
 	}
 	// budget_epoch is migration-stamped: listed, never writable.
