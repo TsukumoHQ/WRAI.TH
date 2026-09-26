@@ -116,6 +116,9 @@ func (h *Handlers) HandleSetMemory(ctx context.Context, req mcp.CallToolRequest)
 		action = "conflict"
 		h.routeMemoryConflict(result, project, agent, key, scope, layer, causal, upsert, mem)
 	}
+	if outcome == "fresh" {
+		h.overlapHint(result, mem)
+	}
 	h.events.Emit(MCPEvent{Type: "memory", Action: action, Agent: agent, Project: project, Label: key})
 
 	return h.resultJSONTracked(project, agent, "set_memory", result)
@@ -252,7 +255,32 @@ func (h *Handlers) HandleRemember(ctx context.Context, req mcp.CallToolRequest) 
 		return toolResultError(fmt.Sprintf("failed to remember decision: %v", err)), nil
 	}
 	h.events.Emit(MCPEvent{Type: "memory", Action: "decision", Agent: agent, Project: project, Label: mem.Key})
-	return h.resultJSONTracked(project, agent, "remember", map[string]any{"decision": mem})
+	result := map[string]any{"decision": mem}
+	if supersedes == "" {
+		h.overlapHint(result, mem)
+	}
+	return h.resultJSONTracked(project, agent, "remember", result)
+}
+
+// overlapHint is the D1 write-time hint (design 8d107daa §3): a fresh
+// constraints/decision write that overlaps a live memory gets the overlaps,
+// and a supersede suggestion for a duplicate candidate, in its result. One
+// read-only query; the write already committed and is never refused.
+func (h *Handlers) overlapHint(result map[string]any, mem *models.Memory) {
+	if mem == nil || !isDoctrineLayer(mem.Layer) || h.db.GetSetting(db.SettingContradictionMode) == db.ContradictionModeOff {
+		return
+	}
+	ov, suggestion, err := h.db.OverlapHint(mem.ID)
+	if err != nil {
+		log.Printf("[memory] overlap hint %s: %v", mem.Key, err)
+		return
+	}
+	if len(ov) > 0 {
+		result["overlaps"] = ov
+	}
+	if suggestion != "" {
+		result["suggestion"] = suggestion
+	}
 }
 
 // HandleRecallDecisions returns the project's accepted (non-superseded) decisions.

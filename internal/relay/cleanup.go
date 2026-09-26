@@ -345,6 +345,7 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 				evaluateClassBudgets(database, registry, now)
 				evaluateExceptionLadders(database, registry, now)
 				evaluateCoherence(database, registry, now)
+				evaluateContradictions(database, now)
 			}
 		}
 	}()
@@ -717,4 +718,23 @@ func releaseHeldTasks(h *Handlers, now time.Time) int {
 		log.Printf("held tasks: announced %d released task(s)", announced)
 	}
 	return announced
+}
+
+// evaluateContradictions runs the contradiction sweep (design 8d107daa T1):
+// the one-shot audited pass over existing HIGH memories on first run, then
+// the knowledge_log cursor, recording candidate conflicts and implicit
+// precedence edges; lease expiry; escalation after two failed claims into an
+// exception (the class-budget ladder, never a direct message).
+// contradiction_mode off skips; detect (default) records.
+func evaluateContradictions(database *db.DB, now time.Time) {
+	if database.GetSetting(db.SettingContradictionMode) == db.ContradictionModeOff {
+		return
+	}
+	rep, err := database.EvaluateContradictions(now)
+	if err != nil {
+		log.Printf("[contradictions] %v", err)
+	}
+	if rep.Conflicts > 0 || rep.Edges > 0 || rep.Expired > 0 || rep.Escalated > 0 {
+		log.Printf("[contradictions] conflicts=%d edges=%d expired=%d escalated=%d", rep.Conflicts, rep.Edges, rep.Expired, rep.Escalated)
+	}
 }

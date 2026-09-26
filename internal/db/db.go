@@ -1128,6 +1128,11 @@ func migrate(conn *sql.DB) error {
 	// consumption: the cursor starts at the log head, holders come from heads.
 	migrateCoherence(conn)
 
+	// Gated contradiction detection (design 8d107daa). After knowledge_log,
+	// consumption and coherence: its cursor starts at the log head, and the
+	// retractions its T2 resolutions write have a consumer.
+	migrateContradictions(conn)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,
