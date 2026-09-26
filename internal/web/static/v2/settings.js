@@ -73,6 +73,13 @@ const LABELS = {
   activity_waiting_seconds: { label: 'Activity: waiting (s)', help: 'seconds before an agent reads as waiting' },
   activity_exit_seconds: { label: 'Activity: exit (s)', help: 'seconds before an agent reads as exited' },
   cost_default_model: { label: 'Default cost model', help: 'model id used when a token row has none' },
+  ack_manager_age: { label: 'Ack manager age', help: 'unclaimed task escalates to the dispatcher\'s manager' },
+  ack_human_age: { label: 'Ack human age', help: 'unclaimed task escalates to the human' },
+  answer_reply_age: { label: 'Answer reply age', help: 'deadline for a recipient to answer an ask/decide' },
+  answer_role_age: { label: 'Answer role age', help: 'deadline once the ask escalates to the recipient\'s lead' },
+  class_budget_mode: { label: 'Class budget mode', help: 'off | shadow (record only) | on' },
+  attribution_share: { label: 'Attribution share', help: 'number in (0, 1]: min share to blame one dimension' },
+  knowledge_min_compaction_lag: { label: 'Knowledge compaction lag', help: 'knowledge_log rows younger than this are kept' },
   // Timing (read-only consts, shown for transparency)
   writer_timeout: { label: 'Writer timeout', help: 'must stay below the referential scan timeout' },
   referential_scan_timeout: { label: 'Referential scan timeout', help: 'writer timeout must stay below this' },

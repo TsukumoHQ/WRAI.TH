@@ -2,11 +2,15 @@ package relay
 
 import (
 	"bytes"
+	"database/sql"
 	"log"
 	"net/http"
 	"os"
 	"strings"
 	"testing"
+	"time"
+
+	"agent-relay/internal/db"
 )
 
 // getSettingEntry returns the settings[] metadata entry for key from a GET
@@ -30,7 +34,7 @@ func getSettingEntry(t *testing.T, body map[string]any, key string) (map[string]
 }
 
 // TestSettingsSpecAllowlistDerived (T2a AC1): writableKeys() is the spec-derived
-// full PUT allowlist (24 = 9 legacy + 15 Operational), contains no evil_key;
+// full PUT allowlist (31 = 9 legacy + 22 Operational), contains no evil_key;
 // apiPutSetting consults the spec — a legacy key and an Operational key both
 // apply via PUT; spec keys are unique and every group is valid.
 func TestSettingsSpecAllowlistDerived(t *testing.T) {
@@ -46,6 +50,8 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 		"backup_keep", "reviewer_ttl_days", "foreign_backup_min_age",
 		"activity_idle_seconds", "activity_waiting_seconds",
 		"activity_exit_seconds", "cost_default_model",
+		"ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age",
+		"class_budget_mode", "attribution_share", "knowledge_min_compaction_lag",
 	}
 
 	wk := writableKeys()
@@ -53,8 +59,8 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 	for _, k := range append(append([]string{}, legacy...), operational...) {
 		wantWK[k] = true
 	}
-	if len(wk) != 24 || len(wantWK) != 24 {
-		t.Fatalf("writableKeys size %d, expected set size %d, want 24", len(wk), len(wantWK))
+	if len(wk) != 31 || len(wantWK) != 31 {
+		t.Fatalf("writableKeys size %d, expected set size %d, want 31", len(wk), len(wantWK))
 	}
 	for k := range wantWK {
 		if !wk[k] {
@@ -349,5 +355,121 @@ func TestGetEchoesUnparseableStoredDurationRaw(t *testing.T) {
 	}
 	if e["value"] != "garbage" || e["source"] != "setting" {
 		t.Errorf("garbage stored = {value:%v source:%v}, want {garbage, setting}", e["value"], e["source"])
+	}
+}
+
+// newNormKeys are the settings the norms added since v1.21 read (task 00734b64).
+var newNormKeys = []string{
+	"ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age",
+	"class_budget_mode", "attribution_share", "knowledge_min_compaction_lag",
+}
+
+// TestSettingsSpecNewNormKeys (00734b64 AC1 + AC3): each new key is PUT-writable
+// and reads back equal; out-of-range values are refused with 400 naming the key
+// and nothing is stored; GET lists every key in the operational group, and
+// budget_epoch is listed read-only.
+func TestSettingsSpecNewNormKeys(t *testing.T) {
+	r := testRelay(t)
+	valid := map[string]string{
+		"ack_manager_age": "2h", "ack_human_age": "6h", "answer_reply_age": "30m", "answer_role_age": "3h",
+		"class_budget_mode": "on", "attribution_share": "0.75", "knowledge_min_compaction_lag": "240h",
+	}
+	for _, k := range newNormKeys {
+		w := doAPI(r, http.MethodPut, "/settings", `{"`+k+`":"`+valid[k]+`"}`)
+		if w.Code != http.StatusOK {
+			t.Fatalf("PUT %s=%s: status %d\nbody: %s", k, valid[k], w.Code, w.Body.String())
+		}
+		if got := r.DB.GetSetting(k); got != valid[k] {
+			t.Errorf("%s read back %q, want %q", k, got, valid[k])
+		}
+	}
+	bad := []struct{ key, val string }{
+		{"ack_manager_age", "49h"}, {"ack_human_age", "30s"}, {"answer_reply_age", "25h"}, {"answer_role_age", "0s"},
+		{"class_budget_mode", "bogus"}, {"attribution_share", "0"}, {"attribution_share", "1.5"},
+		{"attribution_share", "abc"}, {"knowledge_min_compaction_lag", "24h"},
+	}
+	for _, b := range bad {
+		before := r.DB.GetSetting(b.key)
+		w := doAPI(r, http.MethodPut, "/settings", `{"`+b.key+`":"`+b.val+`"}`)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("PUT %s=%s: status %d, want 400", b.key, b.val, w.Code)
+		}
+		if j := decodeJSON(t, w); j["key"] != b.key {
+			t.Errorf("PUT %s=%s: 400 names key %v", b.key, b.val, j["key"])
+		}
+		if got := r.DB.GetSetting(b.key); got != before {
+			t.Errorf("PUT %s=%s changed the stored value to %q", b.key, b.val, got)
+		}
+	}
+	// budget_epoch is migration-stamped: listed, never writable.
+	if w := doAPI(r, http.MethodPut, "/settings", `{"budget_epoch":"2026-01-01T00:00:00Z"}`); w.Code != http.StatusForbidden {
+		t.Errorf("PUT budget_epoch: status %d, want 403", w.Code)
+	}
+	body := decodeJSON(t, doAPI(r, http.MethodGet, "/settings", ""))
+	for _, k := range append(append([]string{}, newNormKeys...), "budget_epoch") {
+		e, ok := getSettingEntry(t, body, k)
+		if !ok {
+			t.Fatalf("GET /settings does not list %s", k)
+		}
+		if e["group"] != groupOperational {
+			t.Errorf("%s group = %v, want operational", k, e["group"])
+		}
+		if wantW := k != "budget_epoch"; e["writable"] != wantW {
+			t.Errorf("%s writable = %v, want %v", k, e["writable"], wantW)
+		}
+	}
+}
+
+// TestSettingsSpecClampsMatchReaders (00734b64 AC2): the spec's bounds and
+// defaults equal what each reader applies, so the panel can never offer a value
+// the relay silently clamps. Norm-backed ages are checked against the norms row
+// the obligations engine reads; the ACK ladder defaults against its constants;
+// the budget mode against the db enum.
+func TestSettingsSpecClampsMatchReaders(t *testing.T) {
+	r := testRelay(t)
+	raw, err := sql.Open("sqlite3", "file:"+r.DB.Path()+"?mode=ro")
+	if err != nil {
+		t.Fatalf("open ro: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	secs := func(d string) int64 {
+		v, err := time.ParseDuration(d)
+		if err != nil {
+			t.Fatalf("parse %q: %v", d, err)
+		}
+		return int64(v / time.Second)
+	}
+	for _, k := range []string{"ack_notify_age", "ack_escalate_age", "ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age"} {
+		var def, mn, mx int64
+		if err := raw.QueryRow(`SELECT deadline_default_s, deadline_min_s, deadline_max_s FROM norms WHERE deadline_setting = ?`, k).
+			Scan(&def, &mn, &mx); err != nil {
+			t.Fatalf("norms row for %s: %v", k, err)
+		}
+		s := specByKey[k]
+		if secs(s.Default) != def || secs(s.Min) != mn || secs(s.Max) != mx {
+			t.Errorf("%s spec %s [%s..%s] != norms reader %ds [%ds..%ds]", k, s.Default, s.Min, s.Max, def, mn, mx)
+		}
+	}
+	for k, c := range map[string]time.Duration{
+		"ack_notify_age": ACKNotifyAge, "ack_escalate_age": ACKEscalateAge,
+		"ack_manager_age": ACKManagerAge, "ack_human_age": ACKHumanAge,
+	} {
+		if specByKey[k].Default != dur(c) {
+			t.Errorf("%s spec default %s != reader constant %s", k, specByKey[k].Default, dur(c))
+		}
+	}
+	mode := specByKey[db.SettingClassBudgetMode]
+	if strings.Join(mode.Enum, ",") != strings.Join([]string{db.ClassBudgetModeOff, db.ClassBudgetModeShadow, db.ClassBudgetModeOn}, ",") ||
+		mode.Default != db.ClassBudgetModeShadow {
+		t.Errorf("class_budget_mode spec %v/%s != db enum", mode.Enum, mode.Default)
+	}
+	// Readers outside this package's reach: attribution_share (db/class_budgets.go,
+	// default 0.6, accepts 0 < v <= 1) and knowledge_min_compaction_lag
+	// (compactKnowledgeLogs, knowledge S2: 30 d, clamp 7..365 d).
+	if s := specByKey["attribution_share"]; s.Default != "0.6" || validateValue(s, "1") != "" || validateValue(s, "0") == "" {
+		t.Errorf("attribution_share spec drifted: %+v", s)
+	}
+	if s := specByKey["knowledge_min_compaction_lag"]; s.Min != dur(7*24*time.Hour) || s.Max != dur(365*24*time.Hour) || s.Default != dur(30*24*time.Hour) {
+		t.Errorf("knowledge_min_compaction_lag spec %s [%s..%s], want 720h [168h..8760h]", s.Default, s.Min, s.Max)
 	}
 }

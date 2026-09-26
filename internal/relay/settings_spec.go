@@ -108,6 +108,18 @@ var settingSpecs = []settingSpec{
 	{Key: "activity_waiting_seconds", Group: groupOperational, Kind: kindInt, Source: "db", Writable: true, Min: "5", Max: "86400", Default: "10"},
 	{Key: "activity_exit_seconds", Group: groupOperational, Kind: kindInt, Source: "db", Writable: true, Min: "5", Max: "86400", Default: "300"},
 	{Key: "cost_default_model", Group: groupOperational, Kind: kindString, Source: "db", Writable: true, Default: "opus"},
+	// Norms since v1.21 (obligations, answer chain, class budgets, knowledge
+	// log). Clamps and defaults mirror the readers: ack_* in evaluateObligations,
+	// answer_* in the norms table row the obligations engine reads, the budget
+	// knobs in db/class_budgets.go, the compaction lag in compactKnowledgeLogs.
+	// TestSettingsSpecClampsMatchReaders pins each pair.
+	{Key: "ack_manager_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Minute), Max: dur(48 * time.Hour), Default: dur(90 * time.Minute), Note: "ACK rung 2: dispatcher's manager"},
+	{Key: "ack_human_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Minute), Max: dur(48 * time.Hour), Default: dur(4 * time.Hour), Note: "ACK rung 3: the human"},
+	{Key: "answer_reply_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Minute), Max: dur(24 * time.Hour), Default: dur(time.Hour), Note: "ask/decide: recipient's answer deadline"},
+	{Key: "answer_role_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Minute), Max: dur(48 * time.Hour), Default: dur(2 * time.Hour), Note: "ask/decide: recipient's lead deadline"},
+	{Key: "class_budget_mode", Group: groupOperational, Kind: kindEnum, Source: "db", Writable: true, Enum: []string{"off", "shadow", "on"}, Default: "shadow"},
+	{Key: "attribution_share", Group: groupOperational, Kind: kindString, Source: "db", Writable: true, Default: "0.6", Note: "number in (0, 1]: min share to blame one dimension"},
+	{Key: "knowledge_min_compaction_lag", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(7 * 24 * time.Hour), Max: dur(365 * 24 * time.Hour), Default: dur(30 * 24 * time.Hour), Note: "knowledge_log rows younger than this are never compacted"},
 
 	// ---- Operational RO (destructive toggles / dynamic keys stay out of the panel) ----
 	{Key: "limbo_sweep_apply", Group: groupOperational, Kind: kindBool, Source: "db", Default: "0", Note: "destructive; env/SQL only"},
@@ -115,6 +127,7 @@ var settingSpecs = []settingSpec{
 	{Key: "cron_schedules", Group: groupOperational, Kind: kindJSON, Source: "db"},
 	{Key: "github_webhook_project", Group: groupOperational, Kind: kindString, Source: "db"},
 	{Key: "signal_webhook_project", Group: groupOperational, Kind: kindString, Source: "db"},
+	{Key: "budget_epoch", Group: groupOperational, Kind: kindString, Source: "db", Note: "stamped by migration; exceptions opened before it never count toward a class budget"},
 
 	// ---- Timing (RO, compile-time consts) ----
 	{Key: "purge_interval", Group: groupTiming, Kind: kindDuration, Source: "code", Default: dur(5 * time.Minute)},
@@ -142,7 +155,7 @@ var specByKey = func() map[string]settingSpec {
 }()
 
 // writableKeys is the full PUT allowlist derived from the spec: every key with
-// Writable=true (the 9 legacy panel keys + the 15 Operational knobs).
+// Writable=true (the 9 legacy panel keys + the 22 Operational knobs).
 func writableKeys() map[string]bool {
 	m := make(map[string]bool, len(settingSpecs))
 	for _, s := range settingSpecs {
@@ -220,6 +233,14 @@ func normalizeStoredValue(s settingSpec, raw string) string {
 // validateValue checks a single non-null value against its spec's kind + bounds.
 // Returns "" when valid, else a human-readable detail for the 400 response.
 func validateValue(s settingSpec, val string) string {
+	// attribution_share is a ratio; the contract has no float kind, so its
+	// range is a per-key rule matching the reader (0 < v <= 1).
+	if s.Key == "attribution_share" {
+		if v, err := strconv.ParseFloat(val, 64); err != nil || v <= 0 || v > 1 {
+			return "must be a number in (0, 1]"
+		}
+		return ""
+	}
 	switch s.Kind {
 	case kindBool:
 		if val != "0" && val != "1" {
