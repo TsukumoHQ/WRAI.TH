@@ -154,6 +154,89 @@ func TestCascadeSkipsLiveRacedClaim(t *testing.T) {
 	if leaseHolder(t, d, "t-raced") != "newowner" {
 		t.Error("raced task must keep its live holder")
 	}
+	// The release itself re-checks the holder it listed: a CAS on the stale
+	// holder is a lost race and writes nothing, exception included.
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	if d.releaseDeactivatedLease("t-raced", "p1", "holder", "in-progress", now, nil) {
+		t.Error("release on a stale holder reported success, want a lost CAS")
+	}
+	if s := taskStatus(t, d, "t-raced"); s != "in-progress" || leaseHolder(t, d, "t-raced") != "newowner" {
+		t.Errorf("raced task status=%s holder=%s, want in-progress/newowner", s, leaseHolder(t, d, "t-raced"))
+	}
+	if n := len(excRowsFor(t, d, "t-raced")); n != 0 {
+		t.Errorf("exceptions for raced task = %d, want 0", n)
+	}
+}
+
+// TestCascadeReleaseOpensResolvedException covers P5b: the cascade's lease
+// release writes one lease_expired exception (code agent_deactivated), opened
+// and resolved at once as requeued by self.
+func TestCascadeReleaseOpensResolvedException(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedProfile(t, c, "p1", "backend")
+	seedAgent(t, c, "p1", "holder", "active", "backend", "", 0)
+	seedTask(t, c, "t-leased", "p1", "in-progress", "cto", "holder", "holder", "backend", "", "", false)
+	setLease(t, d, "t-leased", "holder")
+
+	if err := d.DeactivateAgent("p1", "holder"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.CascadeAgentDeactivation("p1", "holder")
+	if err != nil {
+		t.Fatalf("cascade: %v", err)
+	}
+	if s := taskStatus(t, d, "t-leased"); s != "pending" || len(res.Released) != 1 {
+		t.Fatalf("status=%s released=%d, want pending/1", s, len(res.Released))
+	}
+	rows := excRowsFor(t, d, "t-leased")
+	if len(rows) != 1 {
+		t.Fatalf("exceptions = %d, want 1", len(rows))
+	}
+	r := rows[0]
+	if r.Code != "agent_deactivated" || r.Kind != "lease_expired" || r.SourceKind != excSourceAgentCascade {
+		t.Errorf("code=%s kind=%s source=%s, want agent_deactivated/lease_expired/%s", r.Code, r.Kind, r.SourceKind, excSourceAgentCascade)
+	}
+	if r.ResolvedBy == nil || *r.ResolvedBy != "self" || r.Reason == nil || *r.Reason != "requeued" {
+		t.Errorf("resolved_by=%v resolution_reason=%v, want self/requeued", r.ResolvedBy, r.Reason)
+	}
+}
+
+// TestCascadeReleaseTxAtomic: when the exception write fails, the release
+// rolls back with it — the task keeps its status and holder and is not
+// reported as released.
+func TestCascadeReleaseTxAtomic(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedProfile(t, c, "p1", "backend")
+	seedAgent(t, c, "p1", "holder", "active", "backend", "", 0)
+	seedTask(t, c, "t-leased", "p1", "in-progress", "cto", "holder", "holder", "backend", "", "", false)
+	setLease(t, d, "t-leased", "holder")
+	if _, err := c.Exec(`DROP VIEW exception_occurrences`); err != nil {
+		t.Fatalf("drop view: %v", err)
+	}
+	if _, err := c.Exec(`DROP TABLE exceptions`); err != nil {
+		t.Fatalf("drop table: %v", err)
+	}
+
+	if err := d.DeactivateAgent("p1", "holder"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.CascadeAgentDeactivation("p1", "holder")
+	if err != nil {
+		t.Fatalf("cascade: %v", err)
+	}
+	if len(res.Released) != 0 {
+		t.Errorf("Released = %+v, want none after a failed exception write", res.Released)
+	}
+	if s := taskStatus(t, d, "t-leased"); s != "in-progress" {
+		t.Errorf("status = %s, want in-progress (rolled back)", s)
+	}
+	if h := leaseHolder(t, d, "t-leased"); h != "holder" {
+		t.Errorf("lease_holder = %q, want holder (rolled back)", h)
+	}
 }
 
 // TestReassignOnWriteMarksUnresolvedAssignee covers Phase 2 §7.1: reassigning to

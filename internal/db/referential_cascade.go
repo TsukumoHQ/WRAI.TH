@@ -46,7 +46,7 @@ func (d *DB) CascadeAgentDeactivation(project, name string) (*AgentCascade, erro
 
 	// 1. Release the agent's LEASED, non-terminal tasks -> pending (CAS-guarded).
 	rows, err := d.ro().Query(
-		`SELECT id, project, title, COALESCE(lease_holder,''), status, priority, profile_slug
+		`SELECT id, project, title, COALESCE(lease_holder,''), status, priority, profile_slug, trace_id
 		 FROM tasks
 		 WHERE project = ? AND LOWER(lease_holder) = LOWER(?)
 		   AND status IN ('accepted','in-progress','in-review')
@@ -56,11 +56,14 @@ func (d *DB) CascadeAgentDeactivation(project, name string) (*AgentCascade, erro
 	if err != nil {
 		return nil, fmt.Errorf("cascade: list leased: %w", err)
 	}
-	type cand struct{ id, project, title, holder, status, priority, profile string }
+	type cand struct {
+		id, project, title, holder, status, priority, profile string
+		traceID                                               *string
+	}
 	var leased []cand
 	for rows.Next() {
 		var c cand
-		if err := rows.Scan(&c.id, &c.project, &c.title, &c.holder, &c.status, &c.priority, &c.profile); err != nil {
+		if err := rows.Scan(&c.id, &c.project, &c.title, &c.holder, &c.status, &c.priority, &c.profile, &c.traceID); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("cascade: scan leased: %w", err)
 		}
@@ -73,17 +76,8 @@ func (d *DB) CascadeAgentDeactivation(project, name string) (*AgentCascade, erro
 	_ = rows.Close()
 
 	for _, c := range leased {
-		res, err := d.writerExec(
-			`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
-			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?, pending_since=?
-			 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,
-			now, now, c.id, c.project, c.holder, c.status,
-		)
-		if err != nil {
-			continue // best-effort; the lease sweep is the backstop
-		}
-		if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
-			continue // lost a race to a live claim/transition — correct to skip
+		if !d.releaseDeactivatedLease(c.id, c.project, c.holder, c.status, now, c.traceID) {
+			continue // lost a race to a live claim/transition, or a failed write the lease sweep backstops
 		}
 		d.auditLeaseTransfer(c.project, c.id, "relay-cascade",
 			&models.LeaseTransfer{From: c.holder, To: "", Reason: "agent-deactivated"})
@@ -151,4 +145,33 @@ func (d *DB) CascadeAgentDeactivation(project, name string) (*AgentCascade, erro
 	}
 
 	return out, nil
+}
+
+// releaseDeactivatedLease runs one cascade release and its P5b exception
+// (design 220f4f3d: opened and resolved at once, code agent_deactivated,
+// resolved_by=self, requeued) in one writer tx, like requeueExpiredLease. The
+// CAS on (id, project, lease_holder, status) decides: a lost race
+// (RowsAffected==0) writes nothing. False = not released.
+func (d *DB) releaseDeactivatedLease(id, project, holder, status, now string, traceID *string) bool {
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(
+		`UPDATE tasks SET status='pending', assigned_to=NULL, lease_holder=NULL,
+			   lease_expires_at=NULL, lease_heartbeat_at=NULL, last_activity_at=?, pending_since=?
+			 WHERE id=? AND project=? AND COALESCE(lease_holder,'')=? AND status=?`,
+		now, now, id, project, holder, status,
+	)
+	if err != nil {
+		return false
+	}
+	if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
+		return false
+	}
+	if _, err := openExceptionTx(tx, leaseExceptionOpen(project, id, holder, "agent-deactivated", now, traceID)); err != nil {
+		return false
+	}
+	return tx.Commit() == nil
 }

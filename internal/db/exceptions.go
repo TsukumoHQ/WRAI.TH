@@ -740,8 +740,8 @@ func writeDeadletterExceptionsTx(q excQ, g deadletterGroup, agents []string, res
 
 // leaseExceptionOpen is the P5 row: a dead holder's expired lease requeued by
 // the sweeper, opened and resolved at once (resolved_by=self, requeued).
-// reason is the audit reason: "expired-swept" (P5) or "agent-deactivated" (P5b,
-// backfill only in this slice).
+// reason is the audit reason: "expired-swept" (P5, the lease sweep) or
+// "agent-deactivated" (P5b, the deactivation cascade and the backfill).
 func leaseExceptionOpen(project, taskID, holder, reason, at string, traceID *string) exceptionOpen {
 	source, code, tpl := excSourceLeaseSweep, "expired_swept", "lease expired, holder dead, task requeued"
 	if reason == "agent-deactivated" {
