@@ -1112,6 +1112,10 @@ func migrate(conn *sql.DB) error {
 	// the exception_occurrences view unions it in.
 	migrateExceptions(conn)
 
+	// knowledge_log + clock + compaction watermark (design af783f93). Starts empty:
+	// no backfill (ruling af6e3a5f OQ3).
+	migrateKnowledgeLog(conn)
+
 	// Teams + Orgs
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS orgs (
 		id          TEXT PRIMARY KEY,

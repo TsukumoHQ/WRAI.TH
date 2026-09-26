@@ -72,8 +72,6 @@ func (d *DB) RememberDecision(project, agent, area, decision, rationale string, 
 				return nil, fmt.Errorf("near-duplicate of %s (%q) — pass supersedes=%q to replace it", m.Key, dv.Decision, m.Key)
 			}
 		}
-	} else if err := d.archiveDecision(project, supersedes, agent); err != nil {
-		return nil, err
 	}
 
 	key := fmt.Sprintf("DEC-%s-%d", keyArea, d.nextDecisionSeq(project, keyArea))
@@ -82,14 +80,39 @@ func (d *DB) RememberDecision(project, agent, area, decision, rationale string, 
 
 	// Tag with the area for search/filtering (plus any caller tags).
 	allTags := append([]string{"decision", keyArea}, tags...)
-	return d.SetMemory(project, agent, key, string(vj), TagsToJSON(allTags), "project", "stated", "decision", true)
+
+	// Retracting the superseded decision and writing its successor are ONE
+	// writer tx (ruling af6e3a5f OQ4): a failure after the retraction used to
+	// leave the old decision archived with no successor. Each step appends its
+	// own knowledge_log row (retraction, then the new decision), both or neither.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, fmt.Errorf("remember decision: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if supersedes != "" {
+		if err := archiveDecisionTx(tx, project, supersedes, agent); err != nil {
+			return nil, err
+		}
+	}
+	mem, err := d.setMemoryTx(tx, project, agent, key, string(vj), TagsToJSON(allTags), "project", "stated", "decision", true, SetMemoryOpts{})
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("remember decision: commit: %w", err)
+	}
+	return mem, nil
 }
 
-// archiveDecision marks a prior decision superseded (archived → leaves the
-// accepted set). Errors if the key isn't an active decision.
-func (d *DB) archiveDecision(project, key, agent string) error {
+// archiveDecisionTx marks a prior decision superseded (archived → leaves the
+// accepted set) on the caller's tx and appends its knowledge_log retraction.
+// Errors if the key isn't an active decision.
+func archiveDecisionTx(tx *writerTx, project, key, agent string) error {
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	res, err := d.writerExec(
+	var scope string
+	_ = tx.QueryRow(`SELECT scope FROM memories WHERE project=? AND key=? AND layer='decision' AND archived_at IS NULL LIMIT 1`, project, key).Scan(&scope)
+	res, err := tx.Exec(
 		`UPDATE memories SET archived_at=?, archived_by=?, archived_reason='superseded', status='archived' WHERE project=? AND key=? AND layer='decision' AND archived_at IS NULL`,
 		now, "superseded:"+agent, project, key,
 	)
@@ -99,7 +122,13 @@ func (d *DB) archiveDecision(project, key, agent string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("supersedes %q: no active decision with that id", key)
 	}
-	return nil
+	if scope == "" {
+		scope = "project"
+	}
+	_, _, err = appendKnowledgeTx(tx, knowledgeEntry{
+		Project: project, Scope: scope, Key: key, Op: opRetract, Layer: "decision", Agent: agent, At: now,
+	}, agent)
+	return err
 }
 
 // ListDecisions returns the accepted (active, non-superseded) decisions for a

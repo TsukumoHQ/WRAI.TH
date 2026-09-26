@@ -26,6 +26,14 @@ type SetMemoryOpts struct {
 	// the live row — a writer that read an older version never silently
 	// replaces a newer one.
 	BasedOn string
+	// ChangeClass is the writer's declared change class (knowledge_log,
+	// design af783f93): editorial|additive|narrowing|breaking, "" = undeclared.
+	// It is stored as declared_class; the relay's override checks decide the
+	// effective class.
+	ChangeClass string
+	// Causal records where BasedOn came from: "arg" (explicit), "cache" (the
+	// handler's read cache) or "none". "" derives it: BasedOn set => "arg".
+	Causal string
 }
 
 // BasedOnNew is the SetMemoryOpts.BasedOn value for a create-only write.
@@ -61,6 +69,33 @@ func (d *DB) SetMemory(project, agentName, key, value, tagsJSON, scope, confiden
 // Every supersede closes the predecessor's validity window where the
 // successor's opens (valid_until = now unless an earlier one is set).
 func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, confidence, layer string, upsert bool, opts SetMemoryOpts) (*models.Memory, error) {
+	if !validDeclaredClass(opts.ChangeClass) {
+		return nil, ErrInvalidChangeClass
+	}
+	// Wrap the read-modify-write in a BEGIN IMMEDIATE transaction so SQLite
+	// acquires the write lock before the SELECT. Without this, concurrent
+	// writers on the same key can both read the same max version and both
+	// insert as version+1, breaking the supersedes chain. It also makes the
+	// based_on compare-and-write atomic, and the knowledge_log append lands in
+	// the same tx as the write it records.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	mem, err := d.setMemoryTx(tx, project, agentName, key, value, tagsJSON, scope, confidence, layer, upsert, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit memory: %w", err)
+	}
+	return mem, nil
+}
+
+// setMemoryTx is SetMemoryWith's body on an open writer tx (the caller
+// commits). It appends exactly one knowledge_log row per call.
+func (d *DB) setMemoryTx(tx *writerTx, project, agentName, key, value, tagsJSON, scope, confidence, layer string, upsert bool, opts SetMemoryOpts) (*models.Memory, error) {
 	value = normalize.JSONKeys(value)
 	now := time.Now().UTC().Format(memoryTimeFmt)
 	if confidence == "" {
@@ -72,17 +107,6 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 	if layer == "" {
 		layer = "behavior"
 	}
-
-	// Wrap the read-modify-write in a BEGIN IMMEDIATE transaction so SQLite
-	// acquires the write lock before the SELECT. Without this, concurrent
-	// writers on the same key can both read the same max version and both
-	// insert as version+1, breaking the supersedes chain. It also makes the
-	// based_on compare-and-write atomic.
-	tx, err := d.beginWriterTx()
-	if err != nil {
-		return nil, fmt.Errorf("begin tx: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
 
 	if opts.BasedOn != "" && opts.BasedOn != BasedOnNew {
 		if err := checkBasedOnTx(tx.Tx, opts.BasedOn, project, scope, agentName, key); err != nil {
@@ -112,6 +136,21 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 		Status:     "live",
 	}
 
+	causal := opts.Causal
+	if causal == "" {
+		causal = "none"
+		if opts.BasedOn != "" {
+			causal = "arg"
+		}
+	}
+	entry := knowledgeEntry{
+		Project: project, Scope: scope, Key: key, MemoryID: mem.ID, Op: opSet,
+		Layer: layer, Value: value, Declared: opts.ChangeClass, Causal: causal, Agent: agentName, At: now,
+	}
+	if existing != nil {
+		entry.HasPrev, entry.PrevMemoryID, entry.PrevLayer, entry.PrevValue = true, existing.ID, existing.Layer, existing.Value
+	}
+
 	switch {
 	case existing == nil:
 		// No live memory — create fresh.
@@ -121,8 +160,9 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 		if _, err := tx.Exec(`UPDATE memories SET updated_at = ? WHERE id = ?`, now, existing.ID); err != nil {
 			return nil, fmt.Errorf("update memory: %w", err)
 		}
-		if err := tx.Commit(); err != nil {
-			return nil, fmt.Errorf("commit memory noop: %w", err)
+		entry.Op, entry.MemoryID, entry.PrevMemoryID = opTouch, existing.ID, ""
+		if _, _, err := appendKnowledgeTx(tx, entry, agentName); err != nil {
+			return nil, err
 		}
 		existing.UpdatedAt = now
 		return existing, nil
@@ -132,6 +172,7 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 		mem.Version = existing.Version + 1
 		mem.Supersedes = &existing.ID
 		mem.ConflictWith = &existing.ID
+		entry.Op = opConflict
 
 	case existing.Value != value && opts.BasedOn != "" && opts.BasedOn != existing.ID:
 		// The writer read something other than the live row: keep both live.
@@ -141,6 +182,7 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 			basedOn := opts.BasedOn
 			mem.Supersedes = &basedOn
 		}
+		entry.Op = opSibling
 
 	default:
 		// Supersede: a different value (no causal context, or based on the
@@ -154,6 +196,7 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 		}
 		mem.Version = existing.Version + 1
 		mem.Supersedes = &existing.ID
+		entry.Op = opSupersede
 	}
 
 	if _, err := tx.Exec(
@@ -165,8 +208,8 @@ func (d *DB) SetMemoryWith(project, agentName, key, value, tagsJSON, scope, conf
 	); err != nil {
 		return nil, fmt.Errorf("insert memory: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit memory: %w", err)
+	if _, _, err := appendKnowledgeTx(tx, entry, agentName); err != nil {
+		return nil, err
 	}
 	return mem, nil
 }
@@ -560,28 +603,52 @@ func (d *DB) DeleteMemoryAs(project, actingAgent, targetAuthor, key, scope strin
 		why = reason[0]
 	}
 
-	var query string
-	var args []any
+	var where string
+	var whereArgs []any
 
 	switch scope {
 	case "agent":
-		query = `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE key = ? AND scope = 'agent' AND project = ? AND agent_name = ? AND archived_at IS NULL`
-		args = []any{now, actingAgent, why, key, project, targetAuthor}
+		where = `key = ? AND scope = 'agent' AND project = ? AND agent_name = ? AND archived_at IS NULL`
+		whereArgs = []any{key, project, targetAuthor}
 	case "project":
-		query = `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE key = ? AND scope = 'project' AND project = ? AND archived_at IS NULL`
-		args = []any{now, actingAgent, why, key, project}
+		where = `key = ? AND scope = 'project' AND project = ? AND archived_at IS NULL`
+		whereArgs = []any{key, project}
 	case "global":
-		query = `UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE key = ? AND scope = 'global' AND archived_at IS NULL`
-		args = []any{now, actingAgent, why, key}
+		where = `key = ? AND scope = 'global' AND archived_at IS NULL`
+		whereArgs = []any{key}
 	default:
 		return fmt.Errorf("invalid scope: %s", scope)
 	}
 
-	res, err := d.writerExec(query, args...)
+	// The archive and its knowledge_log retraction share one writer tx.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return fmt.Errorf("delete memory: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	layer, err := strongestLayerTx(tx, where, whereArgs)
+	if err != nil {
+		return fmt.Errorf("delete memory: %w", err)
+	}
+	res, err := tx.Exec(`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE `+where,
+		append([]any{now, actingAgent, why}, whereArgs...)...)
 	if err != nil {
 		return fmt.Errorf("delete memory: %w", err)
 	}
 	n, _ := res.RowsAffected()
+	if n > 0 {
+		// Whole-key retraction: prev_memory_id stays empty (every live row of
+		// the key was archived, siblings included).
+		if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+			Project: project, Scope: scope, Key: key, Op: opRetract, Layer: layer, Agent: actingAgent, At: now,
+		}, targetAuthor); err != nil {
+			return err
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("delete memory: commit: %w", err)
+		}
+		return nil
+	}
 	if n == 0 {
 		// A targeted cross-author delete (the admin/janitor arm: an explicit
 		// `agent` target distinct from the caller, agent scope) that matches no
@@ -653,8 +720,25 @@ func (d *DB) SetMemoryValidity(project, agentName, key, scope, validFrom, validU
 		return fmt.Errorf("invalid scope: %s", scope)
 	}
 
+	// The validity stamp and its knowledge_log row share one writer tx. The
+	// class compares the new window with the live row's current one.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return fmt.Errorf("set memory validity: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	whereArgs := args[len(args)-strings.Count(where, "?"):]
+	var memID, layer, oldFrom, oldUntil string
+	err = tx.QueryRow(`SELECT id, layer, COALESCE(valid_from,''), COALESCE(valid_until,'') FROM memories WHERE `+where+` ORDER BY version DESC LIMIT 1`,
+		whereArgs...).Scan(&memID, &layer, &oldFrom, &oldUntil)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("memory not found: %s (scope=%s)", key, scope)
+	}
+	if err != nil {
+		return fmt.Errorf("set memory validity: %w", err)
+	}
 	q := fmt.Sprintf("UPDATE memories SET %s WHERE %s", strings.Join(set, ", "), where)
-	res, err := d.writerExec(q, args...)
+	res, err := tx.Exec(q, args...)
 	if err != nil {
 		return fmt.Errorf("set memory validity: %w", err)
 	}
@@ -662,7 +746,44 @@ func (d *DB) SetMemoryValidity(project, agentName, key, scope, validFrom, validU
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s (scope=%s)", key, scope)
 	}
+	// Narrowing: the window shrinks (an end appears or moves earlier, or a
+	// start appears or moves later). Anything else widens or clears it: additive.
+	narrowing := (validUntil != "" && (oldUntil == "" || validUntil < oldUntil)) ||
+		(validFrom != "" && (oldFrom == "" || validFrom > oldFrom))
+	if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+		Project: project, Scope: scope, Key: key, MemoryID: memID, Op: opValidity, Layer: layer,
+		Narrowing: narrowing, Agent: agentName, At: now,
+	}, agentName); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("set memory validity: commit: %w", err)
+	}
 	return nil
+}
+
+// strongestLayerTx returns the layer of highest durability among the live rows
+// matching where (the layer a whole-key write is classed and clocked at).
+func strongestLayerTx(tx *writerTx, where string, whereArgs []any) (string, error) {
+	rows, err := tx.Query(`SELECT layer FROM memories WHERE `+where, whereArgs...)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	best := ""
+	for rows.Next() {
+		var l string
+		if err := rows.Scan(&l); err != nil {
+			return "", err
+		}
+		if best == "" || layerDurability(l) > layerDurability(best) {
+			best = l
+		}
+	}
+	if best == "" {
+		best = "behavior"
+	}
+	return best, rows.Err()
 }
 
 // GetMemoryIncludingArchived returns the newest memory at key — INCLUDING an
@@ -836,6 +957,22 @@ func (d *DB) ResolveConflict(project, agentName, key, chosenValue, scope string)
 		}
 	}
 
+	prevID := ""
+	if len(losers) > 0 {
+		prevID = losers[0].ID
+	}
+	resolveLayer := winner.Layer
+	for _, m := range memories {
+		if layerDurability(m.Layer) > layerDurability(resolveLayer) {
+			resolveLayer = m.Layer
+		}
+	}
+	if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+		Project: project, Scope: scope, Key: key, MemoryID: winner.ID, PrevMemoryID: prevID, Op: opResolve,
+		Layer: resolveLayer, Agent: agentName, At: now,
+	}, agentName); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit: %w", err)
 	}
@@ -917,7 +1054,22 @@ func (d *DB) DeleteMemoryByID(id, archivedBy string, reason ...string) error {
 	if len(reason) > 0 && reason[0] != "" {
 		why = reason[0]
 	}
-	res, err := d.writerExec(
+	// The archive and its knowledge_log retraction share one writer tx.
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return fmt.Errorf("delete memory: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var project, scope, key, layer, author string
+	err = tx.QueryRow(`SELECT project, scope, key, layer, agent_name FROM memories WHERE id = ? AND archived_at IS NULL`, id).
+		Scan(&project, &scope, &key, &layer, &author)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("memory not found: %s", id)
+	}
+	if err != nil {
+		return fmt.Errorf("delete memory: %w", err)
+	}
+	res, err := tx.Exec(
 		`UPDATE memories SET archived_at = ?, archived_by = ?, archived_reason = ?, status = 'archived' WHERE id = ? AND archived_at IS NULL`,
 		now, archivedBy, why, id,
 	)
@@ -927,6 +1079,16 @@ func (d *DB) DeleteMemoryByID(id, archivedBy string, reason ...string) error {
 	n, _ := res.RowsAffected()
 	if n == 0 {
 		return fmt.Errorf("memory not found: %s", id)
+	}
+	// One-row retraction: prev_memory_id names the archived row (a sibling of
+	// the key may stay live; live_ids says so).
+	if _, _, err := appendKnowledgeTx(tx, knowledgeEntry{
+		Project: project, Scope: scope, Key: key, PrevMemoryID: id, Op: opRetract, Layer: layer, Agent: archivedBy, At: now,
+	}, author); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("delete memory: commit: %w", err)
 	}
 	return nil
 }
