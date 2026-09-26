@@ -615,3 +615,110 @@ func TestTaskSummaryAsymmetricFieldSet_R2(t *testing.T) {
 		}
 	}
 }
+
+// TestProjectMemoriesLayerFloors is f4efab3a AC2: on a ListBootMemories-shaped
+// selection (constraints first, then newest first), the byte budget keeps the
+// constraint floor AND the newest behavior and newest context memory, which the
+// constraint floor alone used to crowd out. memories_omitted counts the rest.
+func TestProjectMemoriesLayerFloors(t *testing.T) {
+	var mems []models.Memory
+	for i := 0; i < 35; i++ {
+		mems = append(mems, models.Memory{Key: fmt.Sprintf("rule-%02d", i), Value: strings.Repeat("x", 400),
+			Scope: "project", Layer: "constraints"})
+	}
+	// Non-constraints interleave by recency, newest first: behavior-00 and
+	// context-00 are the newest of their layer.
+	for i := 0; i < 10; i++ {
+		mems = append(mems, models.Memory{Key: fmt.Sprintf("behavior-%02d", i), Value: strings.Repeat("b", 400),
+			Scope: "project", Layer: "behavior"})
+		if i < 5 {
+			mems = append(mems, models.Memory{Key: fmt.Sprintf("context-%02d", i), Value: strings.Repeat("c", 400),
+				Scope: "agent", Layer: "context"})
+		}
+	}
+
+	out := projectMemories(mems, sessionMemoryBudget)
+	got := map[string]bool{}
+	constraints := 0
+	for _, s := range out {
+		got[s.Key] = true
+		if s.Layer == "constraints" {
+			constraints++
+		}
+	}
+	if constraints < sessionConstraintFloor {
+		t.Fatalf("constraint floor lost: %d < %d", constraints, sessionConstraintFloor)
+	}
+	for _, k := range []string{"behavior-00", "context-00"} {
+		if !got[k] {
+			t.Fatalf("newest %s missing from boot projection: %v", k, got)
+		}
+	}
+	if got["behavior-01"] || got["context-01"] {
+		t.Fatal("only the floor (newest one per layer) may bypass the blown budget")
+	}
+	want := sessionConstraintFloor + sessionBehaviorFloor + sessionContextFloor
+	if len(out) != want {
+		t.Fatalf("projected %d, want exactly the floors %d", len(out), want)
+	}
+	if omitted := len(mems) - len(out); omitted != 50-want {
+		t.Fatalf("memories_omitted = %d, want %d", omitted, 50-want)
+	}
+}
+
+// TestBootMemoryContractUnchanged is f4efab3a AC3: through session_context the
+// memory section keeps its keys and types, decision-layer rows stay out of
+// relevant_memories, stale rows stay out of boot, and the newest behavior and
+// context memories now reach a constraint-heavy project.
+func TestBootMemoryContractUnchanged(t *testing.T) {
+	h := testHandlers(t)
+	const project, agent = "p1", "dev-1"
+	for i := 0; i < 60; i++ {
+		if _, err := h.db.SetMemory(project, "cto", fmt.Sprintf("rule-%02d", i), strings.Repeat("x", 400),
+			"[]", "project", "observed", "constraints"); err != nil {
+			t.Fatalf("set constraint %d: %v", i, err)
+		}
+	}
+	mustSet := func(key, scope, layer string) {
+		t.Helper()
+		if _, err := h.db.SetMemory(project, agent, key, "v-"+key, "[]", scope, "", layer); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+	}
+	mustSet("how-we-review", "project", "behavior")
+	mustSet("my-scratch", "agent", "context")
+	mustSet("expired-habit", "project", "behavior")
+	if err := h.db.SetMemoryValidity(project, agent, "expired-habit", "project", "", "2020-01-01T00:00:00.000000Z"); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+	if _, err := h.db.RememberDecision(project, "cto", "ops/boot", "settled", "why", nil, "", nil); err != nil {
+		t.Fatalf("remember: %v", err)
+	}
+
+	sc := h.buildSessionContext(project, agent, nil)
+	mems, ok := sc["relevant_memories"].([]MemorySummary)
+	if !ok {
+		t.Fatalf("relevant_memories type = %T, want []MemorySummary", sc["relevant_memories"])
+	}
+	if _, ok := sc["memories_omitted"].(int); !ok {
+		t.Fatalf("memories_omitted type = %T, want int", sc["memories_omitted"])
+	}
+	if _, ok := sc["decisions"]; !ok {
+		t.Fatal("decisions section missing")
+	}
+	got := map[string]bool{}
+	for _, m := range mems {
+		got[m.Key] = true
+		if m.Layer == "decision" {
+			t.Fatalf("decision-layer row in relevant_memories: %s", m.Key)
+		}
+	}
+	if got["expired-habit"] {
+		t.Fatal("stale memory surfaced at boot")
+	}
+	for _, k := range []string{"how-we-review", "my-scratch"} {
+		if !got[k] {
+			t.Fatalf("%s did not reach boot on a 60-constraint project: %v", k, got)
+		}
+	}
+}

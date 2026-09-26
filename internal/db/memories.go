@@ -428,12 +428,44 @@ func (d *DB) ListMemories(project, scope, agentName string, tags []string, limit
 	return d.queryMemories(q, args...)
 }
 
+// Boot slots reserved per layer (task f4efab3a). Constraints used to sort first
+// under one LIMIT, so a project with >= limit live constraints (tsukumo, niwa,
+// trovex-growth: 50/50) never let a behavior or context memory into boot.
+// Each layer now gets its reserved slots first (newest first inside the layer);
+// slots a layer cannot fill are refilled from the remaining rows in the legacy
+// order, so a constraints-only project still fills the whole limit. The
+// projection floors that keep the newest of each layer are next to
+// sessionConstraintFloor in internal/relay/project.go.
+const (
+	BootQuotaConstraints = 25
+	BootQuotaBehavior    = 10
+	BootQuotaContext     = 10
+)
+
+// bootLayerGroup maps a layer to its quota group; every other layer (decision,
+// facts, state, ...) has no reserved slot and competes in the refill.
+func bootLayerGroup(layer string) string {
+	switch layer {
+	case "constraints", "behavior", "context":
+		return layer
+	}
+	return "other"
+}
+
+var bootQuota = map[string]int{
+	"constraints": BootQuotaConstraints,
+	"behavior":    BootQuotaBehavior,
+	"context":     BootQuotaContext,
+}
+
 // ListBootMemories returns the memories an agent should see at boot:
 // global + project-scope + its own agent-scope memories, mirroring
 // SearchMemory's cross-scope visibility clause. ListMemories with agentName
 // set filters agent_name on ALL scopes, which hides project/global memories
 // written by other agents — wrong for session_context (Def. 7 boot view).
-// Constraints-layer memories sort first so budget projection keeps them.
+// Selection reserves BootQuota* slots per layer, then refills; the result is
+// ordered constraints first, then updated_at DESC, so budget projection keeps
+// its constraint floor.
 func (d *DB) ListBootMemories(project, agentName string, limit int) ([]models.Memory, error) {
 	if limit <= 0 {
 		limit = 50
@@ -441,15 +473,64 @@ func (d *DB) ListBootMemories(project, agentName string, limit int) ([]models.Me
 	// Boot view is live-only: a stale (time-expired) memory must not be
 	// re-injected at session start as if it were current canon. It stays stored
 	// and searchable via search_memory(include_stale=true), just not surfaced here.
+	// The window function bounds the read to `limit` rows per layer group, so a
+	// layer can fill the whole limit on refill but no layer is read unbounded.
 	now := time.Now().UTC().Format(memoryTimeFmt)
-	q := fmt.Sprintf(`SELECT %s
-	 FROM memories
-	 WHERE archived_at IS NULL
-	   AND status != 'stale' AND (valid_until IS NULL OR valid_until > ?)
-	   AND (scope = 'global' OR (project = ? AND (scope = 'project' OR (scope = 'agent' AND agent_name = ?))))
-	 ORDER BY CASE WHEN layer = 'constraints' THEN 0 ELSE 1 END, updated_at DESC
-	 LIMIT ?`, memorySelectCols)
-	return d.queryMemories(q, now, project, agentName, limit)
+	q := fmt.Sprintf(`SELECT %s FROM (
+	   SELECT *, ROW_NUMBER() OVER (
+	     PARTITION BY CASE WHEN layer IN ('constraints', 'behavior', 'context') THEN layer ELSE 'other' END
+	     ORDER BY updated_at DESC) AS layer_rank
+	   FROM memories
+	   WHERE archived_at IS NULL
+	     AND status != 'stale' AND (valid_until IS NULL OR valid_until > ?)
+	     AND (scope = 'global' OR (project = ? AND (scope = 'project' OR (scope = 'agent' AND agent_name = ?))))
+	 )
+	 WHERE layer_rank <= ?
+	 ORDER BY CASE WHEN layer = 'constraints' THEN 0 ELSE 1 END, updated_at DESC`, memorySelectCols)
+	candidates, err := d.queryMemories(q, now, project, agentName, limit)
+	if err != nil {
+		return nil, err
+	}
+	return selectBootMemories(candidates, limit), nil
+}
+
+// selectBootMemories picks at most limit rows from candidates (already in boot
+// order): first each layer's reserved quota, then the remaining rows in order
+// until the limit. The output keeps the candidates' order.
+func selectBootMemories(candidates []models.Memory, limit int) []models.Memory {
+	if len(candidates) <= limit {
+		return candidates
+	}
+	picked := make([]bool, len(candidates))
+	taken := map[string]int{}
+	n := 0
+	for i, m := range candidates {
+		if n == limit {
+			break
+		}
+		g := bootLayerGroup(m.Layer)
+		if taken[g] < bootQuota[g] {
+			taken[g]++
+			picked[i] = true
+			n++
+		}
+	}
+	for i := range candidates {
+		if n == limit {
+			break
+		}
+		if !picked[i] {
+			picked[i] = true
+			n++
+		}
+	}
+	out := make([]models.Memory, 0, n)
+	for i, m := range candidates {
+		if picked[i] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // DeleteMemory soft-deletes a memory (archives it, never a hard DELETE). This

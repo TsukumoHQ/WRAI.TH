@@ -65,6 +65,30 @@ const sessionMemoryBudget = 2600
 // of the 20 KB boot payload (WRAITH R1).
 const sessionConstraintFloor = 8
 
+// sessionBehaviorFloor and sessionContextFloor guarantee the newest
+// behavior-layer and context-layer memory a place in boot, like the constraint
+// floor: without them a constraint-heavy project spends the whole budget on the
+// constraint floor and behavior/context never reach an agent at session start
+// (measured 0/57 and 0/5, design af783f93 §1.3). ListBootMemories reserves the
+// matching per-layer slots (db.BootQuota*) so these rows are in the candidate set.
+const (
+	sessionBehaviorFloor = 1
+	sessionContextFloor  = 1
+)
+
+// sessionLayerFloor is the guaranteed boot floor of each layer (0 = none).
+func sessionLayerFloor(layer string) int {
+	switch layer {
+	case "constraints":
+		return sessionConstraintFloor
+	case "behavior":
+		return sessionBehaviorFloor
+	case "context":
+		return sessionContextFloor
+	}
+	return 0
+}
+
 // Session-context caps for the sections v1.9.0 injected RAW — the primary
 // contributors to an oversized boot payload (WRAITH-1).
 const (
@@ -632,19 +656,22 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 	if maxBytes > 0 {
 		hardCeil = maxBytes * budgetHardMultiplier
 	}
-	constraintsSeen := 0
+	floorSeen := map[string]int{}
 	for _, m := range mems {
 		s := summarizeMemory(m)
 		b := memorySummaryBytes(s)
-		// Guaranteed floor: the first sessionConstraintFloor constraints
+		// Guaranteed floors: the first sessionConstraintFloor constraints
 		// (ListBootMemories orders constraints first, updated_at DESC) always
 		// surface even under a tiny budget — a CTO constraint must not silently
-		// drop out of boot. They still count toward `used`, so the items that
-		// follow compete for the remainder. Beyond the floor, a constraint is
-		// treated like any other memory (previously ALL constraints bypassed the
-		// budget, making it dead — the 20 KB-boot root cause, WRAITH R1).
-		if m.Layer == "constraints" && constraintsSeen < sessionConstraintFloor {
-			constraintsSeen++
+		// drop out of boot — and so do the newest sessionBehaviorFloor behavior
+		// and sessionContextFloor context memories (the first of each layer met,
+		// since the input is updated_at DESC inside a layer). Floor rows still
+		// count toward `used`, so the items that follow compete for the
+		// remainder. Beyond its floor, a memory is treated like any other
+		// (previously ALL constraints bypassed the budget, making it dead — the
+		// 20 KB-boot root cause, WRAITH R1).
+		if floorSeen[m.Layer] < sessionLayerFloor(m.Layer) {
+			floorSeen[m.Layer]++
 			out = append(out, s)
 			used += b
 			continue
