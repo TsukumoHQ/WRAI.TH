@@ -3,6 +3,23 @@
 All notable changes to wrai.th are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.23.1] — 2026-09-27
+
+A patch release: a claimed task can be handed back, the relay stops reporting a harmless refusal as a retryable internal error, and guard owners hear about an expiry a week ahead.
+
+### Added
+- `claim_task release=true` returns an accepted task that has not been started to `pending`. Only the lease holder or the dispatcher can do it; the lease is cleared, the transfer is audited, an in-progress task is refused, and the task is announced to its profile again unless a prerequisite still holds it (task:545a11d2, b92d2ed)
+- Guards: an active or shadow guard whose `expires_at` falls within 7 days sends one fyi to its creator and challenger. A renewal re-arms the notice; retired, withdrawn and expired guards get none (task:5b16f32d, 884413c)
+
+### Fixed
+- `resume_task` on a task that is not blocked returned `INTERNAL` (transient, retryable), so callers such as the review gate retried it. It now returns `INVALID_ARGUMENT` (validation, not retryable) and still names the current status. Other prose refusals that name a `(status=...)` are classified the same way (task:45142210, 59728c7)
+
+### Upgrade notes
+- New column `compiled_guards.expiry_noticed_for`, added automatically on first start. Older binaries ignore it, so rolling back is safe.
+- No tool is added; `claim_task` gains one boolean argument.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.23.0...v1.23.1
+
 ## [1.23.0] — 2026-09-27
 
 The relay now keeps a record of what goes wrong and what agents know. Blocked, cancelled, dead-lettered and lease-expired work is classified into exceptions, repeated failures open one systemic exception with an owner, and guards can suppress known-benign classes after a review by someone other than their author. Every knowledge write is logged with a revision and a change class. Boots and recalls record which versions each agent was served, so a breaking or narrowing change opens a rollout that asks each affected agent to reassess its work. Contradictions between memories are detected and can be resolved through a leased review. Tasks can depend on each other: a blocked task is held until its prerequisites are done, and `claim_task next=true` picks the next ready task.
