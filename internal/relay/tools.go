@@ -1,6 +1,10 @@
 package relay
 
-import "github.com/mark3labs/mcp-go/mcp"
+import (
+	"github.com/mark3labs/mcp-go/mcp"
+
+	"agent-relay/internal/db"
+)
 
 // asParam is added to every tool that uses agent identity.
 var asParam = mcp.WithString("as", mcp.Description("Acting agent name."))
@@ -12,6 +16,11 @@ var projectParam = mcp.WithString("project", mcp.Description("Project namespace.
 
 // formatParam is the shared output-format selector for list/get tools that can
 // render either a compact markdown table (default, ~half the tokens) or JSON.
+// reasonCodeParam is the optional closed reason_code on block_task and
+// cancel_task (design dbc317f4, ruling aa630ca6). No description: the value
+// meanings live in the relay skill, the enum costs 177 B per tool.
+var reasonCodeParam = mcp.WithString("reason_code", mcp.Enum(db.DeclaredReasonCodes...))
+
 var formatParam = mcp.WithString("format", mcp.Description("'md' (default, markdown table — ~half the tokens) or 'json'"), mcp.Enum("md", "json"))
 
 // sessionContextParam selects the boot-payload shape (WRAITH R1): 'full'
@@ -640,6 +649,7 @@ func blockTaskTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("reason", mcp.Description("Why blocked")),
+		reasonCodeParam,
 	)
 }
 
@@ -661,6 +671,7 @@ func cancelTaskTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("reason", mcp.Description("Why cancelled")),
+		reasonCodeParam,
 	)
 }
 

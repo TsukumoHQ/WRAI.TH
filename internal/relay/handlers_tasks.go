@@ -934,6 +934,17 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 	return h.resultJSONTracked(project, agent, "complete_task", withBasis(task, basis))
 }
 
+// declaredReasonCode reads the optional reason_code of block_task / cancel_task.
+// A value outside db.DeclaredReasonCodes is refused INVALID_ARGUMENT before any
+// write (design dbc317f4 §4); "" means none declared.
+func declaredReasonCode(req mcp.CallToolRequest) (string, *mcp.CallToolResult) {
+	code := strings.TrimSpace(req.GetString("reason_code", ""))
+	if code != "" && !db.IsDeclaredReasonCode(code) {
+		return "", validationError(CodeInvalidArgument, "reason_code must be one of "+strings.Join(db.DeclaredReasonCodes, "|"))
+	}
+	return code, nil
+}
+
 func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	project := h.resolveProject(ctx, req)
 	agent := resolveAgent(ctx, req)
@@ -941,13 +952,17 @@ func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest)
 	if taskID == "" {
 		return toolResultError("task_id is required"), nil
 	}
+	reasonCode, invalid := declaredReasonCode(req)
+	if invalid != nil {
+		return invalid, nil
+	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
 		return toolResultError(err.Error()), nil
 	}
 	reason := optionalString(req.GetString("reason", ""))
 
-	task, err := h.db.BlockTask(taskID, agent, project, reason)
+	task, err := h.db.BlockTaskWithCode(taskID, agent, project, reason, reasonCode)
 	if err != nil {
 		return taskOpError(err, "failed to block task: %v", err), nil
 	}
@@ -986,13 +1001,17 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 	if taskID == "" {
 		return toolResultError("task_id is required"), nil
 	}
+	reasonCode, invalid := declaredReasonCode(req)
+	if invalid != nil {
+		return invalid, nil
+	}
 	taskID, err := h.resolveTaskID(taskID, project)
 	if err != nil {
 		return toolResultError(err.Error()), nil
 	}
 	reason := optionalString(req.GetString("reason", ""))
 
-	task, err := h.db.CancelTask(taskID, agent, project, reason)
+	task, err := h.db.CancelTaskWithCode(taskID, agent, project, reason, reasonCode)
 	if err != nil {
 		return taskOpError(err, "failed to cancel task: %v", err), nil
 	}

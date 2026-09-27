@@ -810,3 +810,200 @@ func TestExceptionWriteFailure_CascadeStillReleases(t *testing.T) {
 		t.Fatalf("exceptions = %d, want 0", n)
 	}
 }
+
+// excReasonSources returns source_kind -> reason_source for a task's rows.
+func excReasonSources(t *testing.T, d *DB, taskID string) map[string]string {
+	t.Helper()
+	rows, err := d.conn.Query(`SELECT source_kind, COALESCE(reason_source, '<null>') FROM exceptions WHERE source_ref = ?`, taskID)
+	if err != nil {
+		t.Fatalf("query reason_source: %v", err)
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, s string
+		if err := rows.Scan(&k, &s); err != nil {
+			t.Fatalf("scan reason_source: %v", err)
+		}
+		out[k] = s
+	}
+	return out
+}
+
+func excPendingTask(t *testing.T, d *DB) string {
+	t.Helper()
+	task, err := d.DispatchTask("p1", "dev", "cto", "t", "", "P2", nil, nil, TypedTicket{}, false, nil)
+	if err != nil {
+		t.Fatalf("dispatch: %v", err)
+	}
+	return task.ID
+}
+
+// Design dbc317f4 §4: a declared code replaces the lexicon on the block row,
+// even when the text reads as another code.
+func TestReasonCode_DeclaredOverridesLexiconOnBlock(t *testing.T) {
+	d := testDB(t)
+	id := excStartedTask(t, d, "dev-a")
+	reason := "waiting on review of PR #12" // lexicon: gate_pending
+	if _, err := d.BlockTaskWithCode(id, "dev-a", "p1", &reason, "env_blocked"); err != nil {
+		t.Fatalf("block: %v", err)
+	}
+	rows := excRowsFor(t, d, id)
+	if len(rows) != 1 || rows[0].SourceKind != excSourceTaskBlock {
+		t.Fatalf("rows = %+v, want one task_block", rows)
+	}
+	if r := rows[0]; r.Code != "env_blocked" || r.Kind != "blocker" || r.Retry != "non_retryable" || r.Status != "open" {
+		t.Fatalf("row = %s/%s/%s/%s, want env_blocked/blocker/non_retryable/open", r.Code, r.Kind, r.Retry, r.Status)
+	}
+	if src := excReasonSources(t, d, id)[excSourceTaskBlock]; src != "declared" {
+		t.Fatalf("reason_source = %s, want declared", src)
+	}
+	task, _ := d.GetTask(id, "p1")
+	if excStr(task.BlockedReason) != reason {
+		t.Fatalf("blocked_reason = %q, want the free text unchanged", excStr(task.BlockedReason))
+	}
+}
+
+// A declared cancel of a blocked task resolves the block row with the declared
+// code as resolution_reason and records the code on its own task_cancel row.
+func TestReasonCode_DeclaredOnCancelFromBlocked(t *testing.T) {
+	d := testDB(t)
+	id := excStartedTask(t, d, "dev-a")
+	excBlock(t, d, id, "dev-a", "waiting on review of PR #12")
+	reason := "duplicate of an older ticket" // lexicon: duplicate
+	if _, err := d.CancelTaskWithCode(id, "cto", "p1", &reason, "misrouted"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	rows := excRowsFor(t, d, id)
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want the block row + one task_cancel row", len(rows))
+	}
+	var block, cancel excRow
+	for _, r := range rows {
+		switch r.SourceKind {
+		case excSourceTaskBlock:
+			block = r
+		case excSourceTaskCancel:
+			cancel = r
+		}
+	}
+	if block.Status != "resolved" || excStr(block.Reason) != "misrouted" || block.Code != "gate_pending" {
+		t.Fatalf("block row = %+v (reason %s), want resolved as misrouted, its own code kept", block, excStr(block.Reason))
+	}
+	if cancel.Code != "misrouted" || cancel.Kind != "routing" || cancel.Retry != "non_retryable" || cancel.Status != "resolved" {
+		t.Fatalf("cancel row = %+v, want misrouted/routing/non_retryable resolved", cancel)
+	}
+	src := excReasonSources(t, d, id)
+	if src[excSourceTaskCancel] != "declared" || src[excSourceTaskBlock] != "lexicon" {
+		t.Fatalf("reason_source = %v, want cancel declared, block lexicon", src)
+	}
+}
+
+func TestReasonCode_DeclaredOnCancelOfPending(t *testing.T) {
+	d := testDB(t)
+	id := excPendingTask(t, d)
+	reason := "superseded by the v2 plan" // lexicon: superseded
+	if _, err := d.CancelTaskWithCode(id, "cto", "p1", &reason, "obsolete"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	rows := excRowsFor(t, d, id)
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if r := rows[0]; r.SourceKind != excSourceTaskCancel || r.Code != "obsolete" || r.Kind != "plan_change" ||
+		r.Retry != "benign" || r.Status != "resolved" || excStr(r.Reason) != "obsolete" {
+		t.Fatalf("row = %+v (reason %s), want task_cancel obsolete/plan_change/benign resolved as obsolete", r, excStr(r.Reason))
+	}
+	if src := excReasonSources(t, d, id)[excSourceTaskCancel]; src != "declared" {
+		t.Fatalf("reason_source = %s, want declared", src)
+	}
+}
+
+// A code with no reason text still records the row; blocked_reason stays NULL.
+func TestReasonCode_CodeWithoutTextOnCancel(t *testing.T) {
+	d := testDB(t)
+	id := excPendingTask(t, d)
+	if _, err := d.CancelTaskWithCode(id, "cto", "p1", nil, "postponed"); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	rows := excRowsFor(t, d, id)
+	if len(rows) != 1 || rows[0].Code != "postponed" || rows[0].SourceKind != excSourceTaskCancel {
+		t.Fatalf("rows = %+v, want one task_cancel postponed", rows)
+	}
+	task, _ := d.GetTask(id, "p1")
+	if task.BlockedReason != nil {
+		t.Fatalf("blocked_reason = %q, want NULL", *task.BlockedReason)
+	}
+}
+
+// No code: today's lexicon rows, labelled reason_source='lexicon'; a producer
+// that passes its own code is labelled 'producer'.
+func TestReasonCode_NoCodeKeepsLexicon(t *testing.T) {
+	d := testDB(t)
+	id := excStartedTask(t, d, "dev-a")
+	excBlock(t, d, id, "dev-a", "waiting on review of PR #12")
+	if r := excRowsFor(t, d, id)[0]; r.Code != "gate_pending" || r.Kind != "blocker" || r.Retry != "retryable" {
+		t.Fatalf("block row = %+v, want the lexicon's gate_pending/blocker/retryable", r)
+	}
+	pid := excPendingTask(t, d)
+	reason := "duplicate of an older ticket"
+	if _, err := d.CancelTask(pid, "cto", "p1", &reason); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+	if r := excRowsFor(t, d, pid)[0]; r.Code != "duplicate" || excStr(r.Reason) != "duplicate" {
+		t.Fatalf("cancel row = %+v, want the lexicon's duplicate", r)
+	}
+	if a, b := excReasonSources(t, d, id)[excSourceTaskBlock], excReasonSources(t, d, pid)[excSourceTaskCancel]; a != "lexicon" || b != "lexicon" {
+		t.Fatalf("reason_source = %s / %s, want lexicon / lexicon", a, b)
+	}
+
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	now := "2026-09-27T00:00:00.000000Z"
+	if _, err := openExceptionTx(tx, exceptionOpen{
+		Project: "p1", SourceKind: excSourceLimbo, SourceRef: "prod-1", Text: "limbo-sweep: x",
+		Code: "limbo_sweep", Kind: "limbo", Retry: "retryable", At: now,
+	}); err != nil {
+		t.Fatalf("producer open: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if src := excReasonSources(t, d, "prod-1")[excSourceLimbo]; src != "producer" {
+		t.Fatalf("producer reason_source = %s, want producer", src)
+	}
+}
+
+// An unknown code is refused before any write: status and exceptions unchanged.
+func TestReasonCode_UnknownCodeWritesNothing(t *testing.T) {
+	d := testDB(t)
+	id := excStartedTask(t, d, "dev-a")
+	reason := "x"
+	if _, err := d.BlockTaskWithCode(id, "dev-a", "p1", &reason, "not_a_code"); err == nil {
+		t.Fatal("block with an unknown code succeeded, want an error")
+	}
+	if _, err := d.CancelTaskWithCode(id, "dev-a", "p1", &reason, "other"); err == nil {
+		t.Fatal("cancel with an unknown code succeeded, want an error")
+	}
+	task, _ := d.GetTask(id, "p1")
+	if task.Status != "in-progress" || task.BlockedReason != nil {
+		t.Fatalf("task = %s / %q, want in-progress with no reason", task.Status, excStr(task.BlockedReason))
+	}
+	if rows := excRowsFor(t, d, id); len(rows) != 0 {
+		t.Fatalf("exceptions = %d, want 0", len(rows))
+	}
+}
+
+// The declared vocabulary is exactly the 10 ruled codes, each with a class.
+func TestReasonCode_VocabularyIsClosed(t *testing.T) {
+	if len(DeclaredReasonCodes) != 10 || len(declaredReasonClass) != 10 {
+		t.Fatalf("vocabulary = %d names / %d classes, want 10 / 10", len(DeclaredReasonCodes), len(declaredReasonClass))
+	}
+	for _, c := range DeclaredReasonCodes {
+		if !IsDeclaredReasonCode(c) {
+			t.Fatalf("%s has no kind/retry class", c)
+		}
+	}
+}

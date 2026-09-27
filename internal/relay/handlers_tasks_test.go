@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"database/sql"
 	"strings"
 	"sync"
@@ -373,5 +374,38 @@ func TestResumeTaskNotBlockedIsInvalidArgument(t *testing.T) {
 	resumed := parseJSON(t, result(h.HandleResumeTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id}))))
 	if resumed["status"] != "in-progress" {
 		t.Fatalf("resume of a blocked task: status %v, want in-progress", resumed["status"])
+	}
+}
+
+// Design dbc317f4: block_task / cancel_task refuse a reason_code outside the
+// closed vocabulary with INVALID_ARGUMENT before any write, and accept a
+// declared one.
+func TestReasonCode_HandlersRefuseUnknownCode(t *testing.T) {
+	h := testHandlers(t)
+	regAgent(t, h, "p1", "cto")
+	regAgent(t, h, "p1", "doer")
+	id := dispatchClaimedIn(t, h, "p1", "doer")
+	parseJSON(t, result(h.HandleStartTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id}))))
+
+	for name, handle := range map[string]func(context.Context, mcp.CallToolRequest) (*mcp.CallToolResult, error){
+		"block_task": h.HandleBlockTask, "cancel_task": h.HandleCancelTask,
+	} {
+		res, _ := handle(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id, "reason": "x", "reason_code": "other"}))
+		body := decodeToolError(t, res)
+		if body["code"] != CodeInvalidArgument || body["isRetryable"] != false {
+			t.Fatalf("%s with an unknown reason_code = %v, want INVALID_ARGUMENT, not retryable", name, body)
+		}
+		if msg, _ := body["message"].(string); !strings.Contains(msg, "needs_decision") {
+			t.Fatalf("%s refusal %q does not list the vocabulary", name, msg)
+		}
+	}
+	task, err := h.db.GetTask(id, "p1")
+	if err != nil || task.Status != "in-progress" || task.BlockedReason != nil {
+		t.Fatalf("task after refusals = %+v (%v), want in-progress with no reason", task, err)
+	}
+
+	blocked := parseJSON(t, result(h.HandleBlockTask(ctx, call(map[string]any{"project": "p1", "as": "doer", "task_id": id, "reason": "no db password", "reason_code": "env_blocked"}))))
+	if blocked["status"] != "blocked" {
+		t.Fatalf("declared block: status %v, want blocked", blocked["status"])
 	}
 }

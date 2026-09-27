@@ -107,6 +107,11 @@ func migrateExceptions(conn *sql.DB) {
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_exceptions_source ON exceptions(source_kind, source_ref) WHERE status = 'open'`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_exceptions_open ON exceptions(project, status, opened_at)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_exceptions_fingerprint ON exceptions(fingerprint)`)
+	// Where reason_code came from (design dbc317f4 §3): 'declared' by the
+	// block/cancel caller, 'lexicon' from reasonLexiconV1, 'producer' from a
+	// machine producer that passes its own code. NULL = written before this
+	// column existed. Nullable with no default: a default would mislabel history.
+	ensureColumns(conn, "exceptions", map[string]string{"reason_source": "TEXT"})
 	// One read surface for metrics: integrity_quarantine already is a
 	// class-keyed detected/resolved log, so it joins through a view instead of
 	// being copied (design OQ3, 0 new writes).
@@ -184,6 +189,42 @@ var reasonLexiconV1 = []reasonRule{
 }
 
 const excUnclassified = "unclassified"
+
+// DeclaredReasonCodes is the closed vocabulary a caller may declare on
+// block_task / cancel_task (design dbc317f4 §2, ruling aa630ca6), in the tool
+// schema's enum order. Eight names are lexicon codes so declared and lexicon
+// rows share fingerprint buckets; needs_decision and env_blocked are new.
+var DeclaredReasonCodes = []string{
+	"superseded", "duplicate", "obsolete", "postponed", "misrouted",
+	"dead_lane", "gate_pending", "stale_no_output", "needs_decision", "env_blocked",
+}
+
+// declaredReasonClass maps each declared code to its kind and retry class.
+var declaredReasonClass = map[string]struct{ kind, retry string }{
+	"superseded":      {"plan_change", "benign"},
+	"duplicate":       {"plan_change", "benign"},
+	"obsolete":        {"plan_change", "benign"},
+	"postponed":       {"plan_change", "benign"},
+	"misrouted":       {"routing", "non_retryable"},
+	"dead_lane":       {"routing", "non_retryable"},
+	"gate_pending":    {"blocker", "retryable"},
+	"stale_no_output": {"stall", "retryable"},
+	"needs_decision":  {"blocker", "non_retryable"},
+	"env_blocked":     {"blocker", "non_retryable"},
+}
+
+// IsDeclaredReasonCode reports whether code is in DeclaredReasonCodes.
+func IsDeclaredReasonCode(code string) bool {
+	_, ok := declaredReasonClass[code]
+	return ok
+}
+
+// Reason sources stored in exceptions.reason_source.
+const (
+	excReasonDeclared = "declared"
+	excReasonLexicon  = "lexicon"
+	excReasonProducer = "producer"
+)
 
 // classifyReason returns the lexicon code, kind and retry class for text.
 // Unclassified text keeps retry_class=unknown and the caller's default kind:
@@ -471,6 +512,7 @@ type exceptionOpen struct {
 	TraceID                                          *string
 	Text                                             string
 	Code, Kind, Retry, DefaultKind                   string
+	Declared                                         bool // Code was declared by the block/cancel caller
 	Template                                         string
 	Evidence                                         map[string]any
 	At                                               string
@@ -484,8 +526,13 @@ type exceptionResolution struct {
 // openExceptionTx classifies and inserts one exception on q (the producer's tx).
 func openExceptionTx(q excQ, e exceptionOpen) (string, error) {
 	code, kind, retry := e.Code, e.Kind, e.Retry
-	if code == "" {
+	source := excReasonProducer
+	switch {
+	case code == "":
 		code, kind, retry = classifyReason(e.Text, e.DefaultKind)
+		source = excReasonLexicon
+	case e.Declared:
+		source = excReasonDeclared
 	}
 	var cls excClassification
 	var err error
@@ -520,10 +567,10 @@ func openExceptionTx(q excQ, e exceptionOpen) (string, error) {
 	id := uuid.New().String()
 	_, err = q.Exec(`INSERT INTO exceptions
 		(id, project, class_id, source_kind, source_ref, kind, reason_code, retry_class, fingerprint, matched_by, match_distance,
-		 raised_by, task_id, trace_id, evidence_json, status, resolved_by, resolution_reason, opened_at, resolved_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		 raised_by, task_id, trace_id, evidence_json, status, resolved_by, resolution_reason, opened_at, resolved_at, reason_source)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		id, e.Project, cls.ClassID, e.SourceKind, e.SourceRef, kind, code, retry, cls.Fingerprint, cls.MatchedBy, cls.MatchDistance,
-		raisedBy, taskID, e.TraceID, evidence, status, resolvedBy, resolutionReason, e.At, resolvedAt)
+		raisedBy, taskID, e.TraceID, evidence, status, resolvedBy, resolutionReason, e.At, resolvedAt, source)
 	if err != nil {
 		return "", fmt.Errorf("insert exception: %w", err)
 	}
@@ -611,10 +658,21 @@ func excResolutionReason(newStatus, cancelCode string) string {
 //   - entering 'blocked' opens a task_block row;
 //   - cancelling a task that was NOT blocked, with a reason, writes one
 //     task_cancel row opened and resolved at once.
-func (d *DB) writeTransitionExceptions(tx *writerTx, task *models.Task, actor, oldStatus, newStatus string, reason *string, now string) error {
+//
+// reasonCode is the caller's declared code ("" = none, validated upstream). It
+// replaces the lexicon on the block row and the cancel row, and a declared
+// cancel of a blocked task also writes its task_cancel row so the code is
+// recorded (design dbc317f4 §4). With no code every row is as before.
+func (d *DB) writeTransitionExceptions(tx *writerTx, task *models.Task, actor, oldStatus, newStatus string, reason *string, reasonCode, now string) error {
 	text := ""
 	if reason != nil {
 		text = strings.TrimSpace(*reason)
+	}
+	declared := func(e exceptionOpen) exceptionOpen {
+		if c, ok := declaredReasonClass[reasonCode]; ok {
+			e.Code, e.Kind, e.Retry, e.Declared = reasonCode, c.kind, c.retry, true
+		}
+		return e
 	}
 	if oldStatus == "blocked" {
 		raiser, err := openExceptionRaiserTx(tx, task.ID, excOpenBlockSources)
@@ -622,7 +680,9 @@ func (d *DB) writeTransitionExceptions(tx *writerTx, task *models.Task, actor, o
 			return fmt.Errorf("read open exception: %w", err)
 		}
 		cancelCode := ""
-		if newStatus == "cancelled" && text != "" {
+		if newStatus == "cancelled" && reasonCode != "" {
+			cancelCode = reasonCode
+		} else if newStatus == "cancelled" && text != "" {
 			cancelCode, _, _ = classifyReason(text, "")
 		}
 		r := exceptionResolution{
@@ -639,24 +699,27 @@ func (d *DB) writeTransitionExceptions(tx *writerTx, task *models.Task, actor, o
 	}
 	switch {
 	case newStatus == "blocked":
-		_, err := openExceptionTx(tx, exceptionOpen{
+		_, err := openExceptionTx(tx, declared(exceptionOpen{
 			Project: task.Project, SourceKind: excSourceTaskBlock, SourceRef: task.ID,
 			RaisedBy: actor, TaskID: task.ID, TraceID: task.TraceID,
 			Text: text, DefaultKind: "blocker", At: now,
-		})
+		}))
 		return err
-	case newStatus == "cancelled" && oldStatus != "blocked" && text != "":
+	case newStatus == "cancelled" && ((oldStatus != "blocked" && text != "") || reasonCode != ""):
 		by := "self"
 		if actor == "human" || actor == "user" {
 			by = "human"
 		}
-		code, _, _ := classifyReason(text, "")
-		_, err := openExceptionTx(tx, exceptionOpen{
+		code := reasonCode
+		if code == "" {
+			code, _, _ = classifyReason(text, "")
+		}
+		_, err := openExceptionTx(tx, declared(exceptionOpen{
 			Project: task.Project, SourceKind: excSourceTaskCancel, SourceRef: task.ID,
 			RaisedBy: actor, TaskID: task.ID, TraceID: task.TraceID,
 			Text: text, DefaultKind: "plan_change", At: now,
 			Resolved: &exceptionResolution{By: by, Reason: excResolutionReason("cancelled", code), At: now},
-		})
+		}))
 		return err
 	}
 	return nil

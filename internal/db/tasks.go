@@ -667,14 +667,34 @@ func (d *DB) CompleteTask(taskID, agentName, project string, result *string) (*m
 }
 
 func (d *DB) BlockTask(taskID, agentName, project string, reason *string) (*models.Task, error) {
-	return d.transitionTask(taskID, agentName, project, "blocked", nil, reason)
+	return d.BlockTaskWithCode(taskID, agentName, project, reason, "")
 }
 
 func (d *DB) CancelTask(taskID, agentName, project string, reason *string) (*models.Task, error) {
-	return d.transitionTask(taskID, agentName, project, "cancelled", nil, reason)
+	return d.CancelTaskWithCode(taskID, agentName, project, reason, "")
+}
+
+// BlockTaskWithCode blocks with an optional declared reason code (one of
+// DeclaredReasonCodes, validated by the caller; "" = none). The code goes only
+// to the exception row: tasks.blocked_reason keeps the free text.
+func (d *DB) BlockTaskWithCode(taskID, agentName, project string, reason *string, reasonCode string) (*models.Task, error) {
+	return d.transitionTaskCode(taskID, agentName, project, "blocked", nil, reason, reasonCode)
+}
+
+// CancelTaskWithCode cancels with an optional declared reason code, as
+// BlockTaskWithCode. A code with no text still records the exception row.
+func (d *DB) CancelTaskWithCode(taskID, agentName, project string, reason *string, reasonCode string) (*models.Task, error) {
+	return d.transitionTaskCode(taskID, agentName, project, "cancelled", nil, reason, reasonCode)
 }
 
 func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result, blockedReason *string) (*models.Task, error) {
+	return d.transitionTaskCode(taskID, agentName, project, newStatus, result, blockedReason, "")
+}
+
+func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, result, blockedReason *string, reasonCode string) (*models.Task, error) {
+	if reasonCode != "" && !IsDeclaredReasonCode(reasonCode) {
+		return nil, fmt.Errorf("reason_code %q is not a declared reason code", reasonCode)
+	}
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
 	task, err := d.GetTask(taskID, project)
@@ -734,7 +754,7 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	// out of 'blocked' write their exception row in the SAME writer tx as the
 	// status CAS, so the transition and its record commit or roll back together.
 	// Every other transition keeps the plain autocommit write.
-	hasReason := blockedReason != nil && strings.TrimSpace(*blockedReason) != ""
+	hasReason := (blockedReason != nil && strings.TrimSpace(*blockedReason) != "") || reasonCode != ""
 	needExc := newStatus == "blocked" || leavingBlocked || (newStatus == "cancelled" && hasReason)
 	// Typed edges (design d523e74e): a prerequisite entering or leaving
 	// in-review / done / cancelled can change its held dependents' readiness;
@@ -889,7 +909,7 @@ func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result
 	}
 	if tx != nil {
 		if needExc {
-			if err := d.writeTransitionExceptions(tx, task, agentName, oldStatus, newStatus, blockedReason, now); err != nil {
+			if err := d.writeTransitionExceptions(tx, task, agentName, oldStatus, newStatus, blockedReason, reasonCode, now); err != nil {
 				return nil, fmt.Errorf("update task status: %w", err)
 			}
 		}
