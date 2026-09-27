@@ -264,13 +264,21 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 		return nil, nil, err
 	}
 
+	h.announceDispatched(project, dispatchedBy, profile, title, description, priority, task, backlog)
+	return task, autoBoard, nil
+}
+
+// announceDispatched emits the signals for a freshly created task. Shared by
+// dispatchCore and batch_dispatch_tasks so a batch item behaves exactly as its
+// single dispatch_task twin.
+func (h *Handlers) announceDispatched(project, dispatchedBy, profile, title, description, priority string, task *models.Task, backlog bool) {
 	// A backlog task is groomed-but-not-claimable: emit only the visual event so
 	// the board shows it, and SKIP every claim-signal (P0/P1 push, the per-agent
 	// inbox delivery, and the task.dispatched event that drives auto-claim). It
 	// becomes claimable + surfaced only when promote_task lifts it to pending.
 	if backlog {
 		h.events.Emit(MCPEvent{Type: "task", Action: "backlog", Agent: dispatchedBy, Project: project, Target: profile, Label: title})
-		return task, autoBoard, nil
+		return
 	}
 
 	// A task dispatched blocked_by an unfinished prerequisite is held: pending
@@ -278,11 +286,10 @@ func (h *Handlers) dispatchCore(project, dispatchedBy, profile, title, descripti
 	// announced exactly once (announceRelease). Same shape as the backlog skip.
 	if h.db.TaskHeld(project, task.ID) {
 		h.events.Emit(MCPEvent{Type: "task", Action: "held", Agent: dispatchedBy, Project: project, Target: task.ProfileSlug, Label: title})
-		return task, autoBoard, nil
+		return
 	}
 
 	h.announceClaimable(project, dispatchedBy, task.ProfileSlug, title, description, priority, task)
-	return task, autoBoard, nil
 }
 
 // announceReleased announces the held tasks a transition released
@@ -1462,6 +1469,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		AcceptanceCriteria []string `json:"acceptance_criteria"`
 		Dod                string   `json:"dod"`
 		VerifyCmd          *string  `json:"verify_cmd"`
+		Backlog            bool     `json:"backlog"`
 	}
 	if err := json.Unmarshal([]byte(tasksJSON), &items); err != nil {
 		return toolResultError(fmt.Sprintf("invalid tasks JSON: %v", err)), nil
@@ -1493,14 +1501,13 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 			priority = "P2"
 		}
 		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod, VerifyCmd: item.VerifyCmd}
-		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, false, nil)
+		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, item.Backlog, nil)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", item.Title, err))
 			continue
 		}
 		dispatched = append(dispatched, map[string]string{"id": task.ID, "title": task.Title})
-		h.events.Emit(MCPEvent{Type: "task", Action: "dispatch", Agent: agent, Project: project, Target: item.Profile, Label: item.Title})
-		emitTaskEvent(h.events, "task.dispatched", "dispatch", project, task)
+		h.announceDispatched(project, agent, item.Profile, item.Title, item.Description, priority, task, item.Backlog)
 	}
 
 	return h.resultJSONTracked(project, agent, "batch_dispatch_tasks", map[string]any{
