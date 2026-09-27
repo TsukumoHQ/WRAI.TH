@@ -377,6 +377,71 @@ func TestResumeTaskNotBlockedIsInvalidArgument(t *testing.T) {
 	}
 }
 
+// TestCancelTaskEmitsCancelledEvent: cancel_task publishes one task.cancelled
+// semantic event (with the reason when given) like block_task publishes
+// task.blocked; a failed cancel publishes none (14fe2cf5).
+func TestCancelTaskEmitsCancelledEvent(t *testing.T) {
+	ctx := context.Background()
+	h := testHandlers(t)
+	cancelled := func(taskID string) []MCPEvent {
+		var evs []MCPEvent
+		for _, ev := range h.events.Recent("p1", 0) {
+			if ev.Type == "task.cancelled" && ev.Semantic["task_id"] == taskID {
+				evs = append(evs, ev)
+			}
+		}
+		return evs
+	}
+	dispatch := func(title string) string {
+		t.Helper()
+		res, _ := h.HandleDispatchTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "profile": "dev", "title": title}))
+		return parseJSON(t, res)["task"].(map[string]any)["id"].(string)
+	}
+
+	t.Run("OneEventWithTaskID", func(t *testing.T) {
+		id := dispatch("to cancel")
+		parseJSON(t, result(h.HandleCancelTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": id}))))
+		evs := cancelled(id)
+		if len(evs) != 1 {
+			t.Fatalf("task.cancelled events = %d, want 1", len(evs))
+		}
+		if _, ok := evs[0].Semantic["reason"]; ok {
+			t.Fatalf("reason = %v, want absent when none given", evs[0].Semantic["reason"])
+		}
+	})
+
+	t.Run("CarriesReason", func(t *testing.T) {
+		id := dispatch("to cancel with reason")
+		parseJSON(t, result(h.HandleCancelTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": id, "reason": "superseded"}))))
+		evs := cancelled(id)
+		if len(evs) != 1 || evs[0].Semantic["reason"] != "superseded" {
+			t.Fatalf("events = %+v, want one with reason superseded", evs)
+		}
+	})
+
+	t.Run("FailedCancelEmitsNothing", func(t *testing.T) {
+		before := 0
+		for _, ev := range h.events.Recent("p1", 0) {
+			if ev.Type == "task.cancelled" {
+				before++
+			}
+		}
+		res, _ := h.HandleCancelTask(ctx, call(map[string]any{"project": "p1", "as": "cto", "task_id": "00000000-0000-0000-0000-000000000000"}))
+		if res == nil || !res.IsError {
+			t.Fatalf("cancel of unknown task: want error result, got %+v", res)
+		}
+		after := 0
+		for _, ev := range h.events.Recent("p1", 0) {
+			if ev.Type == "task.cancelled" {
+				after++
+			}
+		}
+		if after != before {
+			t.Fatalf("task.cancelled events %d -> %d after a failed cancel, want unchanged", before, after)
+		}
+	})
+}
+
 // Design dbc317f4: block_task / cancel_task refuse a reason_code outside the
 // closed vocabulary with INVALID_ARGUMENT before any write, and accept a
 // declared one.

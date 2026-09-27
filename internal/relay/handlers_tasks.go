@@ -1016,6 +1016,11 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 		return taskOpError(err, "failed to cancel task: %v", err), nil
 	}
 	h.announceReleased(project, task.Released)
+	cancelledExtra := map[string]any{}
+	if reason != nil {
+		cancelledExtra["reason"] = *reason
+	}
+	emitTaskEvent(h.events, "task.cancelled", "cancel", project, task, cancelledExtra)
 	pushStatusAsync(h.getConnector(), task, "cancelled", reason)
 
 	// Notify dispatcher
