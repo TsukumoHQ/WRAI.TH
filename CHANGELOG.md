@@ -3,6 +3,24 @@
 All notable changes to wrai.th are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.23.2] — 2026-09-27
+
+A patch release: `batch_dispatch_tasks` now treats each item exactly like a single `dispatch_task`, and a failure to record an exception no longer stops the relay from expiring deliveries or releasing a dead holder's lease.
+
+### Fixed
+- `batch_dispatch_tasks` ignored a per-item `backlog: true` and filed the task as pending. Each item now honours `backlog` and is announced the same way as a single `dispatch_task`:
+  - a backlog item only appears on the board;
+  - an item held by a prerequisite is announced once, when it is released;
+  - a claimable item gets the same inbox delivery and P0/P1 push.
+
+  (task:3b919eb6, 89a4ae7)
+- A failed exception write rolled back the change it was recording. As a result, expiring deliveries stayed in the inbox and failed again on every sweep, a dead holder's expired lease was never requeued, and a deactivated agent's lease was never released. The exception write is now best-effort inside the same transaction: if it fails, it is rolled back to a savepoint and logged with its source, and the expiry, requeue or release still commits. When the write succeeds, the rows are unchanged (task:c6f6c5e3, c7eed0d)
+
+### Upgrade notes
+- No schema change, no new tool and no new argument. Rolling back to 1.23.1 is safe.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.23.1...v1.23.2
+
 ## [1.23.1] — 2026-09-27
 
 A patch release: a claimed task can be handed back, the relay stops reporting a harmless refusal as a retryable internal error, and guard owners hear about an expiry a week ahead.
