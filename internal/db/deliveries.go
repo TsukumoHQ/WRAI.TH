@@ -448,7 +448,9 @@ func (d *DB) ExpireDeliveries() (int, error) {
 	// split by the recipient's state read in this tx, becomes at most two typed
 	// exception rows per message. The deadletter rows above are not touched.
 	if deadletterExceptionsEnabled {
-		if err := expireDeliveryExceptionsTx(tx, now); err != nil {
+		if err := bestEffortExceptionTx(tx, excSourceDeadletter, "expire-sweep@"+now, func() error {
+			return expireDeliveryExceptionsTx(tx, now)
+		}); err != nil {
 			return 0, fmt.Errorf("deadletter exceptions: %w", err)
 		}
 	}

@@ -203,9 +203,9 @@ func TestCascadeReleaseOpensResolvedException(t *testing.T) {
 	}
 }
 
-// TestCascadeReleaseTxAtomic: when the exception write fails, the release
-// rolls back with it — the task keeps its status and holder and is not
-// reported as released.
+// TestCascadeReleaseTxAtomic: when the exception write fails (here: its table
+// is gone), only the exception savepoint rolls back; the release still commits
+// and is reported (c6f6c5e3: the exceptions journal is an observer).
 func TestCascadeReleaseTxAtomic(t *testing.T) {
 	d := testDB(t)
 	c := d.conn
@@ -228,14 +228,14 @@ func TestCascadeReleaseTxAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cascade: %v", err)
 	}
-	if len(res.Released) != 0 {
-		t.Errorf("Released = %+v, want none after a failed exception write", res.Released)
+	if len(res.Released) != 1 {
+		t.Errorf("Released = %+v, want the lease released despite a failed exception write", res.Released)
 	}
-	if s := taskStatus(t, d, "t-leased"); s != "in-progress" {
-		t.Errorf("status = %s, want in-progress (rolled back)", s)
+	if s := taskStatus(t, d, "t-leased"); s != "pending" {
+		t.Errorf("status = %s, want pending (release kept)", s)
 	}
-	if h := leaseHolder(t, d, "t-leased"); h != "holder" {
-		t.Errorf("lease_holder = %q, want holder (rolled back)", h)
+	if h := leaseHolder(t, d, "t-leased"); h != "" {
+		t.Errorf("lease_holder = %q, want NULL (release kept)", h)
 	}
 }
 

@@ -135,6 +135,25 @@ type excQ interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
+// bestEffortExceptionTx runs fn, an exception write that annotates a primary
+// write on tx, inside a savepoint: the journal is an observer, so when fn fails
+// its partial rows are rolled back, the failure is logged once with
+// source_kind + source_ref, and the primary write commits as it would have
+// (c6f6c5e3). Only a savepoint statement error is returned.
+func bestEffortExceptionTx(tx *writerTx, sourceKind, sourceRef string, fn func() error) error {
+	if _, err := tx.Exec(`SAVEPOINT exception_write`); err != nil {
+		return err
+	}
+	if ferr := fn(); ferr != nil {
+		if _, err := tx.Exec(`ROLLBACK TO exception_write`); err != nil {
+			return err
+		}
+		log.Printf("exceptions: write failed, primary write kept: source_kind=%s source_ref=%s: %v", sourceKind, sourceRef, ferr)
+	}
+	_, err := tx.Exec(`RELEASE exception_write`)
+	return err
+}
+
 // reasonRule is one entry of the L0 reason lexicon: first match wins.
 type reasonRule struct {
 	code, kind, retry string

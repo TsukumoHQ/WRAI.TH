@@ -341,7 +341,11 @@ func (d *DB) requeueExpiredLease(id, project, holder, status, now string, traceI
 	if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
 		return false
 	}
-	if _, err := openExceptionTx(tx, leaseExceptionOpen(project, id, holder, "expired-swept", now, traceID)); err != nil {
+	e := leaseExceptionOpen(project, id, holder, "expired-swept", now, traceID)
+	if err := bestEffortExceptionTx(tx, e.SourceKind, e.SourceRef, func() error {
+		_, err := openExceptionTx(tx, e)
+		return err
+	}); err != nil {
 		return false
 	}
 	return tx.Commit() == nil

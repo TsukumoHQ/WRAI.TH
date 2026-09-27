@@ -170,7 +170,11 @@ func (d *DB) releaseDeactivatedLease(id, project, holder, status, now string, tr
 	if n, raErr := res.RowsAffected(); raErr != nil || n == 0 {
 		return false
 	}
-	if _, err := openExceptionTx(tx, leaseExceptionOpen(project, id, holder, "agent-deactivated", now, traceID)); err != nil {
+	e := leaseExceptionOpen(project, id, holder, "agent-deactivated", now, traceID)
+	if err := bestEffortExceptionTx(tx, e.SourceKind, e.SourceRef, func() error {
+		_, err := openExceptionTx(tx, e)
+		return err
+	}); err != nil {
 		return false
 	}
 	return tx.Commit() == nil

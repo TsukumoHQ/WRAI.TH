@@ -718,3 +718,95 @@ func excRerunBackfill(t *testing.T, d *DB) int {
 	}
 	return backfillExceptionsV1(d.conn)
 }
+
+// failExceptionInserts makes every exceptions INSERT abort (test-only trigger,
+// no prod seam) and returns the exception_classes count before the failure, so
+// a test can prove no partial class row survives either (c6f6c5e3).
+func failExceptionInserts(t *testing.T, d *DB) int {
+	t.Helper()
+	if _, err := d.conn.Exec(`CREATE TRIGGER exc_fail BEFORE INSERT ON exceptions
+		BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	return countRows(t, d, `SELECT COUNT(*) FROM exception_classes`)
+}
+
+// TestExceptionWriteFailure_ExpireDeliveriesStillExpires: the P7 deadletter
+// exceptions are an observer; when they fail the deliveries still expire, the
+// deadletter journal still lands, and no exception row survives.
+func TestExceptionWriteFailure_ExpireDeliveriesStillExpires(t *testing.T) {
+	d := testDB(t)
+	m, _, err := d.InsertMessageWithDeliveries("p1", "sender", "bot-a", "notification", "urgent", "body", "{}", "P0", 0, nil, nil, []string{"bot-a", "bot-b"}, "")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	expireMessageNow(t, d, m.ID)
+	classes := failExceptionInserts(t, d)
+
+	n, err := d.ExpireDeliveries()
+	if err != nil || n != 2 {
+		t.Fatalf("expire = %d, %v; want 2, nil", n, err)
+	}
+	if got := countRows(t, d, `SELECT COUNT(*) FROM deliveries WHERE message_id = ? AND state = 'expired'`, m.ID); got != 2 {
+		t.Fatalf("expired deliveries = %d, want 2", got)
+	}
+	if got := countRows(t, d, `SELECT COUNT(*) FROM deadletter WHERE message_id = ?`, m.ID); got != 2 {
+		t.Fatalf("deadletter rows = %d, want 2", got)
+	}
+	if got := countRows(t, d, `SELECT COUNT(*) FROM exceptions`); got != 0 {
+		t.Fatalf("exception rows = %d, want 0", got)
+	}
+	if got := countRows(t, d, `SELECT COUNT(*) FROM exception_classes`); got != classes {
+		t.Fatalf("exception_classes = %d, want %d (no partial write)", got, classes)
+	}
+}
+
+// TestExceptionWriteFailure_LeaseSweepStillRequeues: a failed P5 exception
+// write never keeps a dead holder's lease.
+func TestExceptionWriteFailure_LeaseSweepStillRequeues(t *testing.T) {
+	d := testDB(t)
+	id := dispatchClaimed(t, d, "p1", "dead-holder")
+	forceLeaseExpired(t, d, id, "p1")
+	if err := d.DeactivateAgent("p1", "dead-holder"); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+	failExceptionInserts(t, d)
+
+	swept, err := d.SweepExpiredLeases()
+	if err != nil || len(swept) != 1 {
+		t.Fatalf("sweep: %v, %d swept; want 1", err, len(swept))
+	}
+	if s, h := taskStatus(t, d, id), leaseHolder(t, d, id); s != "pending" || h != "" {
+		t.Fatalf("status=%s holder=%q, want pending/NULL", s, h)
+	}
+	if n := len(excRowsFor(t, d, id)); n != 0 {
+		t.Fatalf("exceptions = %d, want 0", n)
+	}
+}
+
+// TestExceptionWriteFailure_CascadeStillReleases: a failed P5b exception write
+// never keeps a deactivated agent's lease.
+func TestExceptionWriteFailure_CascadeStillReleases(t *testing.T) {
+	d := testDB(t)
+	c := d.conn
+	seedProject(t, c, "p1")
+	seedProfile(t, c, "p1", "backend")
+	seedAgent(t, c, "p1", "holder", "active", "backend", "", 0)
+	seedTask(t, c, "t-leased", "p1", "in-progress", "cto", "holder", "holder", "backend", "", "", false)
+	setLease(t, d, "t-leased", "holder")
+	failExceptionInserts(t, d)
+
+	if err := d.DeactivateAgent("p1", "holder"); err != nil {
+		t.Fatal(err)
+	}
+	res, err := d.CascadeAgentDeactivation("p1", "holder")
+	if err != nil || len(res.Released) != 1 {
+		t.Fatalf("cascade: %v, released=%d; want 1", err, len(res.Released))
+	}
+	if s, h := taskStatus(t, d, "t-leased"), leaseHolder(t, d, "t-leased"); s != "pending" || h != "" {
+		t.Fatalf("status=%s holder=%q, want pending/NULL", s, h)
+	}
+	if n := len(excRowsFor(t, d, "t-leased")); n != 0 {
+		t.Fatalf("exceptions = %d, want 0", n)
+	}
+}
