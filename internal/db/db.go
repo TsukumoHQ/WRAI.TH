@@ -1026,6 +1026,12 @@ func migrate(conn *sql.DB) error {
 		// regression re-notifies exactly once. Nullable, additive.
 		"refusal_notified_at": "TEXT",
 
+		// stale_notified_at stamps the stale-held alert (task 887351ac): an
+		// accepted / in-progress task silent past stale_task_age alerts its
+		// dispatcher once per stale episode — re-armed by any later activity.
+		// Kept out of taskColumns/scanTask (dedicated queries only).
+		"stale_notified_at": "TEXT",
+
 		// --- Correlation (trace_id v1) — the W3C-trace-id-shaped (32 lowercase
 		// hex, crypto/rand) grouping key for one dispatch's causal chain: task ->
 		// messages -> events -> gate. NULL = no trace. Deliberately kept OUT of

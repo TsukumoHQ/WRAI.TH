@@ -65,15 +65,43 @@ var ackMarkColumn = map[string]string{
 	NormAckNotify:   "ack_notified_at",
 }
 
-// ackClock is when a task's ACK clock started: the last time it entered
-// 'pending' (task c933b2f1), falling back to dispatched_at for rows written
-// without pending_since (linear mirror, pre-migration binaries).
-const ackClock = `COALESCE(t.pending_since, t.dispatched_at)`
+// ackBlockingEdges selects the live readiness-blocking edges out of task t
+// (the edge set readyPredicate judges), joined to their prerequisite rp.
+const ackBlockingEdges = `FROM org_edges re JOIN tasks rp ON rp.id = re.dst_id
+	WHERE re.src_kind = 'task' AND re.src_id = t.id AND re.dst_kind = 'task' AND re.removed_at IS NULL
+	  AND re.type IN (SELECT type FROM edge_semantics WHERE blocks_readiness = 1)`
 
-// ackCandidate is task_pending_unclaimed / task_pending_live: exactly the
-// GetUnackedTasks predicate the legacy checker reads each tick.
+// ackReadySince is when t's last blocking prerequisite was satisfied (done,
+// or in review for an until=in-review edge); ” with no blocking edge.
+const ackReadySince = `COALESCE((SELECT MAX(CASE WHEN COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review'
+		THEN COALESCE(rp.in_review_at, rp.done_at) ELSE rp.done_at END) ` + ackBlockingEdges + `), '')`
+
+// ackPoolIdleSince, for an unassigned (profile pool) task, is the last time a
+// doer of its profile claimed or finished another task: a pool ticket is owed
+// an ACK only once the pool has sat idle, not while it drains (task 887351ac).
+const ackPoolIdleSince = `CASE WHEN COALESCE(t.assigned_to, '') = '' THEN COALESCE((SELECT MAX(MAX(COALESCE(x.claimed_at, ''), COALESCE(x.completed_at, '')))
+		FROM tasks x WHERE x.project = t.project AND x.id <> t.id AND COALESCE(x.profile_slug, '') = COALESCE(t.profile_slug, '')), '')
+	ELSE '' END`
+
+// ackClock is when a task's ACK clock started: the last time it entered
+// 'pending' (task c933b2f1; dispatched_at for rows written without
+// pending_since), moved forward to when it became READY (its blocked_by
+// prerequisites satisfied) and, for a pool task, to when its profile's doers
+// went idle (task 887351ac). Timestamps share memoryTimeFmt, so MAX compares.
+const ackClock = `MAX(COALESCE(t.pending_since, t.dispatched_at), ` + ackReadySince + `, ` + ackPoolIdleSince + `)`
+
+// ackCandidate is task_pending_unclaimed / task_pending_live: the legacy
+// GetUnackedTasks predicate, narrowed to tasks that are READY (no unsatisfied
+// blocking edge, readyPredicate's rule, hold row or not) and, for a pool task,
+// whose profile has no doer holding an accepted / in-progress task. Args:
+// cutoff, now (edge valid_until).
 const ackCandidate = `t.status = 'pending' AND t.archived_at IS NULL AND ` + ackClock + ` < ?
-	AND (t.run_state IS NULL OR t.run_state = '')`
+	AND (t.run_state IS NULL OR t.run_state = '')
+	AND NOT EXISTS (SELECT 1 ` + ackBlockingEdges + ` AND (re.valid_until IS NULL OR re.valid_until > ?)
+		AND NOT (rp.status = 'done' OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))
+	AND (COALESCE(t.assigned_to, '') <> '' OR NOT EXISTS (SELECT 1 FROM tasks x
+		WHERE x.project = t.project AND x.id <> t.id AND COALESCE(x.profile_slug, '') = COALESCE(t.profile_slug, '')
+		  AND x.status IN ('accepted', 'in-progress') AND x.archived_at IS NULL))`
 
 // TaskObligation is an active ACK obligation joined to the task fields the
 // sweeper needs to decide and word its sanction.
@@ -127,7 +155,7 @@ func (d *DB) InstantiateTaskAck(cutoff, now time.Time) (int, error) {
 		FROM tasks t JOIN norms n ON `+ackNormKnown+` AND (n.project IS NULL OR n.project = t.project)
 		WHERE `+ackCandidate+`
 		  AND NOT EXISTS (SELECT 1 FROM obligations o WHERE o.norm_id = n.id AND o.subject_kind = ? AND o.subject_id = t.id)`,
-		SubjectTask, ObligationUnfulfilled, cutoff.UTC().Format(memoryTimeFmt), SubjectTask)
+		SubjectTask, ObligationUnfulfilled, cutoff.UTC().Format(memoryTimeFmt), now.UTC().Format(memoryTimeFmt), SubjectTask)
 	if err != nil {
 		return 0, fmt.Errorf("obligation candidates: %w", err)
 	}
@@ -222,7 +250,7 @@ func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
 		JOIN tasks t ON t.id = o.subject_id
 		WHERE o.state = ? AND o.subject_kind = ? AND `+ackCandidate+`
 		ORDER BY `+ackClock+`, t.id, n.eval_order`,
-		ObligationActive, SubjectTask, cutoff.UTC().Format(memoryTimeFmt))
+		ObligationActive, SubjectTask, cutoff.UTC().Format(memoryTimeFmt), d.Now().UTC().Format(memoryTimeFmt))
 	if err != nil {
 		return nil, fmt.Errorf("active obligations: %w", err)
 	}

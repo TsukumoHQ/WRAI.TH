@@ -269,6 +269,9 @@ func TestACKEquivalence(t *testing.T) {
 				seedTask("b", "pending", ago(50*time.Minute)),
 				seedTask("c", "pending", ago(5*time.Minute)),
 				seedTask("d", "accepted", ago(50*time.Minute)),
+				// Another profile: a same-profile accepted task would (by
+				// design, task 887351ac) hold the pool tasks a/b/c back.
+				setSQL(`UPDATE tasks SET profile_slug = 'ops' WHERE id = 'd'`),
 			},
 			{setSQL(`UPDATE tasks SET dispatched_at = ? WHERE id = 'c'`, ago(20*time.Minute))},
 			nil,

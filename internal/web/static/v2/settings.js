@@ -66,6 +66,7 @@ const LABELS = {
   token_usage_retention_days: { label: 'Token usage retention (days)', help: 'drives purge + rollup window' },
   ack_notify_age: { label: 'Ack notify age', help: 'when an unacked delivery is re-notified' },
   ack_escalate_age: { label: 'Ack escalate age', help: 'must be greater than the notify age' },
+  stale_task_age: { label: 'Stale task age', help: 'accepted/in-progress silent this long alerts the dispatcher once' },
   backup_keep: { label: 'Backups kept', help: 'env RELAY_BACKUP_KEEP wins when set' },
   reviewer_ttl_days: { label: 'Reviewer TTL (days)', help: 'env RELAY_REVIEWER_TTL_DAYS wins when set' },
   foreign_backup_min_age: { label: 'Foreign backup min age', help: 'minimum age before a foreign backup is swept' },

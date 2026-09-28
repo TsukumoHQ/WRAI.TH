@@ -101,6 +101,7 @@ var settingSpecs = []settingSpec{
 	{Key: "token_usage_retention_days", Group: groupOperational, Kind: kindInt, Source: "db", Writable: true, Min: "1", Max: "90", Default: "14", Note: "drives both token-usage purge and rollup window"},
 	{Key: "ack_notify_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Minute), Max: dur(24 * time.Hour), Default: dur(15 * time.Minute)},
 	{Key: "ack_escalate_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Minute), Max: dur(24 * time.Hour), Default: dur(45 * time.Minute), Note: "must be > ack_notify_age"},
+	{Key: "stale_task_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(5 * time.Minute), Max: dur(48 * time.Hour), Default: dur(2 * time.Hour), Note: "accepted/in-progress with no heartbeat or activity this long alerts the dispatcher once"},
 	{Key: "backup_keep", Group: groupOperational, Kind: kindInt, Source: "env", EnvName: "RELAY_BACKUP_KEEP", Writable: true, Min: "1", Max: "24", Default: "3", Note: "env wins over setting"},
 	{Key: "reviewer_ttl_days", Group: groupOperational, Kind: kindInt, Source: "env", EnvName: "RELAY_REVIEWER_TTL_DAYS", Writable: true, Min: "1", Max: "90", Default: "7", Note: "env wins over setting"},
 	{Key: "foreign_backup_min_age", Group: groupOperational, Kind: kindDuration, Source: "db", Writable: true, Min: dur(time.Hour), Max: dur(30 * 24 * time.Hour), Default: dur(24 * time.Hour)},

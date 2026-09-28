@@ -34,7 +34,7 @@ func getSettingEntry(t *testing.T, body map[string]any, key string) (map[string]
 }
 
 // TestSettingsSpecAllowlistDerived (T2a AC1): writableKeys() is the spec-derived
-// full PUT allowlist (35 = 9 legacy + 26 Operational), contains no evil_key;
+// full PUT allowlist (36 = 9 legacy + 27 Operational), contains no evil_key;
 // apiPutSetting consults the spec — a legacy key and an Operational key both
 // apply via PUT; spec keys are unique and every group is valid.
 func TestSettingsSpecAllowlistDerived(t *testing.T) {
@@ -53,6 +53,7 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 		"ack_manager_age", "ack_human_age", "answer_reply_age", "answer_role_age",
 		"class_budget_mode", "attribution_share", "knowledge_min_compaction_lag",
 		"coherence_mode", "coherence_reassess_age", "coherence_reassess_breaking_age", "coherence_role_age",
+		"stale_task_age",
 	}
 
 	wk := writableKeys()
@@ -60,8 +61,8 @@ func TestSettingsSpecAllowlistDerived(t *testing.T) {
 	for _, k := range append(append([]string{}, legacy...), operational...) {
 		wantWK[k] = true
 	}
-	if len(wk) != 35 || len(wantWK) != 35 {
-		t.Fatalf("writableKeys size %d, expected set size %d, want 35", len(wk), len(wantWK))
+	if len(wk) != 36 || len(wantWK) != 36 {
+		t.Fatalf("writableKeys size %d, expected set size %d, want 36", len(wk), len(wantWK))
 	}
 	for k := range wantWK {
 		if !wk[k] {
