@@ -138,32 +138,20 @@ func rateLimitMiddleware(reqPerMin int, next http.Handler) http.Handler {
 	})
 }
 
-// corsMiddleware sets CORS headers for the configured origins.
-// If origins is empty, no CORS headers are added (same-origin by default).
+// corsMiddleware sets CORS headers for the configured origins. A request
+// with no Origin, or from the relay's own origin (Origin host == Host), passes
+// untouched. Any other origin not listed is refused 403 here and never
+// reaches the handler (F-03): without CORS headers the browser would only
+// hide the response, the side effect would already have run.
 func corsMiddleware(origins []string, next http.Handler) http.Handler {
-	if len(origins) == 0 {
-		return next
-	}
-	allowAll := len(origins) == 1 && origins[0] == "*"
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if origin == "" {
+		if origin == "" || originAllowed(origin, r.Host, nil) {
 			next.ServeHTTP(w, r)
 			return
 		}
-
-		allowed := allowAll
-		if !allowed {
-			for _, o := range origins {
-				if o == origin {
-					allowed = true
-					break
-				}
-			}
-		}
-		if !allowed {
-			next.ServeHTTP(w, r)
+		if !originAllowed(origin, r.Host, origins) {
+			http.Error(w, `{"error":"origin not allowed"}`, http.StatusForbidden)
 			return
 		}
 

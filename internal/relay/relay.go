@@ -145,7 +145,7 @@ func New(database *db.DB, ingester *ingest.Ingester, cfg config.Config) *Relay {
 //   - /mcp     → MCP Streamable HTTP handler
 //   - /api/*   → REST API for the web UI
 //   - /*       → Embedded static files (web UI)
-func (r *Relay) buildHandler() http.Handler {
+func (r *Relay) buildHandler(addr string) http.Handler {
 	mux := http.NewServeMux()
 
 	// MCP handler
@@ -175,7 +175,8 @@ func (r *Relay) buildHandler() http.Handler {
 	}
 	mux.Handle("/", uiHandler)
 
-	return r.buildMiddlewareChain(mux)
+	_, port, _ := net.SplitHostPort(addr)
+	return r.buildMiddlewareChain(mux, port)
 }
 
 // ListenAndServe binds addr and serves the composite handler. Kept for
@@ -183,7 +184,7 @@ func (r *Relay) buildHandler() http.Handler {
 // Serve with a listener opened earlier so the port is reachable before
 // migrations/backups run.
 func (r *Relay) ListenAndServe(addr string) error {
-	r.httpServer = &http.Server{Addr: addr, Handler: r.buildHandler()}
+	r.httpServer = &http.Server{Addr: addr, Handler: r.buildHandler(addr)}
 	return r.httpServer.ListenAndServe()
 }
 
@@ -192,13 +193,15 @@ func (r *Relay) ListenAndServe(addr string) error {
 // migrations — so the port is reachable and a "listening" log line appears
 // immediately, instead of only after however long that heavy work takes.
 func (r *Relay) Serve(ln net.Listener) error {
-	r.httpServer = &http.Server{Addr: ln.Addr().String(), Handler: r.buildHandler()}
+	r.httpServer = &http.Server{Addr: ln.Addr().String(), Handler: r.buildHandler(ln.Addr().String())}
 	return r.httpServer.Serve(ln)
 }
 
 // buildMiddlewareChain wraps the mux with security middleware.
-// Order: CORS (outermost) → RateLimit → BodyLimit → Auth → handler.
-func (r *Relay) buildMiddlewareChain(handler http.Handler) http.Handler {
+// Order: CORS (outermost) → RateLimit → BodyLimit → Auth → APIGuard → handler.
+// port is the listen port the /api/* Host check pins loopback names to.
+func (r *Relay) buildMiddlewareChain(handler http.Handler, port string) http.Handler {
+	handler = apiGuardMiddleware(port, r.Config.AllowedHosts, handler)
 	handler = authMiddleware(r.Config.APIKey, handler)
 	handler = bodySizeLimitMiddleware(r.Config.MaxBody, handler)
 	handler = rateLimitMiddleware(r.Config.RateLimit, handler)

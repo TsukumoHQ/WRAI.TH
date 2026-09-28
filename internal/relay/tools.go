@@ -21,6 +21,10 @@ var projectParam = mcp.WithString("project", mcp.Description("Project namespace.
 // meanings live in the relay skill, the enum costs 177 B per tool.
 var reasonCodeParam = mcp.WithString("reason_code", mcp.Enum(db.DeclaredReasonCodes...))
 
+// leaseGenerationParam fences a terminal write to the caller's lease grant
+// (S3 0b980988): echo the lease_generation returned by claim/get_task.
+var leaseGenerationParam = mcp.WithNumber("lease_generation", mcp.Description("From claim/get_task; stale = TASK_LEASE_FENCED"))
+
 var formatParam = mcp.WithString("format", mcp.Description("'md' (default, markdown table — ~half the tokens) or 'json'"), mcp.Enum("md", "json"))
 
 // sessionContextParam selects the boot-payload shape (WRAITH R1): 'full'
@@ -627,6 +631,7 @@ func reviewTaskTool() mcp.Tool {
 		mcp.WithString("git_branch", mcp.Description("Branch the work sits on (review-gate git zone; stored opaquely)")),
 		mcp.WithString("git_worktree", mcp.Description("Absolute path of the worktree holding the work")),
 		mcp.WithString("git_target", mcp.Description("Branch the work should merge into")),
+		leaseGenerationParam,
 	)
 }
 
@@ -638,6 +643,7 @@ func completeTaskTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("result", mcp.Description("Task output/result")),
+		leaseGenerationParam,
 	)
 }
 
@@ -650,6 +656,7 @@ func blockTaskTool() mcp.Tool {
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("reason", mcp.Description("Why blocked")),
 		reasonCodeParam,
+		leaseGenerationParam,
 	)
 }
 
@@ -773,7 +780,7 @@ func batchCompleteTasksTool() mcp.Tool {
 		mcp.WithDescription("Complete multiple tasks at once."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array: [{\"task_id\":\"...\",\"result\":\"...\"}]. result optional."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array: [{\"task_id\":\"...\",\"result\":\"...\",\"lease_generation\":N}]; optional: result, lease_generation."), mcp.Required()),
 	)
 }
 

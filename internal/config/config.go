@@ -19,8 +19,13 @@ const DefaultMaxBody int64 = 1 << 20
 type Config struct {
 	APIKey      string   // RELAY_API_KEY: shared secret for Bearer auth
 	CORSOrigins []string // RELAY_CORS_ORIGINS: allowed origins (comma-separated)
-	MaxBody     int64    // RELAY_MAX_BODY: max request body in bytes (default 1 MiB; 0 disables)
-	RateLimit   int      // RELAY_RATE_LIMIT: requests/minute per IP (opt-in; 0 = off)
+	// AllowedHosts extends the /api/* Host allowlist beyond the loopback names
+	// (localhost / 127.0.0.1 / [::1] at the listen port) — the public name a
+	// reverse proxy forwards, e.g. relay.example.com (RELAY_ALLOWED_HOSTS,
+	// comma-separated host or host:port).
+	AllowedHosts []string
+	MaxBody      int64 // RELAY_MAX_BODY: max request body in bytes (default 1 MiB; 0 disables)
+	RateLimit    int   // RELAY_RATE_LIMIT: requests/minute per IP (opt-in; 0 = off)
 
 	// Identity enforcement is no longer opt-in: every mutating tool call must
 	// resolve a real agent registered in a real project (guardIdentity), and the
@@ -86,6 +91,14 @@ func Load() Config {
 			origin = strings.TrimSpace(origin)
 			if origin != "" {
 				cfg.CORSOrigins = append(cfg.CORSOrigins, origin)
+			}
+		}
+	}
+
+	if v := os.Getenv("RELAY_ALLOWED_HOSTS"); v != "" {
+		for _, host := range strings.Split(v, ",") {
+			if host = strings.ToLower(strings.TrimSpace(host)); host != "" {
+				cfg.AllowedHosts = append(cfg.AllowedHosts, host)
 			}
 		}
 	}

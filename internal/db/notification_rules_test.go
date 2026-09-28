@@ -140,6 +140,9 @@ func TestComputeDigestStats(t *testing.T) {
 				t.Fatalf("start: %v", err)
 			}
 		case "done":
+			if _, err := d.ClaimTask(task.ID, "agent-a", "default"); err != nil {
+				t.Fatalf("claim: %v", err)
+			}
 			if _, err := d.CompleteTask(task.ID, "agent-a", "default", nil); err != nil {
 				t.Fatalf("complete: %v", err)
 			}

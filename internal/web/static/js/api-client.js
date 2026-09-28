@@ -205,7 +205,7 @@ export class APIClient {
 
   async deleteMemory(id) {
     try {
-      const res = await fetch(`/api/memories/${id}`, { method: "DELETE" });
+      const res = await fetch(`/api/memories/${id}`, { method: "DELETE", headers: { "Content-Type": "application/json" } });
       return res.ok;
     } catch {
       return false;
@@ -349,7 +349,7 @@ export class APIClient {
   async deleteTask(taskId, project) {
     try {
       const qs = project ? `?project=${encodeURIComponent(project)}` : "";
-      const res = await fetch(`/api/tasks/${taskId}${qs}`, { method: "DELETE" });
+      const res = await fetch(`/api/tasks/${taskId}${qs}`, { method: "DELETE", headers: { "Content-Type": "application/json" } });
       return res.ok;
     } catch {
       return false;

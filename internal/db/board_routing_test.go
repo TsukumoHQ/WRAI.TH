@@ -120,6 +120,9 @@ func TestBackfillProductBoardRouting(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 	result := "shipped"
+	if _, err := d.ClaimTask(doneTask.ID, "wraith-engine", "p1"); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
 	if _, err := d.CompleteTask(doneTask.ID, "wraith-engine", "p1", &result); err != nil {
 		t.Fatalf("complete: %v", err)
 	}

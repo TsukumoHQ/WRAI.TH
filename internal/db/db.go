@@ -953,6 +953,11 @@ func migrate(conn *sql.DB) error {
 		"lease_holder":       "TEXT",
 		"lease_expires_at":   "TEXT",
 		"lease_heartbeat_at": "TEXT",
+		// lease_generation fences terminal writes (S3 0b980988): bumped on every
+		// ownership grant (claim, reclaim, reassign with lease transfer), never
+		// reset, so a replaced worker holding an older generation cannot publish.
+		// NOT NULL DEFAULT 0: an old row reads as generation 0.
+		"lease_generation": "INTEGER NOT NULL DEFAULT 0",
 
 		// --- Git zone (review gate) — branch/worktree/target of the work,
 		// set at review_task time so an external supervisor can merge it.

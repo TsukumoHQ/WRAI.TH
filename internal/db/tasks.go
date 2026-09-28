@@ -75,7 +75,7 @@ const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, descri
 	"pr_url, pr_number, pr_state, pr_repo, " +
 	"integration_branch, run_state, " +
 	"goal, acceptance_criteria, dod, verify_cmd, refusal_notified_at, " +
-	"lease_holder, lease_expires_at, lease_heartbeat_at"
+	"lease_holder, lease_expires_at, lease_heartbeat_at, lease_generation"
 
 func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 	var t models.Task
@@ -90,7 +90,7 @@ func scanTask(row interface{ Scan(...any) error }) (models.Task, error) {
 		&t.PRURL, &t.PRNumber, &t.PRState, &t.PRRepo,
 		&t.IntegrationBranch, &t.RunState,
 		&t.Goal, &t.AcceptanceCriteria, &t.Dod, &t.VerifyCmd, &t.RefusalNotifiedAt,
-		&t.LeaseHolder, &t.LeaseExpiresAt, &t.LeaseHeartbeatAt)
+		&t.LeaseHolder, &t.LeaseExpiresAt, &t.LeaseHeartbeatAt, &t.LeaseGeneration)
 	return t, err
 }
 
@@ -446,7 +446,13 @@ func (d *DB) TaskHeld(project, taskID string) bool {
 
 // ReviewTask transitions a task to in-review (the agent's "PR up" signal).
 func (d *DB) ReviewTask(taskID, agentName, project string) (*models.Task, error) {
-	return d.transitionTask(taskID, agentName, project, "in-review", nil, nil)
+	return d.ReviewTaskFenced(taskID, agentName, project, nil)
+}
+
+// ReviewTaskFenced is ReviewTask with the caller's lease generation (nil =
+// not supplied). Terminal writes are fenced to the lease holder (checkLeaseFence).
+func (d *DB) ReviewTaskFenced(taskID, agentName, project string, gen *int64) (*models.Task, error) {
+	return d.transitionTaskCode(taskID, agentName, project, "in-review", nil, nil, "", gen)
 }
 
 // SetTaskGit records where the task's work physically lives (branch /
@@ -663,7 +669,13 @@ func (d *DB) StartTask(taskID, agentName, project string) (*models.Task, error) 
 }
 
 func (d *DB) CompleteTask(taskID, agentName, project string, result *string) (*models.Task, error) {
-	return d.transitionTask(taskID, agentName, project, "done", result, nil)
+	return d.CompleteTaskFenced(taskID, agentName, project, result, nil)
+}
+
+// CompleteTaskFenced is CompleteTask with the caller's lease generation (nil =
+// not supplied). Terminal writes are fenced to the lease holder (checkLeaseFence).
+func (d *DB) CompleteTaskFenced(taskID, agentName, project string, result *string, gen *int64) (*models.Task, error) {
+	return d.transitionTaskCode(taskID, agentName, project, "done", result, nil, "", gen)
 }
 
 func (d *DB) BlockTask(taskID, agentName, project string, reason *string) (*models.Task, error) {
@@ -678,20 +690,28 @@ func (d *DB) CancelTask(taskID, agentName, project string, reason *string) (*mod
 // DeclaredReasonCodes, validated by the caller; "" = none). The code goes only
 // to the exception row: tasks.blocked_reason keeps the free text.
 func (d *DB) BlockTaskWithCode(taskID, agentName, project string, reason *string, reasonCode string) (*models.Task, error) {
-	return d.transitionTaskCode(taskID, agentName, project, "blocked", nil, reason, reasonCode)
+	return d.BlockTaskFenced(taskID, agentName, project, reason, reasonCode, nil)
+}
+
+// BlockTaskFenced is BlockTaskWithCode with the caller's lease generation (nil
+// = not supplied). Terminal writes are fenced to the lease holder (checkLeaseFence).
+func (d *DB) BlockTaskFenced(taskID, agentName, project string, reason *string, reasonCode string, gen *int64) (*models.Task, error) {
+	return d.transitionTaskCode(taskID, agentName, project, "blocked", nil, reason, reasonCode, gen)
 }
 
 // CancelTaskWithCode cancels with an optional declared reason code, as
 // BlockTaskWithCode. A code with no text still records the exception row.
 func (d *DB) CancelTaskWithCode(taskID, agentName, project string, reason *string, reasonCode string) (*models.Task, error) {
-	return d.transitionTaskCode(taskID, agentName, project, "cancelled", nil, reason, reasonCode)
+	return d.transitionTaskCode(taskID, agentName, project, "cancelled", nil, reason, reasonCode, nil)
 }
 
 func (d *DB) transitionTask(taskID, agentName, project, newStatus string, result, blockedReason *string) (*models.Task, error) {
-	return d.transitionTaskCode(taskID, agentName, project, newStatus, result, blockedReason, "")
+	return d.transitionTaskCode(taskID, agentName, project, newStatus, result, blockedReason, "", nil)
 }
 
-func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, result, blockedReason *string, reasonCode string) (*models.Task, error) {
+// transitionTaskCode moves a task through the state machine. gen is the
+// caller's lease generation for a fenced (terminal) write; nil = not supplied.
+func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, result, blockedReason *string, reasonCode string, gen *int64) (*models.Task, error) {
 	if reasonCode != "" && !IsDeclaredReasonCode(reasonCode) {
 		return nil, fmt.Errorf("reason_code %q is not a declared reason code", reasonCode)
 	}
@@ -750,6 +770,39 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 	// the lease up (task.lease_transferred, reason voluntary).
 	priorHolder := strVal(task.LeaseHolder)
 
+	// Lease fencing (S3 0b980988): complete/block/review publish the worker's
+	// outcome, so only the holder (at the current generation) or an audited
+	// override actor may make them. readGen is CAS'd on every write below, so a
+	// re-grant racing this transition makes it match 0 rows.
+	// A Linear mirror has no relay claim lifecycle (it lands in-progress with a
+	// Linear assignee and no lease), so its assignee stands in for the holder.
+	fenceHolder := priorHolder
+	if fenceHolder == "" && task.Source == "linear" {
+		fenceHolder = strVal(task.AssignedTo)
+		if fenceHolder == "" {
+			fenceHolder = strVal(task.Assignee)
+		}
+	}
+	isHolder := fenceHolder != "" && strings.EqualFold(agentName, fenceHolder)
+	override := !isHolder && isOverrideActor(task, agentName)
+	if fencedStatus(newStatus) {
+		if err := checkLeaseFence(task, agentName, isHolder, override, gen); err != nil {
+			return nil, err
+		}
+	}
+	readGen := task.LeaseGeneration
+	// worker is who a forward move leaves holding the lease. An override actor
+	// (e.g. the gate daemon resuming after a reject) acts FOR the worker, so the
+	// lease stays with the prior holder / assignee instead of moving to it.
+	worker := agentName
+	if override && (newStatus == "in-progress" || newStatus == "in-review") {
+		if priorHolder != "" {
+			worker = priorHolder
+		} else if a := strVal(task.AssignedTo); a != "" {
+			worker = a
+		}
+	}
+
 	// Exceptions (design 220f4f3d): a block, a cancel with a reason, and any move
 	// out of 'blocked' write their exception row in the SAME writer tx as the
 	// status CAS, so the transition and its record commit or roll back together.
@@ -773,6 +826,10 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 			}
 		}()
 		exec = tx.Exec
+	}
+	casExec := exec
+	exec = func(query string, args ...any) (sql.Result, error) {
+		return casExec(query+" AND lease_generation = ?", append(args, readGen)...)
 	}
 
 	// Build update. Every transition auto-stamps its temporal trail with zero
@@ -812,46 +869,48 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 		)
 	case "accepted":
 		// claim → claimed_at + claimed_by (also sets assigned_to + accepted_at)
+		// A claim is an ownership grant: bump the lease generation.
 		task.AssignedTo = &agentName
 		task.AcceptedAt = &now
 		task.ClaimedBy = &agentName
 		task.ClaimedAt = &now
+		task.LeaseGeneration++
 		res, err = exec(
-			"UPDATE tasks SET status = ?, assigned_to = ?, accepted_at = ?, claimed_by = ?, claimed_at = ? WHERE id = ? AND project = ? AND status = ?",
+			"UPDATE tasks SET status = ?, assigned_to = ?, accepted_at = ?, claimed_by = ?, claimed_at = ?, lease_generation = lease_generation + 1 WHERE id = ? AND project = ? AND status = ?",
 			newStatus, agentName, now, agentName, now, taskID, project, oldStatus,
 		)
 	case "in-progress":
 		// start → started_at (and close any open blocked window on resume)
-		task.AssignedTo = &agentName
+		task.AssignedTo = &worker
 		task.StartedAt = &now
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
 			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
-				newStatus, agentName, now, task.BlockedPeriods, taskID, project, oldStatus,
+				newStatus, worker, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
 			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = ?, started_at = ? WHERE id = ? AND project = ? AND status = ?",
-				newStatus, agentName, now, taskID, project, oldStatus,
+				newStatus, worker, now, taskID, project, oldStatus,
 			)
 		}
 	case "in-review":
 		// in-review → in_review_at (close any open blocked window if resuming via review)
 		task.InReviewAt = &now
 		if task.AssignedTo == nil {
-			task.AssignedTo = &agentName
+			task.AssignedTo = &worker
 		}
 		if leavingBlocked {
 			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
 			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
-				newStatus, agentName, now, task.BlockedPeriods, taskID, project, oldStatus,
+				newStatus, worker, now, task.BlockedPeriods, taskID, project, oldStatus,
 			)
 		} else {
 			res, err = exec(
 				"UPDATE tasks SET status = ?, assigned_to = COALESCE(assigned_to, ?), in_review_at = ? WHERE id = ? AND project = ? AND status = ?",
-				newStatus, agentName, now, taskID, project, oldStatus,
+				newStatus, worker, now, taskID, project, oldStatus,
 			)
 		}
 	case "done":
@@ -932,7 +991,10 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 
 	// Lease bookkeeping runs in the same single-writer critical section, right
 	// after the status CAS landed, so no other writer interleaves between the two.
-	d.applyLeaseOnTransition(task, newStatus, agentName, priorHolder, now)
+	d.applyLeaseOnTransition(task, newStatus, agentName, worker, priorHolder, now)
+	if override && fencedStatus(newStatus) {
+		d.auditLeaseOverride(task, agentName, newStatus, priorHolder)
+	}
 	return task, nil
 }
 
@@ -949,15 +1011,15 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 // a lease write failure must not fail the transition — it only degrades the
 // lease's freshness, self-heals on the next transition, and the expiry backstop
 // still bounds a stale holder.
-func (d *DB) applyLeaseOnTransition(task *models.Task, newStatus, agentName, priorHolder, now string) {
+func (d *DB) applyLeaseOnTransition(task *models.Task, newStatus, agentName, worker, priorHolder, now string) {
 	switch newStatus {
 	case "accepted", "in-progress", "in-review":
 		expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
 		if _, err := d.writerExec(
 			"UPDATE tasks SET lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ? WHERE id = ? AND project = ?",
-			agentName, expires, now, task.ID, task.Project,
+			worker, expires, now, task.ID, task.Project,
 		); err == nil {
-			task.LeaseHolder = &agentName
+			task.LeaseHolder = &worker
 			task.LeaseExpiresAt = &expires
 			hb := now
 			task.LeaseHeartbeatAt = &hb
@@ -1755,7 +1817,7 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 	// when the new assignee actually has a non-empty registered slug — an empty
 	// lookup must never blank the task's existing profile_slug.
 	newSlug, hasSlug := d.profileSlugForAgent(project, agent)
-	setCols := "assigned_to = ?, claimed_by = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ?"
+	setCols := "assigned_to = ?, claimed_by = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ?, lease_generation = lease_generation + 1"
 	args := []any{agent, agent, agent, expires, now, now}
 	if hasSlug {
 		setCols += ", profile_slug = ?"
@@ -1775,6 +1837,7 @@ func (d *DB) ReassignTask(taskID, project, agent string) (*models.Task, error) {
 	task.LeaseHolder = &agent
 	task.LeaseExpiresAt = &expires
 	task.LeaseHeartbeatAt = &now
+	task.LeaseGeneration++
 	if priorHolder != agent {
 		transfer := &models.LeaseTransfer{From: priorHolder, To: agent, Reason: "voluntary"}
 		task.LeaseTransfer = transfer
@@ -1825,6 +1888,7 @@ func (d *DB) ReassignTaskFields(taskID, project, caller string, newAssignee, new
 
 	priorHolder := strVal(task.LeaseHolder)
 	priorStatus := task.Status
+	priorGen := task.LeaseGeneration
 	now := time.Now().UTC().Format(memoryTimeFmt)
 
 	setCols := "last_activity_at = ?"
@@ -1846,13 +1910,14 @@ func (d *DB) ReassignTaskFields(taskID, project, caller string, newAssignee, new
 		}
 		if transferLease {
 			expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
-			setCols += ", claimed_by = ?, claimed_at = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?"
+			setCols += ", claimed_by = ?, claimed_at = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, lease_generation = lease_generation + 1"
 			args = append(args, *newAssignee, now, *newAssignee, expires, now)
 			task.ClaimedBy = newAssignee
 			task.ClaimedAt = &now
 			task.LeaseHolder = newAssignee
 			task.LeaseExpiresAt = &expires
 			task.LeaseHeartbeatAt = &now
+			task.LeaseGeneration++
 			newHolder = *newAssignee
 		}
 		task.AssignedTo = newAssignee
@@ -1863,11 +1928,11 @@ func (d *DB) ReassignTaskFields(taskID, project, caller string, newAssignee, new
 		task.ProfileSlug = *newProfile
 	}
 
-	// CAS on (lease_holder, status) as read: a concurrent claim/complete/transfer
-	// that moved either since GetTask makes this update match 0 rows.
-	args = append(args, taskID, project, priorHolder, priorStatus)
+	// CAS on (lease_holder, status, lease_generation) as read: a concurrent
+	// claim/complete/transfer that moved any since GetTask matches 0 rows.
+	args = append(args, taskID, project, priorHolder, priorStatus, priorGen)
 	res, err := d.writerExec(
-		"UPDATE tasks SET "+setCols+" WHERE id = ? AND project = ? AND COALESCE(lease_holder,'') = ? AND status = ?",
+		"UPDATE tasks SET "+setCols+" WHERE id = ? AND project = ? AND COALESCE(lease_holder,'') = ? AND status = ? AND lease_generation = ?",
 		args...,
 	)
 	if err != nil {

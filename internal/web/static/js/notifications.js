@@ -243,7 +243,7 @@ export class NotificationsPanel {
 
   async _delete(id) {
     if (!confirm("Delete this rule?")) return;
-    await fetch(`/api/notification-rules/${id}`, { method: "DELETE" });
+    await fetch(`/api/notification-rules/${id}`, { method: "DELETE", headers: { "Content-Type": "application/json" } });
     await this.refresh();
   }
 
@@ -333,7 +333,7 @@ export class NotificationsPanel {
     });
 
     const doTest = async (send) => {
-      const res = await fetch(`/api/notification-rules/${rule.id}/test-fire?send=${send}`, { method: "POST" });
+      const res = await fetch(`/api/notification-rules/${rule.id}/test-fire?send=${send}`, { method: "POST", headers: { "Content-Type": "application/json" } });
       const out = overlay.querySelector("#nf-test-result");
       if (!res.ok) { out.innerHTML = `<div class="nf-testbox">Test failed (${res.status})</div>`; return; }
       const j = await res.json();

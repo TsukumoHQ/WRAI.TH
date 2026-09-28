@@ -68,6 +68,10 @@ type Task struct {
 	// most recent forward transition — the implicit heartbeat). Distinct from
 	// LeaseExpiresAt, which is that instant + TTL; kept for audit/observability.
 	LeaseHeartbeatAt *string `json:"lease_heartbeat_at,omitempty"`
+	// LeaseGeneration counts ownership grants (claim / reclaim / reassign with
+	// lease transfer). A worker echoes it on complete/block/review so a replaced
+	// worker with an older generation is refused (TASK_LEASE_FENCED).
+	LeaseGeneration int64 `json:"lease_generation"`
 
 	// LeaseTransfer is a TRANSIENT, computed field (never persisted, never
 	// scanned): when a transition changed the lease holder, the DB layer stamps

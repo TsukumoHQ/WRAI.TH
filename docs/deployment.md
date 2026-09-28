@@ -58,7 +58,11 @@ a loopback peer and **skips authentication entirely**.
 ## Reverse proxy
 
 Terminate TLS at the proxy and forward to the relay over a **non-loopback**
-address (see caveat above).
+address (see caveat above). `/api/*` accepts only loopback `Host` names at
+`PORT`, so list the public name the proxy forwards in `RELAY_ALLOWED_HOSTS`
+(e.g. `relay.example.com`), or `/api/*` answers 421. Signed inbound
+(`/api/federation/inbound`, `/api/webhooks/github`, `/api/webhooks/signal`,
+`/api/connectors/linear/webhook`) is exempt.
 
 ### Traefik (docker labels)
 
@@ -113,7 +117,10 @@ buffering **off** and a long read timeout.
 | `PORT` | `8090` | Bind port. |
 | `RELAY_API_KEY` | _(unset)_ | Bearer token. Required to bind non-loopback. Loopback exempt. |
 | `RELAY_TRUST_LOOPBACK` | `1` | `0` requires the token even from loopback. |
-| `RELAY_CORS_ORIGINS` | _(none)_ | Comma-separated allowed origins (else same-origin only). |
+| `RELAY_CORS_ORIGINS` | _(none)_ | Comma-separated allowed origins (else same-origin only). Any other `Origin` is refused 403 on every path. |
+| `RELAY_ALLOWED_HOSTS` | _(none)_ | Extra `Host` names `/api/*` accepts besides `localhost` / `127.0.0.1` / `[::1]` at `PORT` (e.g. the public name a reverse proxy forwards). `host` = any port, `host:port` = that port. Others get 421. |
+| `RELAY_OVERRIDE_ACTORS` | `niwa` | Comma list of agents that may complete / block / review a task they do not hold (besides the dispatcher and `human`). Each such write is audited `lease_override`. |
+| `RELAY_STRICT_FENCING` | _(off)_ | `1` makes `lease_generation` required on complete / block / review. |
 | `RELAY_MAX_BODY` | `1048576` (1 MiB) | Max request body, bytes. Set `0` to disable the cap. |
 | `RELAY_RATE_LIMIT` | _(off)_ | Requests/minute per IP. |
 | `RELAY_REQUIRE_REGISTERED` | _(off)_ | `1`/`true` rejects mutating tool calls from an anonymous or unregistered agent (reads + `register_agent` stay open). |

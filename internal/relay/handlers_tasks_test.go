@@ -96,7 +96,7 @@ func TestTaskGraph(t *testing.T) {
 		before := unread(t, h, "w1")
 		// A status write that bypasses the handlers (the Linear sync path):
 		// the hold is released in the transition tx, but nobody announces.
-		if _, err := h.db.CompleteTask(a, "linear-sync", "p1", nil); err != nil {
+		if _, err := h.db.CompleteTask(a, "user", "p1", nil); err != nil {
 			t.Fatalf("complete A: %v", err)
 		}
 		if n := dispatched(h, b); n != 0 {
@@ -125,6 +125,9 @@ func TestTaskGraph(t *testing.T) {
 		for i := 0; i < 20; i++ {
 			a := dispatch(t, h, map[string]any{"title": "prereq"})
 			b := dispatch(t, h, map[string]any{"title": "dependent", "blocked_by": []any{a}})
+			if _, err := h.db.ClaimTask(a, "w1", "p1"); err != nil {
+				t.Fatalf("claim A: %v", err)
+			}
 			done, err := h.db.CompleteTask(a, "w1", "p1", nil)
 			if err != nil {
 				t.Fatalf("complete A: %v", err)

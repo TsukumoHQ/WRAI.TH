@@ -813,7 +813,11 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	task, err := h.db.ReviewTask(taskID, agent, project)
+	gen, invalid := leaseGenerationArg(req)
+	if invalid != nil {
+		return invalid, nil
+	}
+	task, err := h.db.ReviewTaskFenced(taskID, agent, project, gen)
 	if err != nil {
 		return taskOpError(err, "failed to mark task in-review: %v", err), nil
 	}
@@ -892,8 +896,12 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 		return toolResultError(err.Error()), nil
 	}
 	result := optionalString(req.GetString("result", ""))
+	gen, invalid := leaseGenerationArg(req)
+	if invalid != nil {
+		return invalid, nil
+	}
 
-	task, err := h.db.CompleteTask(taskID, agent, project, result)
+	task, err := h.db.CompleteTaskFenced(taskID, agent, project, result, gen)
 	if err != nil {
 		return taskOpError(err, "failed to complete task: %v", err), nil
 	}
@@ -934,6 +942,23 @@ func (h *Handlers) HandleCompleteTask(ctx context.Context, req mcp.CallToolReque
 	return h.resultJSONTracked(project, agent, "complete_task", withBasis(task, basis))
 }
 
+// leaseGenerationArg reads the optional lease_generation of complete / block /
+// review (S3 0b980988). Absent = nil (holder check only, unless
+// RELAY_STRICT_FENCING=1); a non-integer is refused INVALID_ARGUMENT before
+// any write.
+func leaseGenerationArg(req mcp.CallToolRequest) (*int64, *mcp.CallToolResult) {
+	raw, given := req.GetArguments()["lease_generation"]
+	if !given || raw == nil {
+		return nil, nil
+	}
+	f, ok := raw.(float64)
+	if !ok || f != float64(int64(f)) || f < 0 {
+		return nil, validationError(CodeInvalidArgument, "lease_generation must be a non-negative integer")
+	}
+	g := int64(f)
+	return &g, nil
+}
+
 // declaredReasonCode reads the optional reason_code of block_task / cancel_task.
 // A value outside db.DeclaredReasonCodes is refused INVALID_ARGUMENT before any
 // write (design dbc317f4 §4); "" means none declared.
@@ -961,8 +986,12 @@ func (h *Handlers) HandleBlockTask(ctx context.Context, req mcp.CallToolRequest)
 		return toolResultError(err.Error()), nil
 	}
 	reason := optionalString(req.GetString("reason", ""))
+	gen, invalid := leaseGenerationArg(req)
+	if invalid != nil {
+		return invalid, nil
+	}
 
-	task, err := h.db.BlockTaskWithCode(taskID, agent, project, reason, reasonCode)
+	task, err := h.db.BlockTaskFenced(taskID, agent, project, reason, reasonCode, gen)
 	if err != nil {
 		return taskOpError(err, "failed to block task: %v", err), nil
 	}
@@ -1423,10 +1452,12 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 	agent := resolveAgent(ctx, req)
 	tasksJSON := req.GetString("tasks", "")
 
-	var items []struct {
-		TaskID string  `json:"task_id"`
-		Result *string `json:"result"`
+	type batchItem struct {
+		TaskID          string  `json:"task_id"`
+		Result          *string `json:"result"`
+		LeaseGeneration *int64  `json:"lease_generation"`
 	}
+	var items []batchItem
 	// Accept the common mistake task_ids:["..."] as a shorthand for
 	// tasks:[{task_id:"..."}] (no result).
 	if tasksJSON == "" {
@@ -1434,10 +1465,7 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 			var ids []string
 			if err := json.Unmarshal([]byte(idsJSON), &ids); err == nil {
 				for _, id := range ids {
-					items = append(items, struct {
-						TaskID string  `json:"task_id"`
-						Result *string `json:"result"`
-					}{TaskID: id})
+					items = append(items, batchItem{TaskID: id})
 				}
 			}
 		}
@@ -1458,7 +1486,7 @@ func (h *Handlers) HandleBatchCompleteTasks(ctx context.Context, req mcp.CallToo
 			errors = append(errors, fmt.Sprintf("%s: %v", item.TaskID, err))
 			continue
 		}
-		task, err := h.db.CompleteTask(taskID, agent, project, item.Result)
+		task, err := h.db.CompleteTaskFenced(taskID, agent, project, item.Result, item.LeaseGeneration)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", taskID, err))
 			continue

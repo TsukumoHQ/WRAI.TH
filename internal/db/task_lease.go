@@ -4,6 +4,7 @@ import (
 	"agent-relay/internal/models"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 )
@@ -21,6 +22,10 @@ const (
 	CodeTaskLeaseHeld = "TASK_LEASE_HELD"
 	// CodeTaskNotFound — the task id does not resolve in the project.
 	CodeTaskNotFound = "TASK_NOT_FOUND"
+	// CodeTaskLeaseFenced — a terminal write (complete/block/review) from a
+	// caller that is not the current lease holder at the current lease
+	// generation, and not an override actor. Nothing is written.
+	CodeTaskLeaseFenced = "TASK_LEASE_FENCED"
 )
 
 // TaskError is a typed error carrying a stable Code so handlers can map it to a
@@ -81,6 +86,78 @@ func (d *DB) agentLive(project, name string) bool {
 	return status == "active" || status == "sleeping"
 }
 
+// fencedStatus reports whether a transition into status publishes the worker's
+// outcome and is therefore fenced to the lease holder (S3 0b980988).
+func fencedStatus(status string) bool {
+	return status == "done" || status == "blocked" || status == "in-review"
+}
+
+// isOverrideActor reports whether caller may act on a task it does not hold:
+// the human operator ("human", legacy "user"), the task's dispatcher, or a
+// name in RELAY_OVERRIDE_ACTORS (comma list, default "niwa" — the gate daemon
+// that closes, blocks and resumes gate tasks). is_service is deliberately NOT
+// enough: ordinary agents carry it too.
+func isOverrideActor(task *models.Task, caller string) bool {
+	if caller == "human" || caller == "user" || strings.EqualFold(caller, task.DispatchedBy) {
+		return true
+	}
+	list, set := os.LookupEnv("RELAY_OVERRIDE_ACTORS")
+	if !set {
+		list = "niwa"
+	}
+	for _, name := range strings.Split(list, ",") {
+		if n := strings.TrimSpace(name); n != "" && strings.EqualFold(n, caller) {
+			return true
+		}
+	}
+	return false
+}
+
+// checkLeaseFence is the terminal-write gate: the holder passes (at the
+// supplied generation when given; RELAY_STRICT_FENCING=1 makes it required),
+// an override actor passes (the caller audits it), anyone else — including
+// any caller on an unheld task — is refused TASK_LEASE_FENCED.
+func checkLeaseFence(task *models.Task, caller string, isHolder, override bool, gen *int64) error {
+	if isHolder {
+		if gen == nil && os.Getenv("RELAY_STRICT_FENCING") == "1" {
+			return newTaskError(CodeTaskLeaseFenced,
+				"task %s: lease_generation is required (RELAY_STRICT_FENCING=1); current generation is %d", task.ID, task.LeaseGeneration)
+		}
+		if gen != nil && *gen != task.LeaseGeneration {
+			return newTaskError(CodeTaskLeaseFenced,
+				"task %s: lease generation %d is stale (current %d); the lease was re-granted", task.ID, *gen, task.LeaseGeneration)
+		}
+		return nil
+	}
+	if override {
+		return nil
+	}
+	if holder := strVal(task.LeaseHolder); holder != "" {
+		return newTaskError(CodeTaskLeaseFenced,
+			"task %s lease is held by %q (generation %d); %q is not the holder", task.ID, holder, task.LeaseGeneration, caller)
+	}
+	next := "claim_task"
+	if task.Status == "blocked" {
+		next = "resume_task" // a block releases the lease; resuming re-takes it
+	}
+	return newTaskError(CodeTaskLeaseFenced,
+		"task %s has no lease holder (status %q); %s it before publishing", task.ID, task.Status, next)
+}
+
+// auditLeaseOverride records an override actor publishing over the holder, in
+// the task's audit history. Best effort, like auditLeaseTransfer.
+func (d *DB) auditLeaseOverride(task *models.Task, actor, newStatus, priorHolder string) {
+	_ = d.RecordAudit(models.AuditEntry{
+		Project:      task.Project,
+		Actor:        actor,
+		Action:       "lease_override",
+		ResourceType: "task",
+		ResourceID:   task.ID,
+		Summary:      fmt.Sprintf("%s by %s over holder %s (generation %d)", newStatus, actor, orNone(priorHolder), task.LeaseGeneration),
+		Reason:       "override",
+	})
+}
+
 // ReclaimTask transfers a DEAD holder's task to newAgent. It is the primitive
 // niwa's supervisor-driven re-claim (resume-protocol part 3) stands on: it
 // refuses (TASK_LEASE_HELD) when the current holder is still live, and otherwise
@@ -134,10 +211,11 @@ func (d *DB) ReclaimTask(taskID, newAgent, project string) (*models.Task, error)
 	expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
 	res, err := d.writerExec(
 		`UPDATE tasks SET status = 'accepted', assigned_to = ?, claimed_by = ?, accepted_at = ?,
-		   claimed_at = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ?
-		 WHERE id = ? AND project = ? AND COALESCE(lease_holder,'') = ? AND status = ?`,
+		   claimed_at = ?, lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ?, last_activity_at = ?,
+		   lease_generation = lease_generation + 1
+		 WHERE id = ? AND project = ? AND COALESCE(lease_holder,'') = ? AND status = ? AND lease_generation = ?`,
 		newAgent, newAgent, now, now, newAgent, expires, now, now,
-		taskID, project, priorHolder, task.Status,
+		taskID, project, priorHolder, task.Status, task.LeaseGeneration,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("reclaim task: %w", err)
