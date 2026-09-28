@@ -46,6 +46,7 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithDescription("Register/update an agent; returns session_context. Re-register keeps omitted reports_to/profile_slug/is_executive/session_id. is_executive=true creates the 'leadership' admin team (can broadcast)."),
 		projectParam,
 		mcp.WithString("name", mcp.Description("Unique agent name; re-register to update. Rename: register the new name, deactivate_agent the old."), mcp.Required()),
+		mcp.WithBoolean("rotate_token", mcp.Description("With your X-Agent-Token: mint a fresh one")),
 		mcp.WithString("role", mcp.Description("Role (e.g. 'FastAPI backend developer')")),
 		mcp.WithString("description", mcp.Description("What this agent is currently working on")),
 		mcp.WithString("reports_to", mcp.Description("Manager agent name (org hierarchy)")),

@@ -270,6 +270,12 @@ func (h *Handlers) toolRegistry() []registeredTool {
 	// write's. call_tool/discover_tools are registered separately (relay.New) and
 	// carry no routing params at their top level; call_tool's INNER dispatch runs
 	// through these same wrapped handlers, so nested calls are covered.
+	// Token binding (S3b 05525713) on EVERY tool, reads included: a request
+	// carrying X-Agent-Token acts only as the token's agent. Inside the routing
+	// guard, so `as` is already known to be a string.
+	for i := range tools {
+		tools[i].Handler = h.guardAgentToken(tools[i].Tool.Name, tools[i].Handler)
+	}
 	for i := range tools {
 		tools[i].Handler = guardRoutingParamTypes(tools[i].Handler)
 	}

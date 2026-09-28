@@ -202,11 +202,20 @@ func (r *Relay) Serve(ln net.Listener) error {
 // port is the listen port the /api/* Host check pins loopback names to.
 func (r *Relay) buildMiddlewareChain(handler http.Handler, port string) http.Handler {
 	handler = apiGuardMiddleware(port, r.Config.AllowedHosts, handler)
-	handler = authMiddleware(r.Config.APIKey, handler)
+	handler = authMiddleware(r.Config.APIKey, r.agentTokenOK, handler)
 	handler = bodySizeLimitMiddleware(r.Config.MaxBody, handler)
 	handler = rateLimitMiddleware(r.Config.RateLimit, handler)
 	handler = corsMiddleware(r.Config.CORSOrigins, handler)
 	return handler
+}
+
+// agentTokenOK reports whether token is a live per-agent relay token.
+func (r *Relay) agentTokenOK(token string) bool {
+	if r.DB == nil {
+		return false
+	}
+	_, _, ok := r.DB.AgentByToken(token)
+	return ok
 }
 
 // Shutdown gracefully stops the HTTP server. It first cancels shutdownCtx so

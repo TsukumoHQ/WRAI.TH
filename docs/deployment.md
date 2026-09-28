@@ -38,6 +38,19 @@ RELAY_API_KEY=$(openssl rand -hex 32)
 - The loopback check uses the real TCP peer (`RemoteAddr`), not
   `X-Forwarded-For`, so a remote client cannot spoof it with a header.
 
+### Per-agent tokens
+
+`register_agent` mints a token for a name the first time it registers and
+returns it once (`agent_token`; only its sha256 is stored). A request carrying
+it as `X-Agent-Token` is authenticated and bound to that agent: an `as`,
+`?agent=`, register `name`, or REST `from` / `agent` / `as` naming anyone else
+is refused `AGENT_IDENTITY_MISMATCH` (REST 403); an unknown or rotated token is
+`AGENT_TOKEN_INVALID` (REST 401). A re-register keeps the token unless it
+carries the current token with `rotate_token=true`, comes from an override
+actor authenticated by its own token (`RELAY_OVERRIDE_ACTORS`, default `niwa`,
+re-registering a respawned pane), or is authenticated by `RELAY_API_KEY`; a
+tokenless re-register never rotates. Requests without a token behave as before.
+
 ### ⚠️ Reverse-proxy + loopback caveat (read this)
 
 The loopback exemption is only safe if **your reverse proxy does not reach the
@@ -116,7 +129,7 @@ buffering **off** and a long read timeout.
 | `RELAY_BIND` | `127.0.0.1` | Bind host. `0.0.0.0` to expose (requires `RELAY_API_KEY`). |
 | `PORT` | `8090` | Bind port. |
 | `RELAY_API_KEY` | _(unset)_ | Bearer token. Required to bind non-loopback. Loopback exempt. |
-| `RELAY_TRUST_LOOPBACK` | `1` | `0` requires the token even from loopback. |
+| `RELAY_TRUST_LOOPBACK` | `1` | `0` requires the token even from loopback — the API key, or a per-agent `X-Agent-Token` (minted by `register_agent`); with `0` this applies even when `RELAY_API_KEY` is unset. |
 | `RELAY_CORS_ORIGINS` | _(none)_ | Comma-separated allowed origins (else same-origin only). Any other `Origin` is refused 403 on every path. |
 | `RELAY_ALLOWED_HOSTS` | _(none)_ | Extra `Host` names `/api/*` accepts besides `localhost` / `127.0.0.1` / `[::1]` at `PORT` (e.g. the public name a reverse proxy forwards). `host` = any port, `host:port` = that port. Others get 421. |
 | `RELAY_OVERRIDE_ACTORS` | `niwa` | Comma list of agents that may complete / block / review a task they do not hold (besides the dispatcher and `human`). Each such write is audited `lease_override`. |

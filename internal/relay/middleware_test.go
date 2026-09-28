@@ -9,7 +9,7 @@ import (
 func TestAuthMiddleware_LoopbackExemption(t *testing.T) {
 	t.Setenv("RELAY_TRUST_LOOPBACK", "") // default: trust loopback
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	h := authMiddleware("secret", ok)
+	h := authMiddleware("secret", nil, ok)
 
 	call := func(remote, token string) int {
 		req := httptest.NewRequest("GET", "/api/health", nil)
@@ -42,7 +42,7 @@ func TestAuthMiddleware_LoopbackExemption(t *testing.T) {
 func TestAuthMiddleware_TrustLoopbackDisabled(t *testing.T) {
 	t.Setenv("RELAY_TRUST_LOOPBACK", "0")
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	h := authMiddleware("secret", ok)
+	h := authMiddleware("secret", nil, ok)
 
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	req.RemoteAddr = "127.0.0.1:5555"
@@ -55,7 +55,7 @@ func TestAuthMiddleware_TrustLoopbackDisabled(t *testing.T) {
 
 func TestAuthMiddleware_NoKeyPassesThrough(t *testing.T) {
 	ok := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(200) })
-	h := authMiddleware("", ok)
+	h := authMiddleware("", nil, ok)
 	req := httptest.NewRequest("GET", "/api/health", nil)
 	req.RemoteAddr = "10.1.2.3:5555"
 	rr := httptest.NewRecorder()

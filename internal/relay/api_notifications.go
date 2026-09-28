@@ -176,6 +176,9 @@ func (r *Relay) apiEmitNotificationEvent(w http.ResponseWriter, req *http.Reques
 		http.Error(w, `{"error":"name is required"}`, http.StatusBadRequest)
 		return
 	}
+	if r.apiIdentityRefused(w, req, body.Agent) {
+		return
+	}
 	if body.Project == "" {
 		body.Project = "default"
 	}

@@ -11,6 +11,11 @@ type contextKey string
 const agentNameKey contextKey = "agent_name"
 const projectKey contextKey = "project_name"
 const toolsModeKey contextKey = "tools_mode"
+const agentTokenKey contextKey = "agent_token"
+const apiKeyAuthedKey contextKey = "api_key_authed"
+
+// AgentTokenHeader carries a per-agent relay token (S3b 05525713).
+const AgentTokenHeader = "X-Agent-Token"
 
 // Tools exposure modes (?tools= query parameter).
 const (
@@ -38,7 +43,23 @@ func HTTPContextFunc(ctx context.Context, r *http.Request) context.Context {
 		ctx = context.WithValue(ctx, toolsModeKey, ToolsModeFull)
 	}
 	ctx = context.WithValue(ctx, agentNameKey, agent)
+	if tok := strings.TrimSpace(r.Header.Get(AgentTokenHeader)); tok != "" {
+		ctx = context.WithValue(ctx, agentTokenKey, tok)
+	}
 	return context.WithValue(ctx, projectKey, project)
+}
+
+// AgentTokenFromContext returns the request's X-Agent-Token, or "".
+func AgentTokenFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(agentTokenKey).(string)
+	return v
+}
+
+// APIKeyAuthed reports whether authMiddleware authenticated this request with
+// the relay API key (not merely a trusted loopback peer).
+func APIKeyAuthed(ctx context.Context) bool {
+	v, _ := ctx.Value(apiKeyAuthedKey).(bool)
+	return v
 }
 
 // AgentFromContext retrieves the agent name from the context, or "" when the

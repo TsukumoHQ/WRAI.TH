@@ -98,7 +98,14 @@ func fencedStatus(status string) bool {
 // that closes, blocks and resumes gate tasks). is_service is deliberately NOT
 // enough: ordinary agents carry it too.
 func isOverrideActor(task *models.Task, caller string) bool {
-	if caller == "human" || caller == "user" || strings.EqualFold(caller, task.DispatchedBy) {
+	return strings.EqualFold(caller, task.DispatchedBy) || IsOverrideActorName(caller)
+}
+
+// IsOverrideActorName is the task-independent half of isOverrideActor: the
+// human operator or a RELAY_OVERRIDE_ACTORS name (default "niwa"). It also
+// decides who may rotate another agent's relay token (S3b 05525713).
+func IsOverrideActorName(caller string) bool {
+	if caller == "human" || caller == "user" {
 		return true
 	}
 	list, set := os.LookupEnv("RELAY_OVERRIDE_ACTORS")

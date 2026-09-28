@@ -1677,6 +1677,10 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 	if body.Force {
 		body.Agent = "user"
 	}
+	// A token-bound caller acts only as itself — never as the "user" default.
+	if r.apiIdentityRefused(w, req, body.Agent) {
+		return
+	}
 
 	// Capture the prior status for the audit trail before the move. A forced
 	// override on a Linear-mirrored task is refused — Linear is the SSOT there.
@@ -2219,6 +2223,9 @@ func (r *Relay) apiArchiveTaskById(w http.ResponseWriter, req *http.Request, id 
 	actor := body.As
 	if actor == "" {
 		actor = "user"
+	}
+	if r.apiIdentityRefused(w, req, actor) {
+		return
 	}
 	ok, err := r.DB.ArchiveTask(project, id, body.Reason, actor)
 	if err != nil {

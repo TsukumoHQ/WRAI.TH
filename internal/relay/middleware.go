@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"context"
 	"crypto/subtle"
 	"net"
 	"net/http"
@@ -26,11 +27,16 @@ import (
 // public traffic would appear local and skip auth. Front the relay from a
 // non-loopback address (docker bridge / host LAN IP), or set
 // RELAY_TRUST_LOOPBACK=0 to require the token even from loopback.
-func authMiddleware(apiKey string, next http.Handler) http.Handler {
-	if apiKey == "" {
+//
+// A valid per-agent X-Agent-Token (tokenOK) authenticates a request like the
+// key does (S3b 05525713). With RELAY_TRUST_LOOPBACK=0 a tokenless loopback
+// request is refused even when no RELAY_API_KEY is set; trust-loopback stays
+// ON by default, which keeps a keyless relay fully open to loopback.
+func authMiddleware(apiKey string, tokenOK func(string) bool, next http.Handler) http.Handler {
+	trustLoopback := os.Getenv("RELAY_TRUST_LOOPBACK") != "0"
+	if apiKey == "" && trustLoopback {
 		return next
 	}
-	trustLoopback := os.Getenv("RELAY_TRUST_LOOPBACK") != "0"
 	expected := []byte(apiKey)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Federation inbound is exempt from the global API key: it carries its own
@@ -41,10 +47,6 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if trustLoopback && isLoopbackRemote(r.RemoteAddr) {
-			next.ServeHTTP(w, r)
-			return
-		}
 		token := r.Header.Get("Authorization")
 		const prefix = "Bearer "
 		if len(token) > len(prefix) && token[:len(prefix)] == prefix {
@@ -52,11 +54,19 @@ func authMiddleware(apiKey string, next http.Handler) http.Handler {
 		} else {
 			token = ""
 		}
-		if subtle.ConstantTimeCompare([]byte(token), expected) != 1 {
-			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+		if apiKey != "" && subtle.ConstantTimeCompare([]byte(token), expected) == 1 {
+			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), apiKeyAuthedKey, true)))
 			return
 		}
-		next.ServeHTTP(w, r)
+		if at := r.Header.Get(AgentTokenHeader); at != "" && tokenOK != nil && tokenOK(at) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		if trustLoopback && isLoopbackRemote(r.RemoteAddr) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 	})
 }
 

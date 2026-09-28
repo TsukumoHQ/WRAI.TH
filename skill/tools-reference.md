@@ -10,7 +10,7 @@ Loopback / same-host clients connect **keyless** (local `.mcp.json`, API scripts
 - `get_inbox`, `list_tasks`, `list_agents`, `list_memories` return compact markdown tables by default (~half the tokens of JSON); pass `format: "json"` for the structured shape.
 
 ## Core
-- `register_agent` — register/update agent identity (name, role, description, reports_to, is_executive, profile_slug, session_id, interest_tags, max_context_bytes)
+- `register_agent` — register/update agent identity (name, role, description, reports_to, is_executive, profile_slug, session_id, interest_tags, max_context_bytes, rotate_token). The first register of a name returns `agent_token` once; send it as the `X-Agent-Token` header to bind every call to that name (`AGENT_IDENTITY_MISMATCH` otherwise). A re-register without it keeps the token (`agent_token_status: kept`).
 - `whoami` — identify Claude Code session via transcript salt matching
 - `get_session_context` — everything in one call (profile, tasks, inbox, conversations, memories)
 - `query_context` — ranked context search (memories + task results)

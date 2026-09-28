@@ -131,6 +131,10 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to register agent: %v", err)), nil
 	}
+	tokenStatus, agentToken, err := h.registerToken(ctx, req, project, name)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("registered, but minting the agent token failed: %v", err)), nil
+	}
 
 	// Bind the worktree cwd → agent so a SessionStart hook can re-attach a rotated
 	// session_id after /clear (cwd is the stable key; session_id is not). ClaimCwd
@@ -187,8 +191,16 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	h.events.Emit(MCPEvent{Type: "register", Action: action, Agent: name, Project: project, Label: role})
 
 	resp := map[string]any{
-		"agent":           agent,
-		"session_context": sessionCtx,
+		"agent":              agent,
+		"session_context":    sessionCtx,
+		"agent_token_status": tokenStatus,
+	}
+	switch tokenStatus {
+	case "minted", "rotated":
+		// Returned exactly once; only its hash is stored.
+		resp["agent_token"] = agentToken
+	case "kept":
+		resp["agent_token_hint"] = "this agent already has a token; a register without it does not rotate it — send X-Agent-Token (rotate_token=true to rotate), or re-register via an override actor"
 	}
 	if autoAdminTeam != nil {
 		resp["auto_admin_team"] = *autoAdminTeam

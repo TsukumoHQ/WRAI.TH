@@ -531,6 +531,11 @@ func migrate(conn *sql.DB) error {
 		// Code session_id rotates on /clear, but the worktree cwd does not. Kept
 		// out of agentColumns/scanAgent on purpose (dedicated queries only).
 		"cwd": "TEXT NOT NULL DEFAULT ''",
+		// token_hash is the sha256 (hex) of the agent's relay token (S3b
+		// 05525713): minted by register_agent, returned once, never stored in
+		// clear. NULL = no token minted. Kept out of agentColumns/scanAgent
+		// (dedicated queries only), so no read path can ever serialize it.
+		"token_hash": "TEXT",
 	})
 
 	// Projects table (planet_type assigned per project)
@@ -646,6 +651,7 @@ func migrate(conn *sql.DB) error {
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_agents_project ON agents(project)`)
 	_, _ = conn.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_agents_project_name ON agents(project, name)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_agents_cwd ON agents(cwd)`)
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_agents_token_hash ON agents(token_hash)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_messages_project ON messages(project)`)
 	// Hot path: the legacy get_inbox direct-DM / broadcast branches select by
 	// (project, to_agent) ordered by created_at. Without this the OR-query fell
