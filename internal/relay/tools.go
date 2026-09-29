@@ -25,6 +25,9 @@ var reasonCodeParam = mcp.WithString("reason_code", mcp.Enum(db.DeclaredReasonCo
 // (S3 0b980988): echo the lease_generation returned by claim/get_task.
 var leaseGenerationParam = mcp.WithNumber("lease_generation", mcp.Description("From claim/get_task; stale = TASK_LEASE_FENCED"))
 
+// forceWIPParam: dispatcher / operator past the WIP limit, audited (e2273dc3).
+var forceWIPParam = mcp.WithBoolean("force", mcp.Description("Over WIP limit"))
+
 var formatParam = mcp.WithString("format", mcp.Description("'md' (default, markdown table — ~half the tokens) or 'json'"), mcp.Enum("md", "json"))
 
 // sessionContextParam selects the boot-payload shape (WRAITH R1): 'full'
@@ -510,13 +513,14 @@ func dispatchTaskTool() mcp.Tool {
 func claimTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"claim_task",
-		mcp.WithDescription("Claim a pending task → 'accepted'. Unmet prerequisites: listed in readiness."),
+		mcp.WithDescription("Claim a pending task → 'accepted'; unmet prerequisites in readiness."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID, or next")),
 		mcp.WithBoolean("next", mcp.Description("Claim your profile's next ready task")),
 		mcp.WithString("sort", mcp.Enum("priority", "oldest", "unblock_impact")),
 		mcp.WithBoolean("release", mcp.Description("Give back an accepted task")),
+		forceWIPParam,
 	)
 }
 

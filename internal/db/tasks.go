@@ -621,10 +621,24 @@ func (d *DB) ResetTask(taskID, agentName, project string) (*models.Task, error) 
 }
 
 func (d *DB) ClaimTask(taskID, agentName, project string) (*models.Task, error) {
+	return d.claimTask(taskID, agentName, project, false)
+}
+
+// ClaimTaskForce is ClaimTask for an override actor (the task's dispatcher,
+// human, RELAY_OVERRIDE_ACTORS) past its WIP limit, audited wip_override; for
+// anyone else force changes nothing.
+func (d *DB) ClaimTaskForce(taskID, agentName, project string) (*models.Task, error) {
+	return d.claimTask(taskID, agentName, project, true)
+}
+
+func (d *DB) claimTask(taskID, agentName, project string, force bool) (*models.Task, error) {
 	if err := d.guardNotRunContainer(taskID, project); err != nil {
 		return nil, err
 	}
 	if err := d.guardStaleContext(taskID, agentName, project); err != nil {
+		return nil, err
+	}
+	if err := d.checkWIP(taskID, agentName, project, force, true); err != nil {
 		return nil, err
 	}
 	return d.transitionTask(taskID, agentName, project, "accepted", nil, nil)
@@ -663,6 +677,9 @@ func (d *DB) StartTask(taskID, agentName, project string) (*models.Task, error) 
 		return nil, err
 	}
 	if err := d.guardStaleContext(taskID, agentName, project); err != nil {
+		return nil, err
+	}
+	if err := d.checkWIP(taskID, agentName, project, false, false); err != nil {
 		return nil, err
 	}
 	return d.transitionTask(taskID, agentName, project, "in-progress", nil, nil)

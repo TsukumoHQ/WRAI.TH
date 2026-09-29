@@ -369,7 +369,11 @@ func (h *Handlers) HandleClaimTask(ctx context.Context, req mcp.CallToolRequest)
 	// them. Read before the claim: once accepted the task is no longer pending.
 	_, blockers, _ := h.db.TaskReadiness(project, taskID)
 
-	task, err := h.db.ClaimTask(taskID, agent, project)
+	claim := h.db.ClaimTask
+	if req.GetBool("force", false) {
+		claim = h.db.ClaimTaskForce
+	}
+	task, err := claim(taskID, agent, project)
 	if err != nil {
 		return taskOpError(err, "failed to claim task: %v", err), nil
 	}

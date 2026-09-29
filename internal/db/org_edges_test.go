@@ -162,6 +162,7 @@ func TestOrgEdges(t *testing.T) {
 
 	t.Run("ReadyPredicateSharedByListAndClaim", func(t *testing.T) {
 		d := testDB(t)
+		unlimitedWIP(t, d, "p1") // one agent claims every ready task in turn
 		mk := func() string { return edgeTask(t, d, TypedTicket{}) }
 		done1, done2, review, cancelled, pendingPre := mk(), mk(), mk(), mk(), mk()
 		finish(t, d, done1)

@@ -362,6 +362,7 @@ func TestReleaseTask(t *testing.T) {
 
 	t.Run("ReleaseRefusedUnlessAccepted", func(t *testing.T) {
 		d := testDB(t)
+		unlimitedWIP(t, d, project) // the holder takes one task per status
 		started := dispatchClaimed(t, d, project, holder)
 		if _, err := d.StartTask(started, holder, project); err != nil {
 			t.Fatalf("start: %v", err)
@@ -390,6 +391,7 @@ func TestReleaseTask(t *testing.T) {
 
 	t.Run("ReleaseStartRace", func(t *testing.T) {
 		d := testDB(t)
+		unlimitedWIP(t, d, project) // several race rounds, one holder
 		for i := 0; i < 25; i++ {
 			id := dispatchClaimed(t, d, project, holder)
 			var wg sync.WaitGroup

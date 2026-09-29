@@ -23,6 +23,11 @@ type guardFixture struct {
 func newGuardFixture(t *testing.T) *guardFixture {
 	t.Helper()
 	d, path := memDB(t)
+	// dev agents open several blocked-then-resumed tasks (not WIP).
+	d.EnsureProject("p1")
+	if err := d.SetProjectWIPLimit("p1", 0); err != nil {
+		t.Fatalf("unlimited wip: %v", err)
+	}
 	raw, err := sql.Open("sqlite3", path+"?_busy_timeout=5000")
 	if err != nil {
 		t.Fatalf("open raw: %v", err)

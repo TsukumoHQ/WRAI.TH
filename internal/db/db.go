@@ -565,6 +565,9 @@ func migrate(conn *sql.DB) error {
 	// seeded on as the rollout projects. Flip others with require_typed_ticket = 1.
 	ensureColumns(conn, "projects", map[string]string{
 		"require_typed_ticket": "INTEGER NOT NULL DEFAULT 0",
+		// wip_limit (task e2273dc3): how many accepted / in-progress tasks one
+		// agent may hold in this project; 0 = unlimited. Default 1.
+		"wip_limit": "INTEGER NOT NULL DEFAULT 1",
 	})
 	// ONE-SHOT seed per project, guarded by a settings marker. The old code re-ran
 	// the UPDATE on every boot, so an operator who deliberately opted a project out

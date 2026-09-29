@@ -573,6 +573,7 @@ func TestGuards(t *testing.T) {
 
 	t.Run("OpenTxAtomic", func(t *testing.T) {
 		d := testDB(t)
+		unlimitedWIP(t, d, "p1") // dev-a starts a second task while holding one
 		first := excStartedTask(t, d, "dev-a")
 		excBlock(t, d, first, "dev-a", "waiting on fixture review")
 		if _, err := d.StartTask(first, "dev-a", "p1"); err != nil {

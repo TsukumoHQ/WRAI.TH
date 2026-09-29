@@ -41,6 +41,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetProjects(w)
 	case path == "/projects" && req.Method == http.MethodPost:
 		r.apiCreateProject(w, req)
+	case path == "/wip" && req.Method == http.MethodGet:
+		r.apiWIPReport(w, req)
 	case path == "/fleet/throughput" && req.Method == http.MethodGet:
 		r.apiFleetThroughput(w, req)
 	case strings.HasPrefix(path, "/projects/") && req.Method == http.MethodDelete:
@@ -346,20 +348,45 @@ func (r *Relay) apiGetProject(w http.ResponseWriter, name string) {
 func (r *Relay) apiPatchProject(w http.ResponseWriter, req *http.Request, name string) {
 	var body struct {
 		PlanetType string `json:"planet_type"`
+		// WIPLimit sets the project's wip_limit (task e2273dc3); 0 = unlimited.
+		WIPLimit *int `json:"wip_limit"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
 		return
 	}
-	if body.PlanetType == "" {
-		http.Error(w, `{"error":"planet_type required"}`, http.StatusBadRequest)
+	if body.PlanetType == "" && body.WIPLimit == nil {
+		http.Error(w, `{"error":"planet_type or wip_limit required"}`, http.StatusBadRequest)
 		return
 	}
-	if err := r.DB.UpdateProjectPlanetType(name, body.PlanetType); err != nil {
-		http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
-		return
+	if body.WIPLimit != nil {
+		if err := r.DB.SetProjectWIPLimit(name, *body.WIPLimit); err != nil {
+			jsonError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if body.PlanetType != "" {
+		if err := r.DB.UpdateProjectPlanetType(name, body.PlanetType); err != nil {
+			http.Error(w, `{"error":"update failed"}`, http.StatusInternalServerError)
+			return
+		}
 	}
 	writeJSON(w, map[string]string{"ok": "true"})
+}
+
+// apiWIPReport lists the agents of ?project= over its wip_limit with the
+// tasks they hold (task e2273dc3). Report only: nothing is released.
+func (r *Relay) apiWIPReport(w http.ResponseWriter, req *http.Request) {
+	project := projectFromRequest(req)
+	over, err := r.DB.WIPOverLimit(project)
+	if err != nil {
+		jsonError(w, http.StatusInternalServerError, "wip report failed")
+		return
+	}
+	if over == nil {
+		over = []db.WIPOverAgent{}
+	}
+	writeJSON(w, map[string]any{"project": project, "wip_limit": r.DB.ProjectWIPLimit(project), "over_limit": over})
 }
 
 // apiCreateProject is the REST wrapper for creating a project (audit b983684b
@@ -1699,7 +1726,11 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 	case "pending":
 		task, err = r.DB.ResetTask(taskID, body.Agent, body.Project)
 	case "accepted":
-		task, err = r.DB.ClaimTask(taskID, body.Agent, body.Project)
+		if body.Force {
+			task, err = r.DB.ClaimTaskForce(taskID, body.Agent, body.Project) // operator past WIP_LIMIT, audited
+		} else {
+			task, err = r.DB.ClaimTask(taskID, body.Agent, body.Project)
+		}
 	case "in-progress":
 		task, err = r.DB.StartTask(taskID, body.Agent, body.Project)
 	case "in-review":

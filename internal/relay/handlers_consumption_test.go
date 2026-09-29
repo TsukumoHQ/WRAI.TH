@@ -20,6 +20,11 @@ type consFixture struct {
 func newConsFixture(t *testing.T, agents ...string) *consFixture {
 	t.Helper()
 	d, path := memDB(t)
+	// One agent holds several tasks at once in these scenarios (not WIP).
+	d.EnsureProject("p1")
+	if err := d.SetProjectWIPLimit("p1", 0); err != nil {
+		t.Fatalf("unlimited wip: %v", err)
+	}
 	for _, a := range agents {
 		if _, _, err := d.RegisterAgent("p1", a, "test", "", nil, nil, false, nil, "[]", 0, db.RegisterOptions{}); err != nil {
 			t.Fatalf("register %s: %v", a, err)

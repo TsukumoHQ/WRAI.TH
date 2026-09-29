@@ -127,6 +127,7 @@ func TestNotificationDeliveryLogAndPrune(t *testing.T) {
 
 func TestComputeDigestStats(t *testing.T) {
 	d := testDB(t)
+	unlimitedWIP(t, d, "default") // agent-a holds a task in every status
 
 	// Register a profile-less set of tasks across statuses.
 	mk := func(status string) {

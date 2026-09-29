@@ -153,6 +153,7 @@ func TestExceptions(t *testing.T) {
 
 	t.Run("UnblockResolvesWithDerivedResolver", func(t *testing.T) {
 		d := testDB(t)
+		unlimitedWIP(t, d, "p1") // one actor works several tasks in turn
 		cases := []struct {
 			name, actor, wantBy, wantReason string
 			move                            func(id, actor string) error

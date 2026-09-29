@@ -34,7 +34,7 @@ Loopback / same-host clients connect **keyless** (local `.mcp.json`, API scripts
 
 ## Tasks
 - `dispatch_task` — create task for a profile (priority, board_id, parent_task_id). Auto-notifies agents running the profile.
-- `claim_task` — accept a pending task
+- `claim_task` — accept a pending task. WIP limit: holding `wip_limit` (per project, default 1, 0 = unlimited) accepted/in-progress tasks refuses the claim — and a `start_task` of a task you do not hold — with `WIP_LIMIT` naming them; in-review does not count. The task's dispatcher may pass `force: true` (audited `wip_override`). Report: `GET /api/wip?project=`; set: `PATCH /api/projects/{name}` `{"wip_limit": N}`.
 - `start_task` — begin work on task
 - `review_task` — mark "PR up" → in-review
 - `complete_task` — finish with result
