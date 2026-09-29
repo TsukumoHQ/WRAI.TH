@@ -65,6 +65,8 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiGetAgentHealth(w, req)
 	case path == "/agents/stuck" && req.Method == http.MethodGet:
 		r.apiGetStuckAgents(w, req)
+	case path == "/founder-gates" && req.Method == http.MethodGet:
+		r.apiGetFounderGates(w, req)
 	case path == "/admin/purge-reviewers" && req.Method == http.MethodPost:
 		r.apiPurgeReviewers(w, req)
 	case path == "/conversations/all" && req.Method == http.MethodGet:

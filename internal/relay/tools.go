@@ -538,6 +538,18 @@ func taskEdgeTool() mcp.Tool {
 	)
 }
 
+func parkTaskTool() mcp.Tool {
+	return mcp.NewTool(
+		"park_task",
+		mcp.WithDescription("Hold a pending task: no ACK pages. resume_task unparks."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Required()),
+		mcp.WithString("reason", mcp.Required()),
+		mcp.WithString("until", mcp.Required(), mcp.Description("founder, or a task id (auto-unpark when done)")),
+	)
+}
+
 // guardTool is one multiplexed tool to fit its <=500 B schema target (ruling
 // ed744dee). Its annotations are cleared: the MCP spec defaults for absent
 // hints equal mcp-go's explicit ones, so the meaning is unchanged. The action
@@ -668,7 +680,7 @@ func blockTaskTool() mcp.Tool {
 func resumeTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"resume_task",
-		mcp.WithDescription("Move a blocked task back to 'in-progress'. Fires task.resumed."),
+		mcp.WithDescription("Blocked task -> 'in-progress', or unpark a parked task."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
@@ -870,6 +882,8 @@ func updateTaskTool() mcp.Tool {
 		mcp.WithString("acceptance_criteria", mcp.Description("JSON array")),
 		mcp.WithString("dod", mcp.Description("Done bar")),
 		mcp.WithString("verify_cmd", mcp.Description("Optional gate-reviewer validate command")),
+		mcp.WithArray("blocked_by", mcp.WithStringItems()),
+		mcp.WithArray("blocked_by_remove", mcp.WithStringItems()),
 	)
 }
 

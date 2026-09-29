@@ -1135,6 +1135,8 @@ func migrate(conn *sql.DB) error {
 	// Typed edges + readiness holds (design d523e74e). tasks.depends_on (dead
 	// since ade0c39, 0 non-empty rows) is left in place: columns are never dropped.
 	migrateOrgEdges(conn)
+	// Parked tasks + founder gates (task d43d844e), on top of task_holds.
+	migrateParking(conn)
 
 	// knowledge_log + clock + compaction watermark (design af783f93). Starts empty:
 	// no backfill (ruling af6e3a5f OQ3).

@@ -92,11 +92,15 @@ const ackClock = `MAX(COALESCE(t.pending_since, t.dispatched_at), ` + ackReadySi
 
 // ackCandidate is task_pending_unclaimed / task_pending_live: the legacy
 // GetUnackedTasks predicate, narrowed to tasks that are READY (no unsatisfied
-// blocking edge, readyPredicate's rule, hold row or not) and, for a pool task,
-// whose profile has no doer holding an accepted / in-progress task. Args:
+// blocking edge, readyPredicate's rule, hold row or not), not parked and not
+// a founder gate of profile human/user (task d43d844e: parked work and founder
+// gates never climb the ladder) and, for a pool task, whose profile has no
+// doer holding an accepted / in-progress task. Args:
 // cutoff, now (edge valid_until).
 const ackCandidate = `t.status = 'pending' AND t.archived_at IS NULL AND ` + ackClock + ` < ?
 	AND (t.run_state IS NULL OR t.run_state = '')
+	AND NOT EXISTS (SELECT 1 FROM task_holds ph WHERE ph.task_id = t.id AND ph.released_at IS NULL AND ph.reason = '` + HoldReasonParked + `')
+	AND LOWER(COALESCE(t.profile_slug, '')) NOT IN ('human', 'user')
 	AND NOT EXISTS (SELECT 1 ` + ackBlockingEdges + ` AND (re.valid_until IS NULL OR re.valid_until > ?)
 		AND NOT (rp.status = 'done' OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))
 	AND (COALESCE(t.assigned_to, '') <> '' OR NOT EXISTS (SELECT 1 FROM tasks x

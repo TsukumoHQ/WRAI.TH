@@ -342,6 +342,7 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 			case <-ticker.C:
 				now := database.Now()
 				evaluateObligations(database, registry, now)
+				evaluateFounderGates(database, registry, now)
 				evaluateStaleHeldTasks(database, registry, now)
 				evaluateClassBudgets(database, registry, now)
 				evaluateExceptionLadders(database, registry, now)

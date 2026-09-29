@@ -161,10 +161,10 @@ func TestDiscoverSchemasValidJSON(t *testing.T) {
 	if err := json.Unmarshal([]byte(text), &parsed); err != nil {
 		t.Fatalf("discover output not valid JSON: %v", err)
 	}
-	// 22 + obligations_mine/obligation_discharge/obligation_decline (slice 2b)
-	// + task_edge (graph S2).
-	if len(parsed.Tools) != 26 {
-		t.Errorf("tasks tools = %d, want 26", len(parsed.Tools))
+	// 22 + task_edge (graph S2) + park_task (d43d844e); the three obligation
+	// tools moved to their own category when tasks hit the 16000-byte payload.
+	if len(parsed.Tools) != 24 {
+		t.Errorf("tasks tools = %d, want 24", len(parsed.Tools))
 	}
 	for _, tool := range parsed.Tools {
 		if tool.InputSchema["type"] != "object" {

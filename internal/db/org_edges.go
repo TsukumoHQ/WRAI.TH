@@ -335,7 +335,8 @@ func (d *DB) RemoveEdge(project, srcID, typ, dstID, removedBy string) ([]string,
 // listing, ClaimNextTask and the hold settle: the task is pending, not
 // archived, and no live, unexpired blocking edge out of it is unsatisfied. A
 // blocked_by edge is satisfied when its prerequisite is done, or in review for
-// until=in-review. A cancelled prerequisite never satisfies (ruling OQ2).
+// until=in-review. A cancelled prerequisite never satisfies (ruling OQ2). A
+// task parked until the founder is never ready (task d43d844e).
 // alias names the tasks row being tested.
 func readyPredicate(alias, now string) (string, []any) {
 	return fmt.Sprintf(`%[1]s.status = 'pending' AND %[1]s.archived_at IS NULL AND NOT EXISTS (
@@ -344,7 +345,8 @@ func readyPredicate(alias, now string) (string, []any) {
 		  AND re.type IN (SELECT type FROM edge_semantics WHERE blocks_readiness = 1)
 		  AND (re.valid_until IS NULL OR re.valid_until > ?)
 		  AND NOT (rp.status = 'done'
-		           OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))`, alias), []any{now}
+		           OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))
+	  AND NOT EXISTS (SELECT 1 FROM task_holds ph WHERE ph.task_id = %[1]s.id AND ph.released_at IS NULL AND ph.park_until = '`+ParkUntilFounder+`')`, alias), []any{now}
 }
 
 func isReadyTx(q excQ, project, taskID, now string) (bool, error) {

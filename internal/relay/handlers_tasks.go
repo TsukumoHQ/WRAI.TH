@@ -572,6 +572,13 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 	if err != nil || existing == nil {
 		return toolResultError("task not found"), nil
 	}
+	if existing.Status == "pending" && h.db.TaskParked(project, taskID) {
+		task, res := h.parkTarget(project, agent, taskID, "resume")
+		if res != nil {
+			return res, nil
+		}
+		return h.unpark(project, agent, task)
+	}
 	if existing.Status != "blocked" {
 		return validationError(CodeInvalidArgument, fmt.Sprintf("task is not blocked (status=%s)", existing.Status)), nil
 	}
@@ -1108,7 +1115,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	for k := range req.GetArguments() {
 		if !updateTaskArgs[k] {
 			return validationError(CodeInvalidArgument, fmt.Sprintf(
-				"%q is not an updatable field of update_task — updatable: title, description, priority, board_id, assigned_to, profile_slug, progress_note, goal, acceptance_criteria, dod, verify_cmd (change status with start_task/complete_task/block_task/cancel_task/resume_task/review_task)",
+				"%q is not an updatable field of update_task — updatable: title, description, priority, board_id, assigned_to, profile_slug, progress_note, goal, acceptance_criteria, dod, verify_cmd, blocked_by, blocked_by_remove (change status with start_task/complete_task/block_task/cancel_task/resume_task/review_task)",
 				k)), nil
 		}
 	}
@@ -1220,6 +1227,12 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
+	// blocked_by edits first: a refusal (not the dispatcher, cycle, unknown id)
+	// then lands before any field write.
+	if res := h.updateBlockedBy(project, agent, taskID, req.GetStringSlice("blocked_by", nil), req.GetStringSlice("blocked_by_remove", nil)); res != nil {
+		return res, nil
+	}
+
 	hasFieldEdit := title != nil || description != nil || priority != nil || boardID != nil ||
 		goal != nil || acceptanceCriteria != nil || dod != nil || verifyCmd != nil
 
@@ -1272,6 +1285,7 @@ var updateTaskArgs = map[string]bool{
 	"title": true, "description": true, "priority": true, "board_id": true,
 	"assigned_to": true, "profile_slug": true, "progress_note": true,
 	"goal": true, "acceptance_criteria": true, "dod": true, "verify_cmd": true,
+	"blocked_by": true, "blocked_by_remove": true,
 }
 
 // reassignViaUpdate applies the assigned_to/profile_slug reassignment path of
