@@ -583,13 +583,17 @@ func (h *Handlers) HandleResumeTask(ctx context.Context, req mcp.CallToolRequest
 		return validationError(CodeInvalidArgument, fmt.Sprintf("task is not blocked (status=%s)", existing.Status)), nil
 	}
 
-	task, err := h.db.StartTask(taskID, agent, project)
+	task, err := h.db.ResumeTask(taskID, agent, project)
 	if err != nil {
 		return taskOpError(err, "failed to resume task: %v", err), nil
 	}
 	h.events.Emit(MCPEvent{Type: "task", Action: "resume", Agent: agent, Project: project, Label: task.Title})
-	emitTaskEvent(h.events, "task.in_progress", "resume", project, task)
-	pushStatusAsync(h.getConnector(), task, "in-progress", nil)
+	ev := EvTaskInProgress
+	if task.Status == "accepted" { // blocked while accepted: back to its claim
+		ev = EvTaskClaimed
+	}
+	emitTaskEvent(h.events, ev, "resume", project, task)
+	pushStatusAsync(h.getConnector(), task, task.Status, nil)
 
 	return h.resultJSONTracked(project, agent, "resume_task", task)
 }
@@ -1612,8 +1616,12 @@ func (h *Handlers) HandleGetTask(ctx context.Context, req mcp.CallToolRequest) (
 	if task == nil {
 		return toolResultError("task not found"), nil
 	}
+	one := []models.Task{*task}
+	if err := h.db.AttachParks(project, one); err != nil {
+		return toolResultError(fmt.Sprintf("failed to get task: %v", err)), nil
+	}
 
-	return h.resultJSONTracked(project, "", "get_task", task)
+	return h.resultJSONTracked(project, "", "get_task", &one[0])
 }
 
 func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1641,6 +1649,9 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 	if tasks == nil {
 		tasks = []models.Task{}
 	}
+	if err := h.db.AttachParks(project, tasks); err != nil {
+		return toolResultError(fmt.Sprintf("failed to list tasks: %v", err)), nil
+	}
 
 	// Truncate descriptions to save tokens in list view (use get_task for full details)
 	for i := range tasks {
@@ -1660,8 +1671,12 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 			if t.Status == "blocked" {
 				outcome = "BLOCKED: " + strOrDash(t.BlockedReason)
 			}
+			status := t.Status
+			if t.Park != nil {
+				status += " (parked until " + t.Park.Until + ")"
+			}
 			rows[i] = []string{
-				t.ID, t.Status, t.Priority, t.ProfileSlug, strOrDash(t.AssignedTo),
+				t.ID, status, t.Priority, t.ProfileSlug, strOrDash(t.AssignedTo),
 				t.Title, t.Description, outcome,
 			}
 		}

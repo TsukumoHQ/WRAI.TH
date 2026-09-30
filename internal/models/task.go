@@ -85,6 +85,9 @@ type Task struct {
 	Released  []string  `json:"-"`
 	Ready     *bool     `json:"ready,omitempty"`
 	BlockedBy []EdgeRef `json:"blocked_by,omitempty"`
+	// Park is the task's open park (task fea65594), filled by get_task /
+	// list_tasks; nil when the task is not parked. TRANSIENT, never scanned.
+	Park *TaskPark `json:"park,omitempty"`
 
 	// --- Git zone (review gate) — where the work physically lives, so an
 	// external supervisor (e.g. niwa's Q&A gate) can review and merge it.
@@ -169,6 +172,15 @@ type LeaseTransfer struct {
 	To     string `json:"to,omitempty"`
 	Reason string `json:"reason"`
 	By     string `json:"by,omitempty"`
+}
+
+// TaskPark is an open park on a pending task: held on purpose until the
+// founder acts or another task reaches a status, so no ACK rung pages anyone.
+type TaskPark struct {
+	Until    string `json:"until"`
+	Reason   string `json:"reason"`
+	ParkedBy string `json:"parked_by"`
+	Since    string `json:"since"`
 }
 
 // AuditEntry is one logged orchestrator/agent action against a resource — the

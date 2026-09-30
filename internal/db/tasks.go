@@ -14,19 +14,22 @@ import (
 	"github.com/google/uuid"
 )
 
-// blockedPeriod is one {start,end} window in the auto-stamped blocked_periods trail.
+// blockedPeriod is one {start,end} window in the auto-stamped blocked_periods
+// trail. From is the status the task was blocked from, so resume_task can
+// return it there (task fea65594); empty on windows written before it.
 type blockedPeriod struct {
 	Start string `json:"start"`
 	End   string `json:"end,omitempty"`
+	From  string `json:"from,omitempty"`
 }
 
-// openBlockedPeriod appends a new open {start: now} window to the existing JSON array.
-func openBlockedPeriod(existing, now string) string {
+// openBlockedPeriod appends a new open {start: now, from} window to the existing JSON array.
+func openBlockedPeriod(existing, now, from string) string {
 	var periods []blockedPeriod
 	if existing != "" {
 		_ = json.Unmarshal([]byte(existing), &periods)
 	}
-	periods = append(periods, blockedPeriod{Start: now})
+	periods = append(periods, blockedPeriod{Start: now, From: from})
 	b, _ := json.Marshal(periods)
 	return string(b)
 }
@@ -60,7 +63,7 @@ var validTransitions = map[string][]string{
 	// promoted. pending can be sent back to backlog (de-groom).
 	"backlog":     {"pending", "cancelled"},
 	"pending":     {"accepted", "in-progress", "done", "cancelled", "backlog"},
-	"accepted":    {"in-progress", "done", "cancelled"},
+	"accepted":    {"in-progress", "done", "blocked", "cancelled"},
 	"in-progress": {"in-review", "done", "blocked", "cancelled"},
 	"in-review":   {"in-progress", "done", "blocked", "cancelled"},
 	"blocked":     {"in-progress", "in-review", "done", "cancelled"},
@@ -695,6 +698,58 @@ func (d *DB) CompleteTaskFenced(taskID, agentName, project string, result *strin
 	return d.transitionTaskCode(taskID, agentName, project, "done", result, nil, "", gen)
 }
 
+// ResumeTask returns a blocked task to the status it was blocked from (task
+// fea65594): a task blocked while accepted goes back to accepted, its claim
+// and lease back to its assignee; any other block resumes to in-progress.
+func (d *DB) ResumeTask(taskID, agentName, project string) (*models.Task, error) {
+	task, err := d.GetTask(taskID, project)
+	if err != nil {
+		return nil, err
+	}
+	if task == nil || task.Status != "blocked" || openBlockedFrom(task.BlockedPeriods) != "accepted" || strVal(task.AssignedTo) == "" {
+		return d.StartTask(taskID, agentName, project)
+	}
+	worker := strVal(task.AssignedTo)
+	if err := d.checkWIP(taskID, worker, project, false, false); err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC().Format(memoryTimeFmt)
+	bp := closeBlockedPeriod(task.BlockedPeriods, now)
+	tx, err := d.beginWriterTx()
+	if err != nil {
+		return nil, fmt.Errorf("resume task: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.Exec(`UPDATE tasks SET status = 'accepted', blocked_periods = ?, last_activity_at = ?
+		WHERE id = ? AND project = ? AND status = 'blocked' AND lease_generation = ?`,
+		bp, now, taskID, project, task.LeaseGeneration)
+	if err != nil {
+		return nil, fmt.Errorf("resume task: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, newTaskError(CodeTaskStateConflict, "status changed from %q before resume could apply on task %s", "blocked", taskID)
+	}
+	task.Status, task.BlockedPeriods, task.LastActivityAt = "accepted", bp, &now
+	if err := d.writeTransitionExceptions(tx, task, agentName, "blocked", "accepted", nil, "", now); err != nil {
+		return nil, fmt.Errorf("resume task: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("resume task: commit: %w", err)
+	}
+	d.applyLeaseOnTransition(task, "accepted", agentName, worker, "", now)
+	return task, nil
+}
+
+// openBlockedFrom is the From of the open blocked window, "" if none.
+func openBlockedFrom(periods string) string {
+	var ps []blockedPeriod
+	_ = json.Unmarshal([]byte(periods), &ps)
+	if n := len(ps); n > 0 && ps[n-1].End == "" {
+		return ps[n-1].From
+	}
+	return ""
+}
+
 func (d *DB) BlockTask(taskID, agentName, project string, reason *string) (*models.Task, error) {
 	return d.BlockTaskWithCode(taskID, agentName, project, reason, "")
 }
@@ -951,7 +1006,7 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 	case "blocked":
 		// block → append {start: now} to blocked_periods
 		task.BlockedReason = blockedReason
-		task.BlockedPeriods = openBlockedPeriod(task.BlockedPeriods, now)
+		task.BlockedPeriods = openBlockedPeriod(task.BlockedPeriods, now, oldStatus)
 		res, err = exec(
 			"UPDATE tasks SET status = ?, blocked_reason = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
 			newStatus, blockedReason, task.BlockedPeriods, taskID, project, oldStatus,

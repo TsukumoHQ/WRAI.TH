@@ -30,12 +30,12 @@ func tickAt(w *twin, now time.Time) {
 }
 
 // ladderMessages are the ACK-chain messages about one task (founder gate
-// alerts excluded).
+// alerts and park notices excluded).
 func ladderMessages(t *testing.T, w *twin, taskID string) []chainMsg {
 	t.Helper()
 	var out []chainMsg
 	for _, m := range chainMessages(t, w) {
-		if strings.Contains(m.subject, "title "+taskID) && !strings.HasPrefix(m.subject, "FOUNDER GATE") {
+		if strings.Contains(m.subject, "title "+taskID) && !strings.HasPrefix(m.subject, "FOUNDER GATE") && !strings.HasPrefix(m.subject, "PARKED:") {
 			out = append(out, m)
 		}
 	}

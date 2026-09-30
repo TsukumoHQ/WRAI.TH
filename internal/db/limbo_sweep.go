@@ -247,9 +247,9 @@ func (d *DB) lookupAgentLiveness(project, name string) agentLiveness {
 }
 
 // blockLimboTask performs the block transition as a single-writer CAS. It is the
-// "équivalent single-writer" the ruling allows: BlockTask goes through
-// validTransitions, which does not permit accepted→blocked, yet an accepted task
-// claimed by a dead agent is exactly a limbo case. This writes the same columns
+// "équivalent single-writer" the ruling allows: BlockTask is fenced to the
+// lease holder, yet an accepted task claimed by a dead agent is exactly a limbo
+// case. This writes the same columns
 // the blocked branch of transitionTask does (status, blocked_reason, an opened
 // blocked_periods window) but admits any non-terminal FROM status. The CAS guard
 // (status = fromStatus) makes a concurrent transition win instead of being
@@ -258,7 +258,9 @@ func (d *DB) lookupAgentLiveness(project, name string) agentLiveness {
 // The block and its limbo_sweep exception row (design 220f4f3d, source-declared
 // class limbo_sweep) share one writer tx: both land or neither does.
 func (d *DB) blockLimboTask(taskID, project, fromStatus, reason, blockedPeriods, now string) (bool, error) {
-	bp := openBlockedPeriod(blockedPeriods, now)
+	// No From: a limbo block's holder is dead, so resume_task must not hand it
+	// back its claim (openBlockedFrom "" resumes to in-progress by the resumer).
+	bp := openBlockedPeriod(blockedPeriods, now, "")
 	tx, err := d.beginWriterTx()
 	if err != nil {
 		return false, err

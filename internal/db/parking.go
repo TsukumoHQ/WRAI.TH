@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"agent-relay/internal/models"
 )
 
 // Parked tasks and founder gates (task d43d844e, relay half of c373a9ad).
@@ -69,33 +71,48 @@ func migrateParking(conn *sql.DB) {
 }
 
 // ParkTask parks a pending task until the founder (until == "founder") or
-// until another task of the project is done (until = its full id). reason is
-// required. Parking an already parked task re-parks it with the new until.
-func (d *DB) ParkTask(project, taskID, by, reason, until string) error {
+// until another task of the project reaches untilStatus (until = its full id;
+// untilStatus "in-review", else done). reason is required. Parking an already
+// parked task re-parks it with the new until. fresh is false only on a re-park
+// with the same reason (task fea65594: that one is not announced again).
+func (d *DB) ParkTask(project, taskID, by, reason, until, untilStatus string) (fresh bool, err error) {
 	if reason == "" || until == "" {
-		return newTaskError(CodeEdgeInvalidArgument, "park needs a reason and until (founder or a task id)")
+		return false, newTaskError(CodeEdgeInvalidArgument, "park needs a reason and until (founder or a task id)")
+	}
+	if untilStatus != "" && untilStatus != "done" && untilStatus != "in-review" {
+		return false, newTaskError(CodeEdgeInvalidArgument, "park until status must be done or in-review, got %q", untilStatus)
 	}
 	now := d.Now().UTC().Format(memoryTimeFmt)
 	tx, err := d.beginWriterTx()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer func() { _ = tx.Rollback() }()
 	var status string
 	err = tx.QueryRow(`SELECT status FROM tasks WHERE id = ? AND project = ? AND archived_at IS NULL`, taskID, project).Scan(&status)
 	if errors.Is(err, sql.ErrNoRows) {
-		return newTaskError(CodeTaskNotFound, "task %s not found in project %s", taskID, project)
+		return false, newTaskError(CodeTaskNotFound, "task %s not found in project %s", taskID, project)
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
 	if status != "pending" {
-		return newTaskError(CodeTaskNotPending, "only a pending task can be parked (task %s is %s)", taskID, status)
+		return false, newTaskError(CodeTaskNotPending, "only a pending task can be parked (task %s is %s)", taskID, status)
+	}
+	var priorReason string
+	switch err := tx.QueryRow(`SELECT COALESCE(park_reason, '') FROM task_holds WHERE task_id = ? AND released_at IS NULL AND reason = ?`,
+		taskID, HoldReasonParked).Scan(&priorReason); {
+	case errors.Is(err, sql.ErrNoRows):
+		fresh = true
+	case err != nil:
+		return false, err
+	default:
+		fresh = priorReason != reason
 	}
 	// A re-park drops the previous park's edge first, so until is exactly one thing.
 	if _, err := tx.Exec(`UPDATE org_edges SET removed_at = ?, removed_by = ? WHERE src_kind = 'task' AND src_id = ?
 		AND removed_at IS NULL AND json_extract(metadata, '$.parked') = 1`, now, by, taskID); err != nil {
-		return err
+		return false, err
 	}
 	if until == ParkUntilFounder {
 		_, err = tx.Exec(`INSERT INTO task_holds (task_id, project, reason, held_at, park_until, park_reason, parked_by)
@@ -106,35 +123,39 @@ func (d *DB) ParkTask(project, taskID, by, reason, until string) error {
 				released_at = NULL, flagged = NULL, announced_at = NULL`,
 			taskID, project, HoldReasonParked, now, ParkUntilFounder, reason, by)
 		if err != nil {
-			return err
+			return false, err
 		}
-		return tx.Commit()
+		return fresh, tx.Commit()
 	}
-	var untilStatus string
-	err = tx.QueryRow(`SELECT status FROM tasks WHERE id = ? AND project = ?`, until, project).Scan(&untilStatus)
+	var untilState string
+	err = tx.QueryRow(`SELECT status FROM tasks WHERE id = ? AND project = ?`, until, project).Scan(&untilState)
 	if errors.Is(err, sql.ErrNoRows) {
-		return newTaskError(CodeTaskNotFound, "until task %s not found in project %s", until, project)
+		return false, newTaskError(CodeTaskNotFound, "until task %s not found in project %s", until, project)
 	}
 	if err != nil {
-		return err
+		return false, err
 	}
-	if untilStatus == "done" {
-		return newTaskError(CodeEdgeInvalidArgument, "task %s is already done: nothing to park %s on", until, taskID)
+	if untilState == "done" || (untilStatus == "in-review" && untilState == "in-review") {
+		return false, newTaskError(CodeEdgeInvalidArgument, "task %s is already %s: nothing to park %s on", until, untilState, taskID)
 	}
 	// Until a task: the founder hold (if any) stops counting, then the
 	// blocked_by edge opens (or keeps) the hold.
 	if _, err := tx.Exec(`UPDATE task_holds SET park_until = NULL WHERE task_id = ? AND released_at IS NULL`, taskID); err != nil {
-		return err
+		return false, err
+	}
+	meta := map[string]any{"parked": true}
+	if untilStatus == "in-review" {
+		meta["until"] = untilStatus
 	}
 	if err := d.addEdgeTx(tx, project, EdgeInput{SrcKind: "task", SrcID: taskID, Type: EdgeBlockedBy, DstKind: "task", DstID: until,
-		Metadata: map[string]any{"parked": true}, CreatedBy: by}, now); err != nil {
-		return err
+		Metadata: meta, CreatedBy: by}, now); err != nil {
+		return false, err
 	}
 	if _, err := tx.Exec(`UPDATE task_holds SET reason = ?, park_until = ?, park_reason = ?, parked_by = ?
 		WHERE task_id = ? AND released_at IS NULL`, HoldReasonParked, until, reason, by, taskID); err != nil {
-		return err
+		return false, err
 	}
-	return tx.Commit()
+	return fresh, tx.Commit()
 }
 
 // UnparkTask lifts the park of a task: its park edge is removed and the hold
@@ -171,6 +192,35 @@ func (d *DB) TaskParked(project, taskID string) bool {
 	var one int
 	return d.ro().QueryRow(`SELECT 1 FROM task_holds WHERE task_id = ? AND project = ? AND released_at IS NULL AND reason = ?`,
 		taskID, project, HoldReasonParked).Scan(&one) == nil
+}
+
+// AttachParks fills Park on every task of the slice that has an open park.
+func (d *DB) AttachParks(project string, tasks []models.Task) error {
+	if len(tasks) == 0 {
+		return nil
+	}
+	rows, err := d.ro().Query(`SELECT task_id, COALESCE(park_until, ''), COALESCE(park_reason, ''), COALESCE(parked_by, ''), held_at
+		FROM task_holds WHERE project = ? AND released_at IS NULL AND reason = ?`, project, HoldReasonParked)
+	if err != nil {
+		return fmt.Errorf("parks: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	parks := map[string]*models.TaskPark{}
+	for rows.Next() {
+		var id string
+		var p models.TaskPark
+		if err := rows.Scan(&id, &p.Until, &p.Reason, &p.ParkedBy, &p.Since); err != nil {
+			return err
+		}
+		parks[id] = &p
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for i := range tasks {
+		tasks[i].Park = parks[tasks[i].ID]
+	}
+	return nil
 }
 
 // FounderGate is one open founder gate, for the alert and the digest.

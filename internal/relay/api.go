@@ -145,6 +145,10 @@ func (r *Relay) ServeAPI(w http.ResponseWriter, req *http.Request) {
 		r.apiTransitionTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/reassign") && req.Method == http.MethodPost:
 		r.apiReassignTask(w, req, path)
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/park") && req.Method == http.MethodPost:
+		r.apiParkTask(w, req, strings.TrimSuffix(strings.TrimPrefix(path, "/tasks/"), "/park"))
+	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/unpark") && req.Method == http.MethodPost:
+		r.apiUnparkTask(w, req, strings.TrimSuffix(strings.TrimPrefix(path, "/tasks/"), "/unpark"))
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/requeue") && req.Method == http.MethodPost:
 		r.apiRequeueTask(w, req, path)
 	case strings.HasPrefix(path, "/tasks/") && strings.HasSuffix(path, "/comment") && req.Method == http.MethodPost:
@@ -1587,7 +1591,12 @@ func (r *Relay) apiGetTask(w http.ResponseWriter, req *http.Request, path string
 		http.Error(w, `{"error":"task not found"}`, http.StatusNotFound)
 		return
 	}
-	writeJSON(w, task)
+	one := []models.Task{*task}
+	if err := r.DB.AttachParks(project, one); err != nil {
+		http.Error(w, `{"error":"failed to get task"}`, http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, &one[0])
 }
 
 func (r *Relay) apiGetTaskProgress(w http.ResponseWriter, req *http.Request, path string) {
