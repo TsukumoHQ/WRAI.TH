@@ -2048,17 +2048,21 @@ func (h *Handlers) HandleListTasks(ctx context.Context, req mcp.CallToolRequest)
 	priority := req.GetString("priority", "")
 	assignedTo := req.GetString("assigned_to", "")
 	boardID := req.GetString("board_id", "")
+	linearKey := strings.TrimSpace(req.GetString("linear_key", ""))
 	limit := clampLimit(req.GetInt("limit", 50))
 	includeArchived := req.GetBool("include_archived", false)
 
 	var tasks []models.Task
 	var err error
 	if req.GetBool("ready", false) {
+		if linearKey != "" {
+			return validationError(CodeInvalidArgument, "linear_key and ready cannot be combined: list by linear_key (optionally with status)"), nil
+		}
 		// The one readiness predicate (same as claim next=true); ready implies
 		// pending and not archived, so status and include_archived do not apply.
 		tasks, err = h.db.ListReadyTasks(project, profile, boardID, limit)
 	} else {
-		tasks, err = h.db.ListTasks(project, status, profile, priority, assignedTo, boardID, limit, includeArchived)
+		tasks, err = h.db.ListTasksByKey(project, status, profile, priority, assignedTo, boardID, linearKey, limit, includeArchived)
 	}
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to list tasks: %v", err)), nil

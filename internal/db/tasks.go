@@ -1481,6 +1481,13 @@ func (d *DB) GetParentChain(taskID, project string) ([]models.Task, error) {
 }
 
 func (d *DB) ListTasks(project, status, profileSlug, priority, assignedTo, boardID string, limit int, includeArchived bool) ([]models.Task, error) {
+	return d.ListTasksByKey(project, status, profileSlug, priority, assignedTo, boardID, "", limit, includeArchived)
+}
+
+// ListTasksByKey is ListTasks plus an exact linear_key filter in SQL (W11):
+// finding one task by its Linear key returns that task, not the board. ""
+// means no key filter.
+func (d *DB) ListTasksByKey(project, status, profileSlug, priority, assignedTo, boardID, linearKey string, limit int, includeArchived bool) ([]models.Task, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -1513,6 +1520,10 @@ func (d *DB) ListTasks(project, status, profileSlug, priority, assignedTo, board
 	if boardID != "" {
 		query += " AND board_id = ?"
 		args = append(args, boardID)
+	}
+	if linearKey != "" {
+		query += " AND linear_key = ?"
+		args = append(args, linearKey)
 	}
 
 	query += " ORDER BY CASE priority WHEN 'P0' THEN 0 WHEN 'P1' THEN 1 WHEN 'P2' THEN 2 WHEN 'P3' THEN 3 END, dispatched_at DESC LIMIT ?"
