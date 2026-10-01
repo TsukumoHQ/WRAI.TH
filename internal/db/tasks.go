@@ -905,16 +905,27 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 		}
 	}
 	readGen := task.LeaseGeneration
-	// worker is who a forward move leaves holding the lease. An override actor
-	// (e.g. the gate daemon resuming after a reject) acts FOR the worker, so the
-	// lease stays with the prior holder / assignee instead of moving to it.
+	// worker is who a forward move leaves holding the lease: the task's doer,
+	// whoever calls (cto ruling 2026-10-01 16:40Z, N3 03958111). A lifecycle
+	// move never moves lease_holder / assigned_to; only claim, reclaim and
+	// update_task assigned_to do. The doer is the prior holder, else the
+	// assignee, else the claimer (a delegating-service name is never a doer);
+	// the caller only when the task has none yet (a start straight from
+	// pending is its claim).
 	worker := agentName
-	if override && (newStatus == "in-progress" || newStatus == "in-review") {
-		if priorHolder != "" {
-			worker = priorHolder
-		} else if a := strVal(task.AssignedTo); a != "" {
-			worker = a
+	if newStatus == "in-progress" || newStatus == "in-review" {
+		for _, doer := range []string{priorHolder, strVal(task.AssignedTo), strVal(task.ClaimedBy)} {
+			if doer != "" && !IsDelegatingService(doer) {
+				worker = doer
+				break
+			}
 		}
+	}
+	// The delegating service (niwa) only ever acts FOR a doer (N3, 03958111):
+	// with no doer on record it is refused rather than handed the task.
+	if (newStatus == "in-progress" || newStatus == "in-review") && IsDelegatingService(worker) {
+		return nil, newTaskError(CodeTaskLeaseFenced,
+			"task %s has no doer for %q to act for (no lease holder, assignee or claimer); a doer must claim it first", taskID, agentName)
 	}
 
 	// Exceptions (design 220f4f3d): a block, a cancel with a reason, and any move

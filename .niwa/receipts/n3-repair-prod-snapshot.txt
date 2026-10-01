@@ -1,0 +1,14 @@
+N3 repair receipt (03958111, re-scoped: non-terminal tasks only) — repairDelegateHeldTasks on a snapshot of the live relay DB
+branch: wraith/03958111-niwa-keeps-doer @ e033a2c (code under test)   date: 2026-10-01T16:46:30Z
+
+1. snapshot (live DB untouched, read-only source):
+   sqlite3 -readonly ~/.agent-relay/relay.db ".backup 'copy.db'"
+2. before: tasks with assigned_to / lease_holder = 'niwa': 49 total, 6 non-terminal (43 done / cancelled = history, out of scope)
+3. run: go run -tags fts5 <harness calling db.NewTestDB(copy.db)>  (migrate -> repairDelegateHeldTasks)
+   2026/10/01 18:46:20 migrate: N3 repair re-pointed 5 task(s) held by a delegating service to their claimer
+   2026/10/01 18:46:20 migrate: N3 repair left 1 task(s) held by a delegating service with no other claimer: 74d06e55-0d00-4b95-a7b5-5d3779539377
+4. after: non-terminal niwa-held 6 -> 1 (5 re-pointed to claimed_by); terminal rows untouched (total 49 -> 44)
+   remaining (no claimer on record, left untouched, logged by id):
+   74d06e55-0d00-4b95-a7b5-5d3779539377 in-review assigned=niwa lease=niwa claimed_by=
+5. second run (idempotence): no "re-pointed" line, only the ambiguous line:
+   2026/10/01 18:46:21 migrate: N3 repair left 1 task(s) held by a delegating service with no other claimer: 74d06e55-0d00-4b95-a7b5-5d3779539377

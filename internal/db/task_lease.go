@@ -2,8 +2,10 @@ package db
 
 import (
 	"agent-relay/internal/models"
+	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"time"
@@ -461,4 +463,60 @@ func strVal(p *string) string {
 		return ""
 	}
 	return *p
+}
+
+// repairDelegateHeldTasks re-points non-terminal tasks whose assigned_to / lease_holder
+// drifted to a delegating service (RELAY_OVERRIDE_ACTORS, default niwa) before
+// N3 (03958111) back to their claimer. A row whose claimer is empty or itself a
+// delegating service is left untouched and logged by id. Idempotent: once
+// repaired, a row no longer matches. Returns the number of tasks repaired and
+// logs it once when non-zero.
+func repairDelegateHeldTasks(conn *sql.DB) int {
+	rows, err := conn.Query(`SELECT id, COALESCE(assigned_to, ''), COALESCE(lease_holder, ''), COALESCE(claimed_by, '') FROM tasks
+		WHERE status NOT IN ('done', 'cancelled')
+		  AND (COALESCE(assigned_to, '') != '' OR COALESCE(lease_holder, '') != '')`)
+	if err != nil {
+		return 0
+	}
+	type row struct{ id, assigned, lease, claimed string }
+	var drifted []row
+	for rows.Next() {
+		var r row
+		if rows.Scan(&r.id, &r.assigned, &r.lease, &r.claimed) == nil &&
+			(IsDelegatingService(r.assigned) || IsDelegatingService(r.lease)) {
+			drifted = append(drifted, r)
+		}
+	}
+	_ = rows.Close()
+	repaired := 0
+	var ambiguous []string
+	for _, r := range drifted {
+		if r.claimed == "" || IsDelegatingService(r.claimed) {
+			ambiguous = append(ambiguous, r.id)
+			continue
+		}
+		// Only a field that IS the service is re-pointed; "" never matches.
+		if !IsDelegatingService(r.assigned) {
+			r.assigned = ""
+		}
+		if !IsDelegatingService(r.lease) {
+			r.lease = ""
+		}
+		res, err := conn.Exec(`UPDATE tasks SET
+			assigned_to = CASE WHEN assigned_to = ? THEN ? ELSE assigned_to END,
+			lease_holder = CASE WHEN lease_holder = ? THEN ? ELSE lease_holder END
+			WHERE id = ?`, r.assigned, r.claimed, r.lease, r.claimed, r.id)
+		if err == nil {
+			if n, _ := res.RowsAffected(); n > 0 {
+				repaired++
+			}
+		}
+	}
+	if repaired > 0 {
+		log.Printf("migrate: N3 repair re-pointed %d task(s) held by a delegating service to their claimer", repaired)
+	}
+	if len(ambiguous) > 0 {
+		log.Printf("migrate: N3 repair left %d task(s) held by a delegating service with no other claimer: %s", len(ambiguous), strings.Join(ambiguous, ","))
+	}
+	return repaired
 }
