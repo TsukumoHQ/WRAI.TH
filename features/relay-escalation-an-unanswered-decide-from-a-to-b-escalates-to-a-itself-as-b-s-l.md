@@ -4,7 +4,7 @@
 ## Branch : wraith/b62b3966-escalation-chain (from main)
 ## Relay task : b62b3966-7d67-40fa-9ad1-9375ad7ac74c
 ## Trace : trace=255eaeced52cae57e2f80646478eb60a
-## Status : 🔵 IN REVIEW
+## Status : 🔵 SUBMITTED
 
 ## 1. Product Brief
 
@@ -42,10 +42,10 @@ FAIL
 ## 3. Files changed
 
 ```
-...e-from-a-to-b-escalates-to-a-itself-as-b-s-l.md |  58 ++++++++++++
+...e-from-a-to-b-escalates-to-a-itself-as-b-s-l.md |  65 +++++++++++++
  internal/relay/cleanup.go                          |  49 +++++++++-
  internal/relay/obligations_answer_chain_test.go    | 102 +++++++++++++++++++++
- 3 files changed, 208 insertions(+), 1 deletion(-)
+ 3 files changed, 215 insertions(+), 1 deletion(-)
 ```
 
 ## 4. QA Log
