@@ -15,6 +15,7 @@ import (
 	"agent-relay/internal/config"
 	"agent-relay/internal/connector"
 	"agent-relay/internal/db"
+	"agent-relay/internal/models"
 )
 
 // Connector is the Linear-mode TaskConnector. It is constructed only when the
@@ -157,6 +158,9 @@ func mapStatus(st *stateInfo) string {
 	if st.Type == "started" && looksLikeReview(st.Name) {
 		return "in-review"
 	}
+	if st.Type == "started" && looksLikeDeploying(st.Name) {
+		return "deploying"
+	}
 	return coarse
 }
 
@@ -181,6 +185,21 @@ func looksLikeReview(name string) bool {
 	return strings.Contains(strings.ToLower(name), "review")
 }
 
+// looksLikeDeploying matches the post-merge "Deploying" state (W8 D4): a
+// started-type state that is never a launch.
+func looksLikeDeploying(name string) bool {
+	return strings.Contains(strings.ToLower(name), "deploy")
+}
+
+// holdDeploying keeps a deploying mirror deploying while its issue sits In
+// Review: a team without a Deploying state never moves the issue (ruling Q2),
+// so the poll / webhook must not pull the relay task back to in-review.
+func holdDeploying(seed *db.LinearMirrorSeed, prior *models.Task) {
+	if prior != nil && prior.Status == "deploying" && seed.Status == "in-review" {
+		seed.Status = "deploying"
+	}
+}
+
 func looksLikeBlocked(name string) bool {
 	return strings.Contains(strings.ToLower(name), "block")
 }
@@ -191,7 +210,7 @@ func looksLikeBlocked(name string) bool {
 // stale bug). Other statuses (pending/accepted/blocked) remain dispatchable.
 func isTerminalOrActive(status string) bool {
 	switch status {
-	case "in-progress", "done", "cancelled":
+	case "in-progress", "deploying", "done", "cancelled":
 		return true
 	default:
 		return false

@@ -1025,6 +1025,8 @@ func (h *Handlers) HandleDeployTask(ctx context.Context, req mcp.CallToolRequest
 	h.announceReleased(project, task.Released)
 	h.events.Emit(MCPEvent{Type: "task", Action: "deploy", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
 	emitTaskEvent(h.events, "task.deploying", "deploy", project, task, map[string]any{"merge_sha": h.db.DeployMergeSHA(project, taskID)})
+	// Linear write-back (W8 D4): Deploying state, or In Review + one comment.
+	pushStatusAsync(h.getConnector(), task, "deploying", nil)
 	return h.resultJSONTracked(project, agent, "deploy_task", struct {
 		*models.Task
 		MergeSHA string `json:"merge_sha"`

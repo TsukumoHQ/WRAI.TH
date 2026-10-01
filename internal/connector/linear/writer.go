@@ -71,6 +71,10 @@ func (c *Connector) PushStatus(linearIssueID, status, comment string) error {
 		c.db.LogLinearSync(linearIssueID, status, "skip", "no matching Linear state")
 		if comment == "" {
 			comment = fmt.Sprintf("relay: status → %s (no matching Linear state)", status)
+			if status == "deploying" {
+				// Ruling Q2: the issue stays In Review, never In Progress.
+				comment = "relay: deploying (no Deploying state in Linear; issue stays In Review)"
+			}
 		}
 	}
 
@@ -130,11 +134,14 @@ func resolveStateID(status string, states []stateInfo) string {
 	case "accepted", "in-progress":
 		// Prefer a plain started state, not the review/blocked-named one.
 		if id := pick(func(s stateInfo) bool {
-			return s.Type == "started" && !looksLikeReview(s.Name) && !looksLikeBlocked(s.Name)
+			return s.Type == "started" && !looksLikeReview(s.Name) && !looksLikeBlocked(s.Name) && !looksLikeDeploying(s.Name)
 		}); id != "" {
 			return id
 		}
 		return pick(func(s stateInfo) bool { return s.Type == "started" })
+	case "deploying":
+		// Linear models Deploying only by name; "" for a team without one.
+		return pick(func(s stateInfo) bool { return looksLikeDeploying(s.Name) })
 	case "done":
 		return pick(func(s stateInfo) bool { return s.Type == "completed" })
 	case "cancelled":

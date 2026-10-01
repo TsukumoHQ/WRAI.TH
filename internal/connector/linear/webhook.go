@@ -220,6 +220,7 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 				return nil, err
 			}
 			parked = c.parkedHold(&seed, prior, iss, primary)
+			holdDeploying(&seed, prior)
 		}
 		taskID, _, err := c.db.UpsertLinearMirror(seed)
 		if err != nil {
@@ -288,6 +289,10 @@ func (c *Connector) shouldDispatch(env webhookEnvelope, iss gqlIssue) bool {
 	}
 	// In Review is also a "started" type — don't treat it as a launch.
 	if looksLikeReview(iss.State.Name) {
+		return false
+	}
+	// Deploying (post-merge, W8 D4) is started-type too: never a launch.
+	if looksLikeDeploying(iss.State.Name) {
 		return false
 	}
 	// Dedupe: only fire when the state changed in this very update.

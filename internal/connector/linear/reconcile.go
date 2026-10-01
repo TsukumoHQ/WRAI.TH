@@ -87,6 +87,7 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 			}
 
 			parked := c.parkedHold(&seed, prior, iss, primary)
+			holdDeploying(&seed, prior)
 			taskID, _, err := c.db.UpsertLinearMirror(seed)
 			if err != nil {
 				log.Printf("[linear] reconcile upsert %s (%s): %v", iss.ID, project, err)
@@ -119,7 +120,7 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 			// goal/AC/DoD. The loud refusal comment is the webhook's job (the poll
 			// would re-comment every cycle); here we stay silent and simply hold.
 			if c.onEvent != nil && !parked &&
-				iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
+				iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) && !looksLikeDeploying(iss.State.Name) &&
 				(prior == nil || !isTerminalOrActive(prior.Status)) &&
 				(!requireTicket || len(parseTicket(iss.Description).missing) == 0) {
 				c.onEvent(c.dispatchEvent(taskID, iss.Title, target, seed))
