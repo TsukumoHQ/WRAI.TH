@@ -133,6 +133,7 @@ export const COLUMNS = [
 export function columnFor(task) {
   switch (task.status) {
     case 'cancelled': return null;
+    case 'backlog': return 'backlog';
     case 'pending': return /backlog/i.test(task.linear_state || '') ? 'backlog' : 'todo';
     case 'accepted':
     case 'in-progress':
@@ -150,6 +151,7 @@ export const COLUMN_STATUS = {
 // SSE event → resulting task status, so a live event can move a known card.
 const EVENT_STATUS = {
   'task.dispatched': 'pending', 'task.dispatch': 'pending', dispatch: 'pending',
+  'task.backlog': 'backlog', backlog: 'backlog',
   'task.claimed': 'accepted', 'task.claim': 'accepted', claim: 'accepted',
   'task.in_progress': 'in-progress', 'task.start': 'in-progress', start: 'in-progress',
   'task.in_review': 'in-review', 'task.review': 'in-review', review: 'in-review',

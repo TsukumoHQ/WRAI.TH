@@ -800,7 +800,7 @@ func listTasksTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("status",
 			mcp.Description("Filter by status"),
-			mcp.Enum("pending", "accepted", "in-progress", "done", "blocked", "cancelled", "active", "deploying"),
+			mcp.Enum("backlog", "pending", "accepted", "in-progress", "done", "blocked", "cancelled", "active", "deploying"),
 		),
 		mcp.WithString("profile", mcp.Description("Filter by profile slug")),
 		mcp.WithString("priority",
