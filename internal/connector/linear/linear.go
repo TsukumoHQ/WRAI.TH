@@ -150,11 +150,31 @@ func mapStatus(st *stateInfo) string {
 	if st == nil {
 		return "pending"
 	}
+	if closed := closedStatus(st); closed != "" {
+		return closed
+	}
 	coarse := connector.MapStateType(st.Type)
 	if st.Type == "started" && looksLikeReview(st.Name) {
 		return "in-review"
 	}
 	return coarse
+}
+
+// closedStatus is the terminal relay status a Linear state closes a mirror
+// with: "done" for completed, "cancelled" for canceled and for Duplicate —
+// typed "duplicate" or a state named Duplicate (W7) — and "" for an open state.
+func closedStatus(st *stateInfo) string {
+	if st == nil {
+		return ""
+	}
+	switch {
+	case st.Type == "completed":
+		return "done"
+	case st.Type == "canceled", st.Type == "cancelled", st.Type == "duplicate",
+		strings.Contains(strings.ToLower(st.Name), "duplicate"):
+		return "cancelled"
+	}
+	return ""
 }
 
 func looksLikeReview(name string) bool {

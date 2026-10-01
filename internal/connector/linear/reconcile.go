@@ -37,6 +37,12 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 		if iss.ID == "" {
 			continue
 		}
+		// A closed issue the open-state filter let through (Duplicate typed
+		// "duplicate") is never mirrored; left unseen, pass 3 closes any
+		// existing mirror of it (W7).
+		if closedStatus(iss.State) != "" {
+			continue
+		}
 		seen[iss.ID] = true
 		// Scope: mirror/dispatch issues whose resolved target is an agent — a
 		// configured project route, the issue's delegate (Linear's agent-
@@ -180,16 +186,8 @@ func (c *Connector) syncDroppedMirrors(ctx context.Context, seen map[string]bool
 	}
 	closed := 0
 	for _, iss := range states {
-		if iss.State == nil {
-			continue
-		}
-		var st string
-		switch iss.State.Type {
-		case "completed":
-			st = "done"
-		case "canceled", "cancelled":
-			st = "cancelled"
-		default:
+		st := closedStatus(iss.State)
+		if st == "" {
 			continue // still open (e.g. moved to another non-closed state) — leave it
 		}
 		taskID := taskByIssue[iss.ID]

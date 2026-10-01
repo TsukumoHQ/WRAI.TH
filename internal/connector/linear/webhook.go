@@ -175,6 +175,16 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 		if strings.EqualFold(env.Action, "remove") {
 			// Issue deleted/archived in Linear — mark the mirror cancelled, keep history.
 			seed.Status = "cancelled"
+		} else if closedStatus(iss.State) == "cancelled" {
+			// Canceled/Duplicate: close an existing mirror (seed.Status is
+			// already cancelled), never create one (W7).
+			existing, err := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
+			if err != nil {
+				return nil, err
+			}
+			if existing == nil {
+				continue
+			}
 		}
 
 		// Typed-ticket enforcement (V-lifecycle), unified with the reconcile poll on
