@@ -49,7 +49,18 @@ The authenticated principal is the `(project, name)` that owns a valid `X-Agent-
   - Delegated calls are aggregated into one `identity.delegated` audit row per (project, actor, on_behalf_of, tool) per window. The row's details carry `{actor, on_behalf_of, tool, count}`.
   - `register_agent` on behalf of a pane goes through the same path. Before S1, `IsOverrideActorName` allowed it, and that function also accepted a token owned by an agent named `human`/`user`.
 - **Warn log:** nothing is written on the hot path. The in-memory ledger is flushed every 5 minutes, and on shutdown. Each flush logs one line per (project, as, reason): `identity.unverified project=P as=X reason=tokenless|project_mismatch count=N`.
-  - S5 go/no-go is a one-liner over the relay log: `grep -o 'identity.unverified project=[^ ]* as=[^ ]* reason=tokenless count=[0-9]*' relay.log | awk '{split($5,c,"=");s[$2" "$3]+=c[2]} END{for(k in s) print s[k],k}' | sort -rn`. Empty output means go.
+  - **S5 go/no-go.** Run this over the log the relay actually writes. `log.Printf` goes to stderr.
+    - Under launchd that is the plist's `StandardErrorPath`, read below, with `/tmp/agent-relay.err` as the default `install.sh` writes. `~/.agent-relay/serve.log` is stale.
+    - Under the systemd user unit, use `journalctl --user -u agent-relay` as the source instead.
+    - The command counts only lines after the last `listening on` boot line, so lines from before the upgrade never count.
+    - Run it at least one flush window (5 min) after the restart.
+    - Empty output means go. Otherwise it prints `<count> project=P as=X` per tokenless caller.
+
+    ```
+    LOG=$(/usr/libexec/PlistBuddy -c 'Print :StandardErrorPath' ~/Library/LaunchAgents/com.agent-relay.plist 2>/dev/null || echo /tmp/agent-relay.err)
+    START=$(grep -n 'listening on ' "$LOG" | tail -1 | cut -d: -f1)
+    tail -n +$(( ${START:-0} + 1 )) "$LOG" | grep -o 'identity.unverified project=[^ ]* as=[^ ]* reason=tokenless count=[0-9]*' | awk '{split($5,c,"=");s[$2" "$3]+=c[2]} END{for(k in s) print s[k],k}' | sort -rn
+    ```
 - **Human/user exemption:** applies to `as` = `human`/`user` from a loopback TCP peer, checked on the real `RemoteAddr`, never on `X-Forwarded-For`. It is aggregated into `identity.exempt` audit rows in `warn` and `enforce`.
 - **stdio transport:** it carries no header, so it has no principal. Under `enforce`, only bootstrap tools work over stdio. That is acceptable because `enforce` is opt-in and S5 only flips the HTTP relay.
 - **REST (S4):** `apiIdentityRefused(claimed, project)` applies the same rule to every REST write that names an actor:
