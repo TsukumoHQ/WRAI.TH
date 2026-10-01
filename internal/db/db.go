@@ -1137,6 +1137,8 @@ func migrate(conn *sql.DB) error {
 	migrateOrgEdges(conn)
 	// Parked tasks + founder gates (task d43d844e), on top of task_holds.
 	migrateParking(conn)
+	// Busy-lane ACK digests (ruling wraith-park-ruling P6).
+	migrateLaneDigests(conn)
 
 	// knowledge_log + clock + compaction watermark (design af783f93). Starts empty:
 	// no backfill (ruling af6e3a5f OQ3).

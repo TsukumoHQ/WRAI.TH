@@ -58,6 +58,7 @@ func TestAckNoAlertWhileBlockedByUnmet(t *testing.T) {
 // ack_notify_age. An assigned task is not affected by the pool rule.
 func TestAckPoolWaitsWhileProfileDoerBusy(t *testing.T) {
 	w := newTwin(t, "pool-busy")
+	liveDev(t, w, "dev-1") // P6: only a LIVE busy doer holds the pool back
 	run(t, w,
 		seedTask("busy", "in-progress", ago(3*time.Hour)),
 		setSQL(`UPDATE tasks SET claimed_by = 'dev-1', claimed_at = ? WHERE id = 'busy'`, ago(3*time.Hour)),

@@ -90,22 +90,45 @@ const ackPoolIdleSince = `CASE WHEN COALESCE(t.assigned_to, '') = '' THEN COALES
 // went idle (task 887351ac). Timestamps share memoryTimeFmt, so MAX compares.
 const ackClock = `MAX(COALESCE(t.pending_since, t.dispatched_at), ` + ackReadySince + `, ` + ackPoolIdleSince + `)`
 
-// ackCandidate is task_pending_unclaimed / task_pending_live: the legacy
-// GetUnackedTasks predicate, narrowed to tasks that are READY (no unsatisfied
-// blocking edge, readyPredicate's rule, hold row or not), not parked and not
-// a founder gate of profile human/user (task d43d844e: parked work and founder
-// gates never climb the ladder) and, for a pool task, whose profile has no
-// doer holding an accepted / in-progress task. Args:
-// cutoff, now (edge valid_until).
-const ackCandidate = `t.status = 'pending' AND t.archived_at IS NULL AND ` + ackClock + ` < ?
+// ackLiveAgent is a live agent row a (status active / sleeping, the lease
+// sweeper's liveness rule).
+const ackLiveAgent = `a.project = t.project AND a.status IN ('active', 'sleeping')`
+
+// ackAgentHolds: agent a holds accepted / in-progress work.
+const ackAgentHolds = `EXISTS (SELECT 1 FROM tasks x WHERE x.project = a.project AND x.id <> t.id AND x.archived_at IS NULL
+		AND x.status IN ('accepted', 'in-progress') AND a.name IN (x.assigned_to, x.lease_holder, x.claimed_by))`
+
+// ackLaneBusy is true when task t waits behind busy live agents (ruling
+// wraith-park-ruling P6): for an assigned task, its assignee is live and holds
+// accepted / in-progress work; for a pool task, the profile has a live agent
+// and none of its live agents is idle (holding nothing, last claim / finish
+// before the cutoff). A busy lane gets the hourly digest, never a rung. Arg:
+// cutoff.
+const ackLaneBusy = `CASE WHEN COALESCE(t.assigned_to, '') <> ''
+	THEN EXISTS (SELECT 1 FROM agents a WHERE ` + ackLiveAgent + ` AND a.name = t.assigned_to AND ` + ackAgentHolds + `)
+	ELSE EXISTS (SELECT 1 FROM agents a WHERE ` + ackLiveAgent + ` AND COALESCE(a.profile_slug, '') = COALESCE(t.profile_slug, ''))
+		AND NOT EXISTS (SELECT 1 FROM agents a WHERE ` + ackLiveAgent + ` AND COALESCE(a.profile_slug, '') = COALESCE(t.profile_slug, '')
+			AND NOT ` + ackAgentHolds + `
+			AND COALESCE((SELECT MAX(MAX(COALESCE(y.claimed_at, ''), COALESCE(y.completed_at, ''))) FROM tasks y
+				WHERE y.project = a.project AND a.name IN (y.claimed_by, y.assigned_to)), '') < ?)
+	END`
+
+// ackQueued is task_pending_unclaimed / task_pending_live minus the lane rule:
+// the legacy GetUnackedTasks predicate, narrowed to tasks that are READY (no
+// unsatisfied blocking edge, readyPredicate's rule, hold row or not), not
+// parked and not a founder gate of profile human/user (task d43d844e: parked
+// work and founder gates never climb the ladder). Args: cutoff, now (edge
+// valid_until).
+const ackQueued = `t.status = 'pending' AND t.archived_at IS NULL AND ` + ackClock + ` < ?
 	AND (t.run_state IS NULL OR t.run_state = '')
 	AND NOT EXISTS (SELECT 1 FROM task_holds ph WHERE ph.task_id = t.id AND ph.released_at IS NULL AND ph.reason = '` + HoldReasonParked + `')
 	AND LOWER(COALESCE(t.profile_slug, '')) NOT IN ('human', 'user')
 	AND NOT EXISTS (SELECT 1 ` + ackBlockingEdges + ` AND (re.valid_until IS NULL OR re.valid_until > ?)
-		AND NOT (rp.status = 'done' OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))
-	AND (COALESCE(t.assigned_to, '') <> '' OR NOT EXISTS (SELECT 1 FROM tasks x
-		WHERE x.project = t.project AND x.id <> t.id AND COALESCE(x.profile_slug, '') = COALESCE(t.profile_slug, '')
-		  AND x.status IN ('accepted', 'in-progress') AND x.archived_at IS NULL))`
+		AND NOT (rp.status = 'done' OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))`
+
+// ackCandidate is ackQueued on a lane that will pick work up: never behind
+// busy live agents (ackLaneBusy). Args: cutoff, now, cutoff.
+const ackCandidate = ackQueued + ` AND NOT (` + ackLaneBusy + `)`
 
 // TaskObligation is an active ACK obligation joined to the task fields the
 // sweeper needs to decide and word its sanction.
@@ -159,7 +182,7 @@ func (d *DB) InstantiateTaskAck(cutoff, now time.Time) (int, error) {
 		FROM tasks t JOIN norms n ON `+ackNormKnown+` AND (n.project IS NULL OR n.project = t.project)
 		WHERE `+ackCandidate+`
 		  AND NOT EXISTS (SELECT 1 FROM obligations o WHERE o.norm_id = n.id AND o.subject_kind = ? AND o.subject_id = t.id)`,
-		SubjectTask, ObligationUnfulfilled, cutoff.UTC().Format(memoryTimeFmt), now.UTC().Format(memoryTimeFmt), SubjectTask)
+		SubjectTask, ObligationUnfulfilled, cutoff.UTC().Format(memoryTimeFmt), now.UTC().Format(memoryTimeFmt), cutoff.UTC().Format(memoryTimeFmt), SubjectTask)
 	if err != nil {
 		return 0, fmt.Errorf("obligation candidates: %w", err)
 	}
@@ -254,7 +277,7 @@ func (d *DB) ActiveTaskObligations(cutoff time.Time) ([]TaskObligation, error) {
 		JOIN tasks t ON t.id = o.subject_id
 		WHERE o.state = ? AND o.subject_kind = ? AND `+ackCandidate+`
 		ORDER BY `+ackClock+`, t.id, n.eval_order`,
-		ObligationActive, SubjectTask, cutoff.UTC().Format(memoryTimeFmt), d.Now().UTC().Format(memoryTimeFmt))
+		ObligationActive, SubjectTask, cutoff.UTC().Format(memoryTimeFmt), d.Now().UTC().Format(memoryTimeFmt), cutoff.UTC().Format(memoryTimeFmt))
 	if err != nil {
 		return nil, fmt.Errorf("active obligations: %w", err)
 	}
@@ -1130,4 +1153,66 @@ func (d *DB) UnansweredAsks(project string, since time.Time) ([]UnansweredAsk, e
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// Busy-lane digest (ruling wraith-park-ruling P6): a queue behind busy live
+// agents is reported as one digest per (project, profile, dispatcher), at most
+// hourly, instead of a no-ACK rung per task. The last send is persisted so the
+// dedup survives a relay restart.
+
+func migrateLaneDigests(conn *sql.DB) {
+	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS ack_lane_digests (
+		project    TEXT NOT NULL,
+		profile    TEXT NOT NULL,
+		dispatcher TEXT NOT NULL,
+		sent_at    TEXT NOT NULL,
+		PRIMARY KEY (project, profile, dispatcher)
+	)`)
+}
+
+// LaneQueue is one busy lane's queued work for one dispatcher.
+type LaneQueue struct {
+	Project, Profile, Dispatcher string
+	Depth                        int
+	OldestSince                  string // ACK clock of the oldest queued task (memoryTimeFmt)
+}
+
+// BusyLaneQueues lists, per (project, profile, dispatcher), the tasks past the
+// ACK window that wait behind busy live agents (ackQueued AND ackLaneBusy).
+// Read-only.
+func (d *DB) BusyLaneQueues(cutoff, now time.Time) ([]LaneQueue, error) {
+	c := cutoff.UTC().Format(memoryTimeFmt)
+	rows, err := d.ro().Query(`SELECT t.project, COALESCE(t.profile_slug, ''), t.dispatched_by, COUNT(*), MIN(`+ackClock+`)
+		FROM tasks t WHERE `+ackQueued+` AND `+ackLaneBusy+`
+		GROUP BY t.project, COALESCE(t.profile_slug, ''), t.dispatched_by
+		ORDER BY t.project, COALESCE(t.profile_slug, ''), t.dispatched_by`,
+		c, now.UTC().Format(memoryTimeFmt), c)
+	if err != nil {
+		return nil, fmt.Errorf("busy lane queues: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []LaneQueue
+	for rows.Next() {
+		var q LaneQueue
+		if err := rows.Scan(&q.Project, &q.Profile, &q.Dispatcher, &q.Depth, &q.OldestSince); err != nil {
+			return nil, fmt.Errorf("scan busy lane: %w", err)
+		}
+		out = append(out, q)
+	}
+	return out, rows.Err()
+}
+
+// ClaimLaneDigest records a digest send for the lane at now, only when none was
+// sent in the last hour (CAS on sent_at). true = the caller sends it.
+func (d *DB) ClaimLaneDigest(project, profile, dispatcher string, now time.Time) (bool, error) {
+	ts := now.UTC().Format(memoryTimeFmt)
+	res, err := d.writerExec(`INSERT INTO ack_lane_digests (project, profile, dispatcher, sent_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT(project, profile, dispatcher) DO UPDATE SET sent_at = excluded.sent_at
+		WHERE ack_lane_digests.sent_at <= ?`,
+		project, profile, dispatcher, ts, now.Add(-time.Hour).UTC().Format(memoryTimeFmt))
+	if err != nil {
+		return false, fmt.Errorf("claim lane digest: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n == 1, nil
 }
