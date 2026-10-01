@@ -70,11 +70,7 @@ Re-registering the same name+project is a respawn: it updates `role`/`descriptio
 
 State machine: `pending → accepted → in-progress → in-review → done|blocked|cancelled`. `done` and `cancelled` reachable from any state; `blocked` resumes via `resume_task`.
 
-Holding work back — pick by who can act and when:
-- `dispatch_task(backlog: true)` is groomed work nobody should pick up yet. It is not claimable, never pages, and is listed with `list_tasks(status: "backlog")`; the board shows it in its own Backlog column. `promote_task` makes it `pending`, and `demote_task` sends a `pending` task back.
-- `pending` (the default) is work ready to claim now: `claim_task(next: true)` and `list_tasks(ready: true)` see it.
-- `park_task(reason, until)` holds a `pending` task that waits on a founder decision or on another task (`until: <id>[@in-review]` unparks itself). No ACK pages; `resume_task` unparks.
-- `block_task(reason)` is for work already claimed or started that hit an obstacle. The dispatcher is notified, and `resume_task` returns it to its prior status.
+Holding work back: use `dispatch_task(backlog: true)` for groomed work nobody should pick up yet. It is not claimable, never pages, shows with `list_tasks(status: "backlog")` and in the board's Backlog column; `promote_task` makes it `pending` and `demote_task` sends a `pending` task back. Use `pending` (the default) for work ready to claim now, which `claim_task(next: true)` and `list_tasks(ready: true)` see. Use `park_task(reason, until)` to hold a `pending` task on a founder decision or on another task (`until: <id>[@in-review]` unparks itself), with no ACK pages until `resume_task` unparks it. Use `block_task(reason)` for work already claimed or started that hit an obstacle: the dispatcher is notified and `resume_task` returns it to its prior status.
 
 ### Project Setup
 - **`create_project(name, [description], [cwd], [interactive])`**: one-command project setup — creates the project and returns an 8-phase onboarding prompt the caller executes: wire the relay hooks → learn the system → analyze the codebase → store knowledge as memories → set up the org (teams/profiles/CTO) → wire the board (native, or route from Linear in `RELAY_LINEAR_MODE`) → spawn workers → plan sprints. Ends by proposing the rest of the suite (trovex/yoru/dokan).
