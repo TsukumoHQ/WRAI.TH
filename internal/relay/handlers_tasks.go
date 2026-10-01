@@ -4,9 +4,12 @@ import (
 	"agent-relay/internal/db"
 	"agent-relay/internal/models"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -1325,6 +1328,8 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	// the same gate — it is the same dispatcher-owned contract surface (task
 	// 6c1c5167 follow-up, DEC-niwa-goal-validate-1) even though its absence is
 	// never enforced.
+	var contractBefore *models.Task
+	contractAuthority := ""
 	if goal != nil || acceptanceCriteria != nil || dod != nil || verifyCmd != nil {
 		existing, gErr := h.db.GetTask(taskID, project)
 		if gErr != nil {
@@ -1333,27 +1338,11 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		if existing == nil {
 			return toolResultError(fmt.Sprintf("task not found: %s", taskID)), nil
 		}
-		// A self-dispatched task (dispatcher == assignee) would sail the doer
-		// straight through the dispatcher check below and let it rewrite its own
-		// contract — self-grading. That is the exact hole DEC-wraith-self-grading-
-		// guard-1 closes (finding bf920f6c: a self-dispatched doer legally cut his
-		// own acceptance_criteria 5→2, then the relay REFUSED his lead's restore
-		// because the doer WAS the dispatcher). On a self-dispatched task the
-		// contract fields therefore need a sign-off from ABOVE the doer — an
-		// executive, or an agent in the doer's reports_to lead chain — never the
-		// doer alone.
-		selfDispatched := existing.AssignedTo != nil && strings.EqualFold(existing.DispatchedBy, *existing.AssignedTo)
-		if selfDispatched {
-			if !h.callerIsContractSigner(project, agent, existing) {
-				return permissionError(CodeForbidden, fmt.Sprintf(
-					"goal/acceptance_criteria/dod/verify_cmd on a self-dispatched task can't be rewritten by the doer who dispatched it to itself (%s) — that is self-grading. It needs sign-off from above you: an executive, or an agent in your reports_to lead chain (DEC-wraith-self-grading-guard-1)",
-					agent)), nil
-			}
-		} else if agent != existing.DispatchedBy {
-			return permissionError(CodeForbidden, fmt.Sprintf(
-				"goal/acceptance_criteria/dod/verify_cmd can only be updated by this task's dispatcher (%s), not the assignee (%s) — re-dispatch instead of re-scoping your own contract",
-				existing.DispatchedBy, agent)), nil
+		authority, refusal := h.contractEditAuthority(project, agent, existing)
+		if refusal != nil {
+			return refusal, nil
 		}
+		contractBefore, contractAuthority = existing, authority
 		if acceptanceCriteria != nil {
 			var items []string
 			if err := json.Unmarshal([]byte(*acceptanceCriteria), &items); err != nil {
@@ -1377,6 +1366,9 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		if err != nil {
 			return taskOpError(err, "failed to update task: %v", err), nil
 		}
+	}
+	if contractBefore != nil && task != nil {
+		h.recordContractEdit(project, agent, contractAuthority, contractBefore, task, goal, acceptanceCriteria, dod, verifyCmd)
 	}
 
 	// assigned_to / profile_slug REASSIGN the task without changing its status
@@ -1505,6 +1497,142 @@ func (h *Handlers) callerMayReassign(project, caller string, task *models.Task) 
 		return true
 	}
 	return h.callerIsContractSigner(project, caller, task)
+}
+
+// contractEditAuthority decides who may edit a task's typed-ticket contract
+// (goal/acceptance_criteria/dod/verify_cmd) and returns the authority used, or
+// the refusal (04ac0ae3):
+//   - never the doer (holder or assignee) nor an agent below it in the
+//     reports_to chain, even an executive (anti-fab b9efdfb4);
+//   - the dispatcher (not on a self-dispatched task: DEC-wraith-self-grading-guard-1);
+//   - an executive;
+//   - on a self-dispatched task, the doer's lead chain (sign-off from above);
+//   - once the dispatcher is inactive (dead, deactivated, unregistered), an
+//     agent above it in its reports_to chain — so a dead dispatcher no longer
+//     freezes its tickets' contract.
+func (h *Handlers) contractEditAuthority(project, caller string, task *models.Task) (string, *mcp.CallToolResult) {
+	caller = strings.ToLower(caller)
+	dispatcher := strings.ToLower(task.DispatchedBy)
+	selfDispatched := task.AssignedTo != nil && strings.EqualFold(task.DispatchedBy, *task.AssignedTo)
+	doer := strings.ToLower(taskHolder(task))
+	if doer == "" && task.AssignedTo != nil {
+		doer = strings.ToLower(*task.AssignedTo)
+	}
+	if doer != "" && caller == doer {
+		if selfDispatched {
+			return "", permissionError(CodeForbidden, fmt.Sprintf(
+				"goal/acceptance_criteria/dod/verify_cmd on a self-dispatched task can't be rewritten by the doer who dispatched it to itself (%s) — that is self-grading. It needs sign-off from above you: an executive, or an agent in your reports_to lead chain (DEC-wraith-self-grading-guard-1)",
+				caller))
+		}
+		return "", permissionError(CodeForbidden, fmt.Sprintf(
+			"%s holds this task: the doer never rewrites its own contract (goal/acceptance_criteria/dod/verify_cmd), even as an executive — ask its dispatcher (%s) or an executive",
+			caller, task.DispatchedBy))
+	}
+	if doer != "" && caller != "" && h.reportsUpTo(project, caller, doer) {
+		return "", permissionError(CodeForbidden, fmt.Sprintf(
+			"%s reports to %s, who holds this task: nobody below the doer rewrites its contract", caller, doer))
+	}
+	switch {
+	case caller == "":
+	case !selfDispatched && caller == dispatcher:
+		return "dispatcher", nil
+	case h.callerIsExecutive(project, caller):
+		return "executive", nil
+	case selfDispatched && h.callerIsContractSigner(project, caller, task):
+		return "doer_lead_chain", nil
+	case !h.agentIsLive(project, dispatcher) && h.reportsUpTo(project, dispatcher, caller):
+		return "dispatcher_lead_chain", nil
+	}
+	if selfDispatched {
+		return "", permissionError(CodeForbidden, fmt.Sprintf(
+			"goal/acceptance_criteria/dod/verify_cmd on a self-dispatched task need sign-off from above its doer (%s): an executive, or an agent in its reports_to lead chain (DEC-wraith-self-grading-guard-1)",
+			task.DispatchedBy))
+	}
+	return "", permissionError(CodeForbidden, fmt.Sprintf(
+		"goal/acceptance_criteria/dod/verify_cmd can only be updated by this task's dispatcher (%s), an executive, or — once %s is inactive — an agent above it in its reports_to chain; never by the assignee",
+		task.DispatchedBy, task.DispatchedBy))
+}
+
+// callerIsExecutive reports whether caller is a registered executive.
+func (h *Handlers) callerIsExecutive(project, caller string) bool {
+	ag, _ := h.db.GetAgent(project, caller)
+	return ag != nil && ag.IsExecutive
+}
+
+// agentIsLive reports whether name is registered and active or sleeping (the
+// sender liveness rule, db.SenderEligibility).
+func (h *Handlers) agentIsLive(project, name string) bool {
+	ag, _ := h.db.GetAgent(project, name)
+	live, _ := db.SenderEligibility(ag)
+	return ag != nil && live
+}
+
+// reportsUpTo reports whether `from`'s reports_to chain reaches `to` (from
+// excluded). Bounded by a seen-set against a cyclic chain.
+func (h *Handlers) reportsUpTo(project, from, to string) bool {
+	seen := map[string]bool{}
+	cur := strings.ToLower(from)
+	for cur != "" && !seen[cur] {
+		seen[cur] = true
+		ag, err := h.db.GetAgent(project, cur)
+		if err != nil || ag == nil || ag.ReportsTo == nil {
+			return false
+		}
+		cur = strings.ToLower(*ag.ReportsTo)
+		if cur == strings.ToLower(to) {
+			return true
+		}
+	}
+	return false
+}
+
+// contractHash fingerprints a task's typed-ticket contract for the audit trail.
+func contractHash(t *models.Task) string {
+	verify := ""
+	if t.VerifyCmd != nil {
+		verify = *t.VerifyCmd
+	}
+	b, _ := json.Marshal([]string{t.Goal, t.AcceptanceCriteria, t.Dod, verify})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:8])
+}
+
+// recordContractEdit audits a contract edit as task.contract_edited {by,
+// authority, fields, before_hash, after_hash} and, when the task is in review,
+// posts a progress note so the gate's AC refresh picks the new contract up.
+func (h *Handlers) recordContractEdit(project, by, authority string, before, after *models.Task, goal, ac, dod, verify *string) {
+	var fields []string
+	for _, f := range []struct {
+		name string
+		v    *string
+	}{{"goal", goal}, {"acceptance_criteria", ac}, {"dod", dod}, {"verify_cmd", verify}} {
+		if f.v != nil {
+			fields = append(fields, f.name)
+		}
+	}
+	beforeHash, afterHash := contractHash(before), contractHash(after)
+	details, _ := json.Marshal(map[string]any{
+		"by": by, "authority": authority, "fields": fields,
+		"before_hash": beforeHash, "after_hash": afterHash,
+	})
+	if err := h.db.RecordAudit(models.AuditEntry{
+		Project:      project,
+		Actor:        by,
+		Action:       "task.contract_edited",
+		ResourceType: "task",
+		ResourceID:   after.ID,
+		Summary:      fmt.Sprintf("%s edited %s (%s)", by, strings.Join(fields, ", "), authority),
+		Details:      string(details),
+	}); err != nil {
+		log.Printf("contract edit audit %s: %v", after.ID, err)
+	}
+	if before.Status == "in-review" {
+		note := fmt.Sprintf("contract edited by %s (%s): %s changed (%s → %s) — the review must re-read the acceptance criteria",
+			by, authority, strings.Join(fields, ", "), beforeHash, afterHash)
+		if err := h.db.AddProgressNote(after.ID, project, by, note); err != nil {
+			log.Printf("contract edit note %s: %v", after.ID, err)
+		}
+	}
 }
 
 // callerIsContractSigner reports whether caller is a legitimate sign-off
