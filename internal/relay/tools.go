@@ -616,6 +616,18 @@ func promoteTaskTool() mcp.Tool {
 	)
 }
 
+func demoteTaskTool() mcp.Tool {
+	return mcp.NewTool(
+		"demote_task",
+		mcp.WithDescription("Send pending task(s) back to 'backlog' (audited). Dispatcher/exec/lead chain. Linear: park_task."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("One task; or task_ids")),
+		mcp.WithArray("task_ids", mcp.Description("Batch: each id reported"), mcp.WithStringItems()),
+		mcp.WithString("reason", mcp.Required()),
+	)
+}
+
 func startTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"start_task",

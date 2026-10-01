@@ -675,6 +675,48 @@ func (d *DB) PromoteTask(taskID, agentName, project string) (*models.Task, bool,
 	return updated, true, nil
 }
 
+// DemoteTask sends a pending native task back to 'backlog' (de-groom, park P1
+// 11300e39): queued work leaves the claimable set without being cancelled.
+// Only 'pending' moves — a claimed or running task is not queued work, and the
+// typed TASK_STATE_CONFLICT names its status. A Linear mirror is refused
+// (errLinearReadOnly: Linear is the source of truth there; park_task freezes
+// one). Already in backlog is a no-op (changed=false, no audit). A real move
+// writes a task.demoted audit row carrying actor and reason.
+func (d *DB) DemoteTask(taskID, agentName, project, reason string) (*models.Task, bool, error) {
+	task, err := d.GetTask(taskID, project)
+	if err != nil {
+		return nil, false, err
+	}
+	if task == nil {
+		return nil, false, fmt.Errorf("task not found: %s", taskID)
+	}
+	if task.Source == "linear" {
+		return nil, false, errLinearReadOnly
+	}
+	if task.Status == "backlog" {
+		return task, false, nil
+	}
+	if task.Status != "pending" {
+		return nil, false, newTaskError(CodeTaskStateConflict,
+			"task %s is %s: only a pending task can be demoted to backlog", taskID, task.Status)
+	}
+	updated, err := d.transitionTask(taskID, agentName, project, "backlog", nil, nil)
+	if err != nil {
+		return nil, false, err
+	}
+	// Best-effort by contract (RecordAudit), like task.archived.
+	_ = d.RecordAudit(models.AuditEntry{
+		Action:       "task.demoted",
+		Actor:        agentName,
+		Project:      project,
+		ResourceType: "task",
+		ResourceID:   taskID,
+		Summary:      "pending → backlog",
+		Reason:       reason,
+	})
+	return updated, true, nil
+}
+
 func (d *DB) StartTask(taskID, agentName, project string) (*models.Task, error) {
 	if err := d.guardNotRunContainer(taskID, project); err != nil {
 		return nil, err

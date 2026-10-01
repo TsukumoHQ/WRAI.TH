@@ -482,6 +482,137 @@ func (h *Handlers) HandlePromoteTask(ctx context.Context, req mcp.CallToolReques
 	return h.resultJSONTracked(project, agent, "promote_task", task)
 }
 
+// HandleDemoteTask sends pending native tasks back to backlog (park P1
+// 11300e39, design park.md §3): task_id for one, task_ids for a batch where
+// each id gets its own result and one refusal never aborts the rest. Authority
+// is callerMayReassign (dispatcher, executive, or the doer's lead chain); a
+// Linear mirror is refused with a hint naming park_task.
+func (h *Handlers) HandleDemoteTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := strings.ToLower(resolveAgent(ctx, req))
+	reason := strings.TrimSpace(req.GetString("reason", ""))
+	if reason == "" {
+		return validationError(CodeInvalidArgument, "reason is required"), nil
+	}
+	single := req.GetString("task_id", "")
+	ids, errMsg := demoteTaskIDs(req)
+	if errMsg != "" {
+		return validationError(CodeInvalidArgument, errMsg), nil
+	}
+	if (single == "") == (len(ids) == 0) {
+		return validationError(CodeInvalidArgument, "pass exactly one of task_id or task_ids"), nil
+	}
+	if single != "" {
+		task, _, refusal := h.demoteOne(project, agent, single, reason)
+		if refusal != nil {
+			return refusal, nil
+		}
+		return h.resultJSONTracked(project, agent, "demote_task", task)
+	}
+
+	type itemResult struct {
+		TaskID string `json:"task_id"`
+		Status string `json:"status"` // demoted | unchanged | refused
+		Error  string `json:"error,omitempty"`
+	}
+	results := make([]itemResult, 0, len(ids))
+	demoted := 0
+	for _, id := range ids {
+		task, changed, refusal := h.demoteOne(project, agent, id, reason)
+		switch {
+		case refusal != nil:
+			results = append(results, itemResult{TaskID: id, Status: "refused", Error: toolErrorMessage(refusal)})
+		case changed:
+			demoted++
+			results = append(results, itemResult{TaskID: task.ID, Status: "demoted"})
+		default:
+			results = append(results, itemResult{TaskID: task.ID, Status: "unchanged"})
+		}
+	}
+	return h.resultJSONTracked(project, agent, "demote_task", map[string]any{
+		"results": results,
+		"demoted": demoted,
+		"total":   len(ids),
+	})
+}
+
+// demoteOne demotes one task id (short prefixes resolve). It returns the task
+// and whether it moved, or the typed refusal.
+func (h *Handlers) demoteOne(project, agent, rawID, reason string) (*models.Task, bool, *mcp.CallToolResult) {
+	taskID, err := h.resolveTaskID(rawID, project)
+	if err != nil {
+		return nil, false, validationError(CodeNotFound, err.Error())
+	}
+	task, err := h.db.GetTask(taskID, project)
+	if err != nil {
+		return nil, false, taskOpError(err, "failed to load task: %v", err)
+	}
+	if task == nil {
+		return nil, false, validationError(CodeNotFound, fmt.Sprintf("task not found: %s", rawID))
+	}
+	if task.Source == "linear" {
+		return nil, false, toolError(CodeForbidden, CategoryPermission, false,
+			fmt.Sprintf("task %s is mirrored from Linear (Linear is the source of truth): demote cannot move it — use park_task to freeze it", taskID),
+			map[string]any{"hint": "park_task"})
+	}
+	if !h.callerMayReassign(project, agent, task) {
+		return nil, false, toolError(CodeForbidden, CategoryPermission, false,
+			fmt.Sprintf("%q may not demote task %s: only its dispatcher (%s), an executive, or the doer's lead chain", agent, taskID, task.DispatchedBy), nil)
+	}
+	updated, changed, err := h.db.DemoteTask(taskID, agent, project, reason)
+	if err != nil {
+		return nil, false, taskOpError(err, "failed to demote task: %v", err)
+	}
+	return updated, changed, nil
+}
+
+// toolErrorMessage returns the "message" of a typed tool-error result (the
+// raw text when it is not the JSON envelope), for per-item batch reports.
+func toolErrorMessage(res *mcp.CallToolResult) string {
+	if res == nil || len(res.Content) == 0 {
+		return ""
+	}
+	text, _ := res.Content[0].(mcp.TextContent)
+	var body struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal([]byte(text.Text), &body) == nil && body.Message != "" {
+		return body.Message
+	}
+	return text.Text
+}
+
+// demoteTaskIDs reads task_ids as a native array or a JSON-array string.
+func demoteTaskIDs(req mcp.CallToolRequest) ([]string, string) {
+	raw, given := req.GetArguments()["task_ids"]
+	if !given || raw == nil {
+		return nil, ""
+	}
+	var items []any
+	switch v := raw.(type) {
+	case []any:
+		items = v
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil, ""
+		}
+		if err := json.Unmarshal([]byte(v), &items); err != nil {
+			return nil, fmt.Sprintf("task_ids must be an array of task ids (got %q)", v)
+		}
+	default:
+		return nil, fmt.Sprintf("task_ids must be an array of task ids (got %#v)", raw)
+	}
+	ids := make([]string, 0, len(items))
+	for i, el := range items {
+		s, ok := el.(string)
+		if !ok || strings.TrimSpace(s) == "" {
+			return nil, fmt.Sprintf("task_ids[%d] must be a non-empty string (got %#v)", i, el)
+		}
+		ids = append(ids, strings.TrimSpace(s))
+	}
+	return ids, ""
+}
+
 // HandleReclaimTask takes over a DEAD holder's task — the primitive niwa's
 // resume-protocol part 3 (supervisor-driven re-claim + ack) stands on. It
 // refuses a live holder's task with TASK_LEASE_HELD and a lost CAS race with
