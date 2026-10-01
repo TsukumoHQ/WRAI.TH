@@ -1,0 +1,24 @@
+P5 board receipt (e6ee47b4, AC3) — v2 board renders native backlog tasks in their own column.
+
+setup (isolated relay, live DB untouched):
+  RELAY_DB=<scratch>/relay.db PORT=18931 RELAY_BIND=127.0.0.1 HOME=<scratch>/home agent-relay serve
+  project p5demo: lead dispatches to profile dev over MCP
+    dispatch_task backlog:true  "Groomed: retire legacy v1 board" (P2), "Groomed: archive sweep cron" (P3)
+    dispatch_task (pending)     "Ready: list_tasks status=backlog" (P1), "Ready: board backlog column" (P2)
+  /api/tasks/board?project=p5demo -> 2 x backlog, 2 x pending
+DOM test: node .niwa/receipts/p5-board-shot.mjs 'http://127.0.0.1:<port>/v2/#/p/p5demo/board' <png>
+  (headless Chrome over CDP; dumps every section[data-col] with its .col-count and .kcard titles, then screenshots)
+
+BEFORE — base d6b53fa binary, same DB snapshot (p5-board-before.png):
+  todo        4 ['Ready: list_tasks status=backlog', 'Ready: board backlog column', 'Groomed: retire legacy v1 board', 'Groomed: archive sweep cron']
+  in_progress 0 []
+  in_review   0 []
+  done        0 []
+  -> groomed backlog work mixed into Todo with claimable work; no Backlog column.
+
+AFTER — this branch (p5-board-after.png):
+  backlog     2 ['Groomed: retire legacy v1 board', 'Groomed: archive sweep cron']
+  todo        2 ['Ready: list_tasks status=backlog', 'Ready: board backlog column']
+  in_progress 0 []
+  in_review   0 []
+  done        0 []
