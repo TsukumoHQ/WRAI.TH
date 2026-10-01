@@ -41,6 +41,12 @@ func lastBlockedFrom(periods string) string {
 // was blocked out of deploying and mergeSHA is the sha that entered it).
 // Fenced like review: the lease holder or an override actor (niwa).
 func (d *DB) DeployTask(taskID, agentName, project, mergeSHA string) (*models.Task, error) {
+	return d.DeployTaskFenced(taskID, agentName, project, mergeSHA, nil)
+}
+
+// DeployTaskFenced is DeployTask with the caller's lease generation (nil = not
+// supplied), fenced like ReviewTaskFenced.
+func (d *DB) DeployTaskFenced(taskID, agentName, project, mergeSHA string, gen *int64) (*models.Task, error) {
 	mergeSHA = strings.ToLower(strings.TrimSpace(mergeSHA))
 	if mergeSHA == "" {
 		return nil, fmt.Errorf("merge_sha is required to move task %s to deploying", taskID)
@@ -68,7 +74,7 @@ func (d *DB) DeployTask(taskID, agentName, project, mergeSHA string) (*models.Ta
 				"task %s entered deploying at merge sha %q; a retried deploy must carry that sha, got %q", taskID, entered, mergeSHA)
 		}
 	}
-	updated, err := d.transitionTaskCode(taskID, agentName, project, "deploying", nil, nil, "", nil)
+	updated, err := d.transitionTaskCode(taskID, agentName, project, "deploying", nil, nil, "", gen)
 	if err != nil {
 		return nil, err
 	}
@@ -81,4 +87,12 @@ func (d *DB) DeployTask(taskID, agentName, project, mergeSHA string) (*models.Ta
 			taskID, project, mergeSHA, now)
 	}
 	return updated, nil
+}
+
+// DeployMergeSHA is the merge sha that last moved the task into deploying, ""
+// when it never deployed.
+func (d *DB) DeployMergeSHA(project, taskID string) string {
+	var sha string
+	_ = d.ro().QueryRow(`SELECT merge_sha FROM task_deploys WHERE task_id = ? AND project = ?`, taskID, project).Scan(&sha)
+	return sha
 }

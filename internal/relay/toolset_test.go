@@ -163,9 +163,10 @@ func TestDiscoverSchemasValidJSON(t *testing.T) {
 	}
 	// 22 + task_edge (graph S2) + park_task (d43d844e) + demote_task (park P1
 	// 11300e39); the three obligation tools moved to their own category when
-	// tasks hit the 16000-byte payload.
-	if len(parsed.Tools) != 25 {
-		t.Errorf("tasks tools = %d, want 25", len(parsed.Tools))
+	// tasks hit the 16000-byte payload. W8 D2 (deploy_task) hit it again:
+	// link_pr, reconcile_pr, set_run, get_run moved to 'pipeline' with it.
+	if len(parsed.Tools) != 21 {
+		t.Errorf("tasks tools = %d, want 21", len(parsed.Tools))
 	}
 	for _, tool := range parsed.Tools {
 		if tool.InputSchema["type"] != "object" {

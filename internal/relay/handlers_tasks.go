@@ -998,6 +998,39 @@ func (h *Handlers) HandleReviewTask(ctx context.Context, req mcp.CallToolRequest
 	return h.resultJSONTracked(project, agent, "review_task", task)
 }
 
+// HandleDeployTask moves a merged in-review task to deploying (W8 D2, ruling
+// wraith-deploying-ruling): the niwa post-merge pipeline's call. Fenced like
+// review_task (lease holder or override actor); the doer keeps the lease (N3).
+// A blocked task re-enters deploying only with the sha that first entered it.
+func (h *Handlers) HandleDeployTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	project := h.resolveProject(ctx, req)
+	agent := resolveAgent(ctx, req)
+	taskID := req.GetString("task_id", "")
+	mergeSHA := strings.TrimSpace(req.GetString("merge_sha", ""))
+	if taskID == "" || mergeSHA == "" {
+		return toolResultError("task_id and merge_sha are required"), nil
+	}
+	taskID, err := h.resolveTaskID(taskID, project)
+	if err != nil {
+		return toolResultError(err.Error()), nil
+	}
+	gen, invalid := leaseGenerationArg(req)
+	if invalid != nil {
+		return invalid, nil
+	}
+	task, err := h.db.DeployTaskFenced(taskID, agent, project, mergeSHA, gen)
+	if err != nil {
+		return taskOpError(err, "failed to mark task deploying: %v", err), nil
+	}
+	h.announceReleased(project, task.Released)
+	h.events.Emit(MCPEvent{Type: "task", Action: "deploy", Agent: agent, Project: project, Target: task.DispatchedBy, Label: task.Title})
+	emitTaskEvent(h.events, "task.deploying", "deploy", project, task, map[string]any{"merge_sha": h.db.DeployMergeSHA(project, taskID)})
+	return h.resultJSONTracked(project, agent, "deploy_task", struct {
+		*models.Task
+		MergeSHA string `json:"merge_sha"`
+	}{task, h.db.DeployMergeSHA(project, taskID)})
+}
+
 // HandleComment posts a comment on a task. On a Linear-mirrored task it goes to
 // the Linear issue (Linear is SSOT); otherwise it is saved as a local progress
 // note so the action still lands somewhere.

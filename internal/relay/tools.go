@@ -665,6 +665,18 @@ func reviewTaskTool() mcp.Tool {
 	)
 }
 
+func deployTaskTool() mcp.Tool {
+	return mcp.NewTool(
+		"deploy_task",
+		mcp.WithDescription("Merged in a pipeline repo: in-review -> deploying (doer keeps the lease; done on verify)."),
+		asParam,
+		projectParam,
+		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
+		mcp.WithString("merge_sha", mcp.Description("Merge commit sha"), mcp.Required()),
+		leaseGenerationParam,
+	)
+}
+
 func completeTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"complete_task",
@@ -788,7 +800,7 @@ func listTasksTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("status",
 			mcp.Description("Filter by status"),
-			mcp.Enum("pending", "accepted", "in-progress", "done", "blocked", "cancelled", "active"),
+			mcp.Enum("pending", "accepted", "in-progress", "done", "blocked", "cancelled", "active", "deploying"),
 		),
 		mcp.WithString("profile", mcp.Description("Filter by profile slug")),
 		mcp.WithString("priority",

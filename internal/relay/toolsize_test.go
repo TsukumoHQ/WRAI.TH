@@ -11,17 +11,18 @@ import (
 // raise the cap deliberately in the same PR.
 //
 // Raised 48000 -> 49152 -> 51200 -> 52224 -> 54272 -> 55296 -> 56320 -> 57344
-// -> 58368 (57 KiB) across the WRAITH sprint, which added genuinely new SURFACE (not
+// -> 58368 -> 60416 (59 KiB) across the WRAITH sprint, which added genuinely new SURFACE (not
 // fat descriptions): reclaim_task (T1), is_eligible (T2), T5 temporal params,
 // delivery_status (T4), deadletter (T6), identity_check (identity-failclosed),
 // rank=mempalace (MemPalace S2), link_pr (PR-link S1), set_run + get_run
 // (changeset-per-run S1), reconcile_pr (PR-link S3 poll convergence), promote_task
 // + dispatch_task backlog flag (native backlog status), send_message
 // idempotency_key (task ac328091, outbox duplicate-delivery dedup), park_task +
-// update_task blocked_by (task d43d844e, parked tasks). Descriptions
+// update_task blocked_by (task d43d844e, parked tasks), deploy_task (W8 D2
+// d1529841, the 'deploying' status) + list_tasks linear_key (W11). Descriptions
 // are trimmed to the bone each time; the growth is real tools the fleet needs,
 // so the cap moves deliberately in-PR.
-const toolSchemaBudgetBytes = 58368
+const toolSchemaBudgetBytes = 60416
 
 // Headroom below the hard cap. The cap alone only fails after the margin is
 // already spent — before O1 (PR #170) the margin was 125 B, one param
