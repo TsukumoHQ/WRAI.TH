@@ -120,6 +120,18 @@ func IsOverrideActorName(caller string) bool {
 	return false
 }
 
+// IsDelegatingService reports whether name is an operator-listed service
+// (RELAY_OVERRIDE_ACTORS, default "niwa") whose OWN token may act on behalf of
+// any agent (identity.delegated, design identity-routing §1). Unlike
+// IsOverrideActorName it never matches the console literals human/user: those
+// are exempted on loopback only, never through a token.
+func IsDelegatingService(name string) bool {
+	if name == "human" || name == "user" {
+		return false
+	}
+	return IsOverrideActorName(name)
+}
+
 // checkLeaseFence is the terminal-write gate: the holder passes (at the
 // supplied generation when given; RELAY_STRICT_FENCING=1 makes it required),
 // an override actor passes (the caller audits it), anyone else — including

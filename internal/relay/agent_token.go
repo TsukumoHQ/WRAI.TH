@@ -38,30 +38,40 @@ func (h *Handlers) tokenBinding(token string) (name string, present, ok bool) {
 }
 
 // guardAgentToken wraps every tool: with a token, the acting identity must be
-// the token's agent. register_agent acts as its `name` argument, except that
-// an override actor (db.IsOverrideActorName, default "niwa") may register a
-// pane on its behalf.
+// the token's (project, name) principal. register_agent acts as its `name`
+// argument. A delegating service (db.IsDelegatingService, operator-listed in
+// RELAY_OVERRIDE_ACTORS, default "niwa") may act as any agent in any project,
+// audited as identity.delegated. A tokenless call is governed by
+// RELAY_IDENTITY_MODE (guardTokenless, identity_mode.go).
 func (h *Handlers) guardAgentToken(toolName string, next server.ToolHandlerFunc) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-		bound, present, ok := h.tokenBinding(AgentTokenFromContext(ctx))
-		if !present {
-			return next(ctx, req)
+		token := AgentTokenFromContext(ctx)
+		if token == "" {
+			return h.guardTokenless(ctx, req, toolName, next)
 		}
+		boundProject, bound, ok := h.db.AgentByToken(token)
 		if !ok {
 			return toolError(CodeAgentTokenInvalid, CategoryPermission, false,
 				"X-Agent-Token matches no agent (never minted, or rotated by a re-register) — use the token register_agent last returned", nil), nil
 		}
 		claimed := strings.ToLower(resolveAgent(ctx, req))
 		if toolName == "register_agent" {
-			if db.IsOverrideActorName(bound) {
-				return next(ctx, req)
-			}
 			claimed = strings.ToLower(req.GetString("name", ""))
+		}
+		project := h.resolveProject(ctx, req)
+		if db.IsDelegatingService(bound) {
+			if claimed != "" && claimed != bound {
+				h.ident.noteAudit("identity.delegated", project, bound, claimed, toolName)
+			}
+			return next(ctx, req)
 		}
 		if claimed != "" && claimed != bound {
 			return toolError(CodeAgentIdentityMismatch, CategoryPermission, false,
 				fmt.Sprintf("this request's X-Agent-Token belongs to %q and cannot act as %q", bound, claimed),
 				map[string]any{"token_agent": bound, "claimed": claimed}), nil
+		}
+		if res := h.tokenProjectMismatch(toolName, project, boundProject, bound); res != nil {
+			return res, nil
 		}
 		return next(ctx, req)
 	}

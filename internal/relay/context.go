@@ -13,6 +13,7 @@ const projectKey contextKey = "project_name"
 const toolsModeKey contextKey = "tools_mode"
 const agentTokenKey contextKey = "agent_token"
 const apiKeyAuthedKey contextKey = "api_key_authed"
+const peerLoopbackKey contextKey = "peer_loopback"
 
 // AgentTokenHeader carries a per-agent relay token (S3b 05525713).
 const AgentTokenHeader = "X-Agent-Token"
@@ -46,7 +47,15 @@ func HTTPContextFunc(ctx context.Context, r *http.Request) context.Context {
 	if tok := strings.TrimSpace(r.Header.Get(AgentTokenHeader)); tok != "" {
 		ctx = context.WithValue(ctx, agentTokenKey, tok)
 	}
+	ctx = context.WithValue(ctx, peerLoopbackKey, isLoopbackRemote(r.RemoteAddr))
 	return context.WithValue(ctx, projectKey, project)
+}
+
+// PeerIsLoopback reports whether the request's real TCP peer is a loopback
+// address. False when unknown (no HTTP request in the context).
+func PeerIsLoopback(ctx context.Context) bool {
+	v, _ := ctx.Value(peerLoopbackKey).(bool)
+	return v
 }
 
 // AgentTokenFromContext returns the request's X-Agent-Token, or "".

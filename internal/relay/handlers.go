@@ -64,6 +64,12 @@ type Handlers struct {
 	// visitor map in middleware.go.
 	registerMu       sync.Mutex
 	registerLimiters map[string]*registerVisitor
+
+	// ident aggregates identity-mode observations (unverified calls, delegated
+	// and exempt acts) in memory; flushIdentity logs/audits them once per
+	// window (identity_mode.go). identDone closes when that flusher exits.
+	ident     identityLedger
+	identDone chan struct{}
 }
 
 type registerVisitor struct {
@@ -177,9 +183,10 @@ func (h *Handlers) getConnector() connector.TaskConnector {
 }
 
 func NewHandlers(database *db.DB, registry *SessionRegistry, ingester *ingest.Ingester, events *EventBus) *Handlers {
-	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), stopCh: make(chan struct{}), flushDone: make(chan struct{}), consumeDone: make(chan struct{}), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
+	h := &Handlers{db: database, registry: registry, ingester: ingester, events: events, tokenCh: make(chan db.TokenRecord, 256), stopCh: make(chan struct{}), flushDone: make(chan struct{}), consumeDone: make(chan struct{}), identDone: make(chan struct{}), budgetAlerted: map[string]time.Time{}, registerLimiters: map[string]*registerVisitor{}}
 	go h.flushTokenUsage()
 	go h.flushConsumption()
+	go h.runIdentityFlusher()
 	go h.sweepRegisterLimiters()
 	return h
 }
@@ -193,6 +200,7 @@ func (h *Handlers) Close() {
 	h.closeOnce.Do(func() { close(h.stopCh) })
 	<-h.flushDone
 	<-h.consumeDone
+	<-h.identDone
 }
 
 // checkBudgets fires a budget-exceeded event for any agent in the just-flushed
