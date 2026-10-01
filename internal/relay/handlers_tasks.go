@@ -137,6 +137,7 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		Dod:                req.GetString("dod", ""),
 		VerifyCmd:          optionalString(req.GetString("verify_cmd", "")),
 		DiscoveredFrom:     discoveredFrom,
+		LinearKey:          optionalString(strings.TrimSpace(req.GetString("linear_key", ""))),
 	}
 	// blocked_by entries are "<id>" or "<id>@in-review"; a short id prefix
 	// resolves like every other task_id argument.
@@ -1802,6 +1803,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		AcceptanceCriteria []string `json:"acceptance_criteria"`
 		Dod                string   `json:"dod"`
 		VerifyCmd          *string  `json:"verify_cmd"`
+		LinearKey          *string  `json:"linear_key"`
 		Backlog            bool     `json:"backlog"`
 	}
 	if err := json.Unmarshal([]byte(tasksJSON), &items); err != nil {
@@ -1833,7 +1835,7 @@ func (h *Handlers) HandleBatchDispatchTasks(ctx context.Context, req mcp.CallToo
 		if priority == "" {
 			priority = "P2"
 		}
-		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod, VerifyCmd: item.VerifyCmd}
+		ticket := db.TypedTicket{Goal: item.Goal, AcceptanceCriteria: acJSON, Dod: item.Dod, VerifyCmd: item.VerifyCmd, LinearKey: item.LinearKey}
 		task, err := h.db.DispatchTask(project, item.Profile, agent, item.Title, item.Description, priority, nil, item.BoardID, ticket, item.Backlog, nil)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s: %v", item.Title, err))

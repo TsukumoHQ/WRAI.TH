@@ -487,7 +487,7 @@ func findProfilesTool() mcp.Tool {
 func dispatchTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"dispatch_task",
-		mcp.WithDescription("Dispatch a pending task to a profile (claimable by its agents); profile='human' for a human action. No board_id: auto with 0-1 boards, refused if several."),
+		mcp.WithDescription("Dispatch a pending task to a profile; profile='human' for a human action. No board_id: auto with 0-1 boards, refused if several."),
 		asParam,
 		projectParam,
 		mcp.WithString("profile", mcp.Description("Profile slug to dispatch to"), mcp.Required()),
@@ -497,13 +497,14 @@ func dispatchTaskTool() mcp.Tool {
 			mcp.Description("Task priority"),
 			mcp.Enum("P0", "P1", "P2", "P3"),
 		),
-		mcp.WithString("parent_task_id", mcp.Description("Parent task ID (subtasks)")),
+		mcp.WithString("parent_task_id", mcp.Description("Parent task ID")),
 		mcp.WithString("board_id", mcp.Description("Board to assign to")),
-		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required where typed tickets are enforced, else optional.")),
+		mcp.WithString("goal", mcp.Description("Typed ticket: one-line intent. Required where enforced.")),
 		mcp.WithString("acceptance_criteria", mcp.Description("Typed ticket: JSON array of testable items, one gate verdict each. Required where enforced.")),
 		mcp.WithString("dod", mcp.Description("Typed ticket: definition of done. Required where enforced.")),
 		mcp.WithString("verify_cmd", mcp.Description("Optional command the gate reviewer runs; never required.")),
-		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog' (groomed; promote_task lifts it to pending). Default false.")),
+		mcp.WithString("linear_key", mcp.Description("Linear key (SYN-123); stored only, no write-back.")),
+		mcp.WithBoolean("backlog", mcp.Description("Create in non-claimable 'backlog'; promote_task lifts it to pending.")),
 		mcp.WithString("trace_id", mcp.Description("32-hex correlation id; auto-minted if omitted.")),
 		mcp.WithArray("blocked_by", mcp.Description("Prerequisite ids ('id' or 'id@in-review'); held until met"), mcp.WithStringItems()),
 		mcp.WithString("discovered_from", mcp.Description("Origin task id; inherits board/trace/profile")),
@@ -819,7 +820,7 @@ func batchDispatchTasksTool() mcp.Tool {
 		mcp.WithDescription("Dispatch many tasks. Where typed tickets are enforced, an item missing goal/acceptance_criteria/dod is skipped and listed in errors."),
 		asParam,
 		projectParam,
-		mcp.WithString("tasks", mcp.Description("JSON array of dispatch_task args (profile, title required; description, priority, board_id, goal, acceptance_criteria[], dod, verify_cmd)."), mcp.Required()),
+		mcp.WithString("tasks", mcp.Description("JSON array of dispatch_task args (profile, title required; description, priority, board_id, goal, acceptance_criteria[], dod, verify_cmd, linear_key)."), mcp.Required()),
 	)
 }
 

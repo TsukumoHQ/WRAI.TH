@@ -124,6 +124,33 @@ type TypedTicket struct {
 	// display-only discovered_from edge, and board / trace / profile are
 	// inherited from it when the caller omits them. Never sets the parent.
 	DiscoveredFrom string
+	// LinearKey links a native task to its Linear issue from birth (W6):
+	// stored only, no write-back; source stays native. nil = none.
+	LinearKey *string
+}
+
+// linearKeyPattern is a Linear issue key: team prefix, dash, number (SYN-123).
+var linearKeyPattern = regexp.MustCompile(`^[A-Z][A-Z0-9]*-[0-9]+$`)
+
+// checkLinearKey refuses a malformed linear_key, or one an active task of the
+// project already holds (named, so the caller can find it).
+func (d *DB) checkLinearKey(project string, key *string) error {
+	if key == nil {
+		return nil
+	}
+	if !linearKeyPattern.MatchString(*key) {
+		return fmt.Errorf("linear_key %q must match ^[A-Z][A-Z0-9]*-[0-9]+$ (e.g. SYN-123)", *key)
+	}
+	var holder string
+	err := d.ro().QueryRow(`SELECT id FROM tasks WHERE project = ? AND linear_key = ?
+		AND status NOT IN ('done', 'cancelled') AND archived_at IS NULL LIMIT 1`, project, *key).Scan(&holder)
+	if err == nil {
+		return fmt.Errorf("linear_key %s is already held by active task %s", *key, holder)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("linear_key check: %w", err)
+	}
+	return nil
 }
 
 // hasAcceptanceItems reports whether raw is a JSON array carrying ≥1 non-blank
@@ -251,6 +278,9 @@ func (e *BoardRequiredError) Error() string {
 }
 
 func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description, priority string, parentTaskID, boardID *string, ticket TypedTicket, backlog bool, traceID *string) (*models.Task, error) {
+	if err := d.checkLinearKey(project, ticket.LinearKey); err != nil {
+		return nil, err
+	}
 	// Single typed-ticket guard. Every creation path funnels through DispatchTask,
 	// so enforcing here (before any write or side-effect) makes a bare ticket
 	// impossible on an enforced project — no per-path check to drift or bypass.
@@ -385,14 +415,15 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 		AcceptanceCriteria: acceptanceCriteria,
 		Dod:                ticket.Dod,
 		VerifyCmd:          ticket.VerifyCmd,
+		LinearKey:          ticket.LinearKey,
 		TraceID:            &tid,
 	}
 
-	const insertTask = `INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, pending_since, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, trace_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?)`
+	const insertTask = `INSERT INTO tasks (id, profile_slug, dispatched_by, title, description, priority, status, project, dispatched_at, pending_since, parent_task_id, board_id, source, last_activity_at, goal, acceptance_criteria, dod, verify_cmd, linear_key, trace_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'native', ?, ?, ?, ?, ?, ?, ?)`
 	insertArgs := []any{task.ID, task.ProfileSlug, task.DispatchedBy, task.Title, task.Description,
 		task.Priority, task.Status, task.Project, task.DispatchedAt, task.DispatchedAt, task.ParentTaskID, task.BoardID, task.DispatchedAt,
-		task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, tid}
+		task.Goal, task.AcceptanceCriteria, task.Dod, task.VerifyCmd, task.LinearKey, tid}
 	if len(blockers) == 0 && ticket.DiscoveredFrom == "" {
 		if _, err := d.writerExec(insertTask, insertArgs...); err != nil {
 			return nil, fmt.Errorf("dispatch task: %w", err)
