@@ -5,6 +5,9 @@ import (
 	"log"
 	"math/rand"
 	"time"
+
+	"agent-relay/internal/db"
+	"agent-relay/internal/models"
 )
 
 const reconcileTimeout = 30 * time.Second
@@ -83,6 +86,7 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 				}
 			}
 
+			parked := c.parkedHold(&seed, prior, iss, primary)
 			taskID, _, err := c.db.UpsertLinearMirror(seed)
 			if err != nil {
 				log.Printf("[linear] reconcile upsert %s (%s): %v", iss.ID, project, err)
@@ -114,7 +118,7 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 			// (visible on the board), just never launches an agent on work with no
 			// goal/AC/DoD. The loud refusal comment is the webhook's job (the poll
 			// would re-comment every cycle); here we stay silent and simply hold.
-			if c.onEvent != nil &&
+			if c.onEvent != nil && !parked &&
 				iss.State != nil && iss.State.Type == "started" && !looksLikeReview(iss.State.Name) &&
 				(prior == nil || !isTerminalOrActive(prior.Status)) &&
 				(!requireTicket || len(parseTicket(iss.Description).missing) == 0) {
@@ -149,6 +153,29 @@ func (c *Connector) ReconcileCycle(_ string) (int, error) {
 
 	c.lastReconcileAt.Store(time.Now().UnixMilli())
 	return upserted, nil
+}
+
+// parkedHold reports whether the mirror is parked on the relay (ruling
+// wraith-park-ruling Q3, P4): whatever Linear does short of closing the issue,
+// the mirror keeps its relay status and is never dispatched, and the primary
+// mirror posts ONE "parked on the relay: <reason>" comment per park when the
+// issue moves to a started state (claimed CAS; a failed comment is retried).
+func (c *Connector) parkedHold(seed *db.LinearMirrorSeed, prior *models.Task, iss gqlIssue, primary bool) bool {
+	if prior == nil || !c.db.TaskParked(seed.Project, prior.ID) {
+		return false
+	}
+	if closedStatus(iss.State) == "" {
+		seed.Status = prior.Status
+	}
+	if primary && iss.State != nil && iss.State.Type == "started" {
+		if reason, ok, err := c.db.ClaimParkNotice(seed.Project, prior.ID); err == nil && ok {
+			if err := c.Comment(iss.ID, "parked on the relay: "+reason); err != nil {
+				log.Printf("[linear] parked comment %s: %v", iss.ID, err)
+				_ = c.db.ReleaseParkNotice(seed.Project, prior.ID)
+			}
+		}
+	}
+	return true
 }
 
 // syncDroppedMirrors closes relay mirror tasks whose Linear issue is no longer

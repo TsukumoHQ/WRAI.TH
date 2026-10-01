@@ -47,6 +47,9 @@ func migrateParking(conn *sql.DB) {
 		"park_until":  "TEXT",
 		"park_reason": "TEXT",
 		"parked_by":   "TEXT",
+		// park_noticed_at: the one "parked on the relay" Linear comment of this
+		// park was posted (ruling wraith-park-ruling Q3); reset by every park.
+		"park_noticed_at": "TEXT",
 	})
 	_, missing := conn.Exec(`SELECT 1 FROM founder_gates LIMIT 0`)
 	_, _ = conn.Exec(`CREATE TABLE IF NOT EXISTS founder_gates (
@@ -127,7 +130,7 @@ func (d *DB) ParkTask(project, taskID, by, reason, until, untilStatus string) (f
 			ON CONFLICT(task_id) DO UPDATE SET reason = excluded.reason, park_until = excluded.park_until,
 				park_reason = excluded.park_reason, parked_by = excluded.parked_by,
 				held_at = CASE WHEN task_holds.released_at IS NULL THEN task_holds.held_at ELSE excluded.held_at END,
-				released_at = NULL, flagged = NULL, announced_at = NULL`,
+				released_at = NULL, flagged = NULL, announced_at = NULL, park_noticed_at = NULL`,
 			taskID, project, HoldReasonParked, now, ParkUntilFounder, reason, by)
 		if err != nil {
 			return false, err
@@ -158,7 +161,7 @@ func (d *DB) ParkTask(project, taskID, by, reason, until, untilStatus string) (f
 		Metadata: meta, CreatedBy: by}, now); err != nil {
 		return false, err
 	}
-	if _, err := tx.Exec(`UPDATE task_holds SET reason = ?, park_until = ?, park_reason = ?, parked_by = ?
+	if _, err := tx.Exec(`UPDATE task_holds SET reason = ?, park_until = ?, park_reason = ?, parked_by = ?, park_noticed_at = NULL
 		WHERE task_id = ? AND released_at IS NULL`, HoldReasonParked, until, reason, by, taskID); err != nil {
 		return false, err
 	}
@@ -192,6 +195,32 @@ func (d *DB) UnparkTask(project, taskID, by string) (released bool, err error) {
 		return false, err
 	}
 	return released, tx.Commit()
+}
+
+// ClaimParkNotice claims the one Linear "parked on the relay" comment of the
+// task's open park (CAS on park_noticed_at): ok only for the first caller of
+// this park, with the park reason to quote.
+func (d *DB) ClaimParkNotice(project, taskID string) (reason string, ok bool, err error) {
+	res, err := d.writerExec(`UPDATE task_holds SET park_noticed_at = ?
+		WHERE task_id = ? AND project = ? AND released_at IS NULL AND reason = ? AND park_noticed_at IS NULL`,
+		d.Now().UTC().Format(memoryTimeFmt), taskID, project, HoldReasonParked)
+	if err != nil {
+		return "", false, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return "", false, nil
+	}
+	err = d.ro().QueryRow(`SELECT COALESCE(park_reason, '') FROM task_holds WHERE task_id = ? AND project = ? AND released_at IS NULL`,
+		taskID, project).Scan(&reason)
+	return reason, err == nil, err
+}
+
+// ReleaseParkNotice un-claims the notice after a failed comment, so the next
+// tick retries it.
+func (d *DB) ReleaseParkNotice(project, taskID string) error {
+	_, err := d.writerExec(`UPDATE task_holds SET park_noticed_at = NULL
+		WHERE task_id = ? AND project = ? AND released_at IS NULL AND reason = ?`, taskID, project, HoldReasonParked)
+	return err
 }
 
 // TaskParked reports whether the task has an open park.

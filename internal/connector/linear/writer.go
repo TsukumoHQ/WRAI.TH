@@ -32,6 +32,16 @@ func (c *Connector) PushStatus(linearIssueID, status, comment string) error {
 	if linearIssueID == "" {
 		return fmt.Errorf("empty linear issue id")
 	}
+	// A claim (accepted) is a reservation, not a start: it never moves the
+	// issue, so claim+block freezing a pending mirror never reads In Progress
+	// in Linear (W5). start_task (in-progress) is what moves it.
+	if status == "accepted" {
+		if comment == "" {
+			return nil
+		}
+		return c.Comment(linearIssueID, comment)
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
 	defer cancel()
 

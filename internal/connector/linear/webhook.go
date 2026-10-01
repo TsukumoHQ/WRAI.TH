@@ -213,6 +213,14 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 			}
 		}
 
+		parked := false
+		if !strings.EqualFold(env.Action, "remove") {
+			prior, err := c.db.GetTaskByLinearIssueID(seed.Project, iss.ID)
+			if err != nil {
+				return nil, err
+			}
+			parked = c.parkedHold(&seed, prior, iss, primary)
+		}
 		taskID, _, err := c.db.UpsertLinearMirror(seed)
 		if err != nil {
 			return nil, err
@@ -232,7 +240,7 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 		// Typed-ticket gate, symmetric with the reconcile poll: a mirror already
 		// in flight is never retro-refused above, so without this a ticket whose
 		// AC parsed to '[]' still launched an agent (W4).
-		if c.shouldDispatch(env, iss) &&
+		if !parked && c.shouldDispatch(env, iss) &&
 			(!c.db.ProjectRequiresTypedTicket(seed.Project) || len(parseTicket(iss.Description).missing) == 0) {
 			events = append(events, c.dispatchEvent(taskID, iss.Title, c.dispatchTarget(iss), seed))
 		}
