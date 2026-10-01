@@ -67,6 +67,9 @@ func (h *Handlers) park(project, agent string, task *models.Task, reason, until 
 	if fresh {
 		h.notifyParked(project, agent, task, reason, until, untilStatus)
 	}
+	details, _ := json.Marshal(map[string]string{"until": until, "until_status": untilStatus})
+	_ = h.db.RecordAudit(models.AuditEntry{Project: project, Actor: agent, Action: "task.parked", ResourceType: "task",
+		ResourceID: task.ID, Summary: fmt.Sprintf("parked %q until %s", task.Title, until), Details: string(details), Reason: reason})
 	h.events.Emit(MCPEvent{Type: "task", Action: "parked", Agent: agent, Project: project, Label: task.Title})
 	out := map[string]any{"task_id": task.ID, "parked": true, "until": until, "reason": reason}
 	if untilStatus != "" {
@@ -103,10 +106,18 @@ func (h *Handlers) unpark(project, agent string, task *models.Task) (*mcp.CallTo
 
 // unparkTask is unpark's core, shared with POST /api/tasks/{id}/unpark.
 func (h *Handlers) unparkTask(project, agent string, task *models.Task) (map[string]any, *mcp.CallToolResult) {
+	// The audit names the park being lifted (unpark itself takes no reason).
+	lifted := ""
+	one := []models.Task{*task}
+	if err := h.db.AttachParks(project, one); err == nil && one[0].Park != nil {
+		lifted = one[0].Park.Reason
+	}
 	released, err := h.db.UnparkTask(project, task.ID, agent)
 	if err != nil {
 		return nil, taskOpError(err, "failed to unpark task: %v", err)
 	}
+	_ = h.db.RecordAudit(models.AuditEntry{Project: project, Actor: agent, Action: "task.unparked", ResourceType: "task",
+		ResourceID: task.ID, Summary: fmt.Sprintf("unparked %q", task.Title), Reason: lifted})
 	if released {
 		h.announceRelease(project, task.ID)
 	}
@@ -200,11 +211,36 @@ func (h *Handlers) parkTarget(project, agent, rawID, verb string) (*models.Task,
 	if err != nil || task == nil {
 		return nil, typedTaskError(&db.TaskError{Code: db.CodeTaskNotFound, Msg: fmt.Sprintf("task %s not found in project %s", taskID, project)})
 	}
-	if !h.callerMayReassign(project, agent, task) {
+	if !h.callerMayReassign(project, agent, task) && !h.callerLeadsMirrorLane(project, agent, task) {
 		return nil, permissionError(CodeForbidden, fmt.Sprintf(
-			"only the dispatcher (%s), an executive or the doer's lead may %s task %s", task.DispatchedBy, verb, taskID))
+			"only the dispatcher (%s), an executive, the doer's lead or (Linear mirror) the routed lane lead and its chain may %s task %s", task.DispatchedBy, verb, taskID))
 	}
 	return task, nil
+}
+
+// callerLeadsMirrorLane reports whether caller is the lead a Linear mirror
+// routes to (its profile_slug, the resolved dispatch target) or an agent in
+// that lead's reports_to chain (ruling wraith-park-ruling Q1): the lane owner
+// freezes its own queue without an executive. Bounded by a seen-set against a
+// cyclic chain; agent names fold case.
+func (h *Handlers) callerLeadsMirrorLane(project, caller string, task *models.Task) bool {
+	if caller == "" || task.Source != "linear" {
+		return false
+	}
+	cur := strings.ToLower(task.ProfileSlug)
+	seen := map[string]bool{}
+	for cur != "" && !seen[cur] {
+		if strings.EqualFold(cur, caller) {
+			return true
+		}
+		seen[cur] = true
+		ag, err := h.db.GetAgent(project, cur)
+		if err != nil || ag == nil || ag.ReportsTo == nil {
+			return false
+		}
+		cur = strings.ToLower(*ag.ReportsTo)
+	}
+	return false
 }
 
 // updateBlockedBy applies update_task's blocked_by / blocked_by_remove (task
