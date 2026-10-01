@@ -315,13 +315,16 @@ func (c *graphqlClient) openTeamIssues(ctx context.Context, teamKey string) ([]g
 			// Guard: a missing/renamed Issue.delegate field must never break the
 			// poll. On a field-shaped error from the delegate query, latch the
 			// fallback and retry this page with the delegate-less query. Any other
-			// (transient) error propagates unchanged.
+			// (transient) error propagates unchanged. The latch is set only when
+			// the delegate-less retry succeeds: a 400 that fails both queries is
+			// an errored tick (rate limit, overload), not a schema rejection, and
+			// latching on it would drop delegate routing for good (W3).
 			if query == teamOpenIssuesQueryDelegate && isFieldError(err) {
+				if ferr := c.do(ctx, teamOpenIssuesQuery, vars, &out); ferr != nil {
+					return nil, ferr
+				}
 				c.delegateUnsupported.Store(true)
 				log.Printf("[linear] Issue.delegate unsupported (%v) — falling back to assignee-only routing", err)
-				if err := c.do(ctx, teamOpenIssuesQuery, vars, &out); err != nil {
-					return nil, err
-				}
 			} else {
 				return nil, err
 			}
