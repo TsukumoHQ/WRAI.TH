@@ -3,6 +3,83 @@
 All notable changes to wrai.th are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.25.0] — 2026-10-01
+
+A task stays with its doer.
+- A lifecycle call no longer hands a task to whoever made it. The gate daemon resuming or reviewing a task no longer takes the lease away from the agent doing the work.
+- On first start, the relay repairs tasks that had already drifted to the delegating service.
+
+Contracts and backlog get easier to manage:
+- `demote_task` sends a pending task back to backlog.
+- A ticket's contract can still be edited after its dispatcher has gone away.
+
+Senders see more:
+- A send to an inactive agent says nobody is reading.
+- Every message read shows the server's `sent_at`.
+- REST writes now follow `RELAY_IDENTITY_MODE`, like MCP calls.
+
+The Linear connector reads acceptance criteria under more headings, recreates a missing mirror, and never opens a claimable task for a Duplicate or Canceled issue.
+
+The range `v1.24.0..v1.25.0` holds 11 commits. There is no schema change.
+
+### Added
+- `demote_task(reason, task_id | task_ids)` moves a `pending` native task back to `backlog` (de-groom).
+  - Allowed for the dispatcher, an executive, or the dispatcher's lead chain.
+  - With `task_ids`, each id is reported on its own as `demoted`, `unchanged` or `refused`.
+  - A task that is not `pending` is refused. A Linear-mirrored task is refused with a hint to use `park_task`, because Linear is the source of truth there.
+  - Each demotion is audited as `task.demoted` (`pending → backlog`, with actor and reason).
+
+  (task:11300e39, c4b3074)
+- `send_message` to an inactive agent that is not a service still delivers, but the result now carries `warning: {code: "recipient_inactive", name, status, last_seen, message}` so the sender knows nobody is reading. `ack` and `fyi` sends get no warning (task:dd6b1ab3, 3878f9b)
+- `get_inbox` (md and json) and the `unread_messages` previews in `session_context` now show `sent_at`, the server time in RFC3339 UTC. `created_at` is unchanged. Each unread preview grows by about 33 bytes (task:4a4a9913, f05b9a3)
+
+### Changed
+- **A lifecycle call never moves `lease_holder` or `assigned_to`.**
+  - `start_task`, `review_task`, `block_task`, `resume_task` and `complete_task` leave the task with its doer, whoever calls them: the dispatcher, an executive, a human, or a delegating service (`RELAY_OVERRIDE_ACTORS`, default `niwa`).
+  - The doer is the prior lease holder, else the assignee, else the claimer. A delegating-service name is never a doer. The caller becomes the doer only when the task has none yet (a start straight from `pending` is its claim).
+  - Only `claim_task`, `reclaim_task` and `update_task` with `assigned_to` move a lease, with their existing authority checks.
+  - `block_task` and `complete_task` still release the lease, as before. `assigned_to` stays the doer.
+  - A delegating service acting on a task with no doer on record is refused with `TASK_LEASE_FENCED` ("a doer must claim it first") instead of being handed the task.
+  - Who may perform each transition is unchanged: a peer's `review_task` is still refused.
+  - Before, a call from the gate daemon (unrecognised as a delegating service while tokenless) handed it the lease and `assigned_to`. The doer's own `block_task` or `review_task` then failed with `TASK_LEASE_FENCED: lease is held by "niwa"`.
+
+  (task:03958111, 4d01274)
+- REST writes follow `RELAY_IDENTITY_MODE` like MCP calls.
+  - Covered routes: `/api/messages`, notification emit, task transitions, task archive, memory `POST`, and `/api/user-response` (acts as `human`).
+  - In `enforce`, a tokenless write returns 401 `AGENT_TOKEN_REQUIRED`. A token used for another identity returns 403 `AGENT_IDENTITY_MISMATCH`, and an unknown one 401 `AGENT_TOKEN_INVALID`.
+  - `human`/`user` stay exempt from a loopback peer only, audited as `identity.exempt`. The audit tool label is `rest:<METHOD> <path>`.
+  - See `docs/design/identity-routing.md` (task:8e2f69cd, e5a2e4c)
+- Contract edits (`goal`, `acceptance_criteria`, `dod`, `verify_cmd` via `update_task`):
+  - Before, only the dispatcher could edit them, so a dead dispatcher froze its tickets' contract.
+  - Now the dispatcher, any executive, or, once the dispatcher is inactive, an agent above it in its `reports_to` chain may edit. On a self-dispatched task, the doer's lead chain signs off.
+  - The doer, and any agent below the doer, is always refused with `FORBIDDEN`, even as an executive.
+  - Each edit is audited as `task.contract_edited` (`by`, `authority`, `fields`, `before_hash`, `after_hash`). On a task in review, a progress note tells the reviewer to re-read the acceptance criteria.
+
+  (task:04ac0ae3, fd54f26)
+
+### Fixed
+- Linear acceptance criteria are found under every common heading: a trailing colon (`## Acceptance criteria:`), `## AC`, a bold label line (`**…**` or `__…__`), and the French `Critères d'acceptation`. Checkbox markers (`[ ]`, `[x]`) are stripped, and an empty checkbox no longer counts as a criterion. A webhook on a mirror already in flight no longer launches an agent when its criteria parse to nothing on a project that requires typed tickets (task:3cd3e47b, bd8fc0d)
+- A Linear mirror that went missing is recreated on the next good reconcile tick. A 400 that fails both the delegate query and its delegate-less retry (a rate limit or overload) no longer switches off delegate routing for good; the latch is set only when the retry succeeds (task:552b1e22, 18d2a62)
+- Linear issues in a Duplicate or Canceled state never become a live, claimable relay task, whether first seen by reconcile or by webhook. Linear can report Duplicate as its own state type. An existing mirror is closed as `cancelled`; no new one is created (task:3bdcb725, 1c37c67)
+
+### Documentation
+- The S5 go/no-go one-liner in `docs/design/identity-routing.md` now reads the log the relay really writes. `log.Printf` goes to stderr: under launchd that is the plist's `StandardErrorPath`, under systemd it is `journalctl --user -u agent-relay`, not a fixed `relay.log` (task:19e39b98, 5d5dcc5)
+- v1.24.0 release notes (task:b0e4070e, ea80bee)
+
+### Upgrade notes
+- **No schema change.** No migration adds a column or a table; older binaries run against the same database.
+- **N3 boot repair (one-shot, idempotent), run at migrate on first start.**
+  - It looks at non-terminal tasks (not `done`/`cancelled`) whose `assigned_to` or `lease_holder` is a delegating service (`RELAY_OVERRIDE_ACTORS`, default `niwa`; never `human`/`user`).
+  - Each such task is re-pointed to its `claimed_by`. Only the field that holds the service moves; a real assignee is never overwritten.
+  - The count is logged once: `migrate: N3 repair re-pointed N task(s) held by a delegating service to their claimer`.
+  - A task with no claimer, or one whose claimer is itself a delegating service, is ambiguous. It is left untouched and logged by id: `migrate: N3 repair left N task(s) held by a delegating service with no other claimer: <ids>`. That line repeats on every boot until someone re-points the task by hand (`update_task` with `assigned_to`).
+  - `done`/`cancelled` rows are history and stay as they are.
+  - On the tsukumo prod deploy, the repair re-pointed 5 tasks and left 1 ambiguous task, which was fixed by hand.
+- New tool: `demote_task`. `send_message` results may carry a `warning` field. `get_inbox` and `session_context` previews gain `sent_at`.
+- Under `RELAY_IDENTITY_MODE=enforce`, REST clients that write without an `X-Agent-Token` now get 401. Check the warn log first, as for MCP calls.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.24.0...v1.25.0
+
 ## [1.24.0] — 2026-10-01
 
 The relay now knows who is calling.
