@@ -629,6 +629,53 @@ func resolveAckRung2(database *db.DB, project, dispatcher string) (target, rule 
 	return ackFounder, "founder"
 }
 
+// answerChainMaxHops bounds the reports_to walk so a cycle cannot spin.
+const answerChainMaxHops = 8
+
+// resolveAnswerRung names the bearer of an unanswered ask's role rung: the
+// first active agent up the RECIPIENT's reports_to chain that is not the asker
+// (task b62b3966). The asker and inactive agents are skipped, one rung up each
+// time. A reports_to that is not a registered agent (e.g. 'founder') is the
+// human. Only a recipient with no reports_to at all falls back to an active
+// executive, never the recipient or the asker; the ack ladder's
+// resolveAckRung2 had no asker to exclude, so that fallback once handed a
+// founder-reporting recipient's ask back to its executive sender.
+func resolveAnswerRung(database *db.DB, project, recipient, asker string) (target, rule string) {
+	r, err := database.GetAgent(project, recipient)
+	if err != nil || r == nil {
+		return ackFounder, "founder"
+	}
+	if r.ReportsTo == nil || *r.ReportsTo == "" {
+		if agents, err := database.ListAgents(project); err == nil {
+			for _, a := range agents {
+				if a.IsExecutive && a.Status == "active" && !strings.EqualFold(a.Name, recipient) && !strings.EqualFold(a.Name, asker) {
+					return a.Name, "executive"
+				}
+			}
+		}
+		return ackFounder, "founder"
+	}
+	next := *r.ReportsTo
+	for hop := 0; hop < answerChainMaxHops && next != ""; hop++ {
+		m, err := database.GetAgent(project, next)
+		if err != nil || m == nil {
+			return ackFounder, "reports_to_human"
+		}
+		if strings.EqualFold(m.Name, recipient) {
+			break // cycle back to the recipient
+		}
+		if m.Status == "active" && !strings.EqualFold(m.Name, asker) {
+			return m.Name, "reports_to"
+		}
+		log.Printf("[obligations] answer chain skip %s (asker=%t active=%t) recipient=%s", m.Name, strings.EqualFold(m.Name, asker), m.Status == "active", recipient)
+		next = ""
+		if m.ReportsTo != nil {
+			next = *m.ReportsTo
+		}
+	}
+	return ackFounder, "founder"
+}
+
 // evaluateAnswerObligations breaches every answer obligation past its deadline
 // (task a01d0b87): the obligation closes unfulfilled and the next rung opens
 // in the same tx. answer.reply escalates to the recipient's role (reports_to,
@@ -648,7 +695,7 @@ func evaluateAnswerObligations(database *db.DB, notifier ackNotifier, now time.T
 		switch childNorm {
 		case db.NormAnswerRole:
 			var rule string
-			bearer, rule = resolveAckRung2(database, a.Project, a.Recipient)
+			bearer, rule = resolveAnswerRung(database, a.Project, a.Recipient, a.Asker)
 			if bearer == ackFounder || strings.EqualFold(bearer, a.Recipient) {
 				childNorm, bearer = db.NormAnswerHuman, ackFounder
 			}
