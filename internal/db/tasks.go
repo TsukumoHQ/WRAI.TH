@@ -648,6 +648,12 @@ func (d *DB) ForcePRTransition(project, taskID, target string, reason *string) (
 	if task.Status == target {
 		return task, false, nil // idempotent
 	}
+	// Deploying (W8 D3): the merge is already accounted for; done waits for the
+	// post-merge pipeline's verify. A PR observation (merged, a late reopen)
+	// never moves a deploying task — never closes it early, never pulls it back.
+	if task.Status == "deploying" {
+		return task, false, nil
+	}
 	updated, err := d.transitionTask(taskID, "user", project, target, nil, reason)
 	if err != nil {
 		return nil, false, err

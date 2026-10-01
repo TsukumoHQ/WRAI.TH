@@ -13,7 +13,7 @@ import (
 // GitHub → relay (DEC-wraith-pr-linking-1):
 //
 //	opened / reopened / ready_for_review → in-review
-//	closed + merged                      → done
+//	closed + merged                      → done (a deploying task: no-op, W8 D3)
 //	closed + unmerged                    → blocked ("PR closed unmerged")
 //	synchronize (new commits)            → no transition, pr_state stays open
 //
