@@ -342,6 +342,7 @@ func StartACKChecker(database *db.DB, registry *SessionRegistry, done <-chan str
 			case <-ticker.C:
 				now := database.Now()
 				evaluateObligations(database, registry, now)
+				evaluateLaneDigests(database, registry, now)
 				evaluateFounderGates(database, registry, now)
 				evaluateStaleHeldTasks(database, registry, now)
 				evaluateClassBudgets(database, registry, now)
@@ -526,6 +527,37 @@ func evaluateObligations(database *db.DB, notifier ackNotifier, now time.Time) {
 			continue
 		}
 		sendAckSanction(database, notifier, o, sn, minutes)
+	}
+}
+
+// evaluateLaneDigests sends one fyi per busy lane and dispatcher, at most
+// hourly (ruling wraith-park-ruling P6): the queue depth and the oldest wait of
+// the tasks past the ACK window that sit behind busy live agents, which never
+// fire a rung themselves (ackCandidate excludes them).
+func evaluateLaneDigests(database *db.DB, notifier ackNotifier, now time.Time) {
+	notifyAge := database.SettingDuration("ack_notify_age", ACKNotifyAge, time.Minute, 24*time.Hour)
+	queues, err := database.BusyLaneQueues(now.Add(-notifyAge), now)
+	if err != nil {
+		log.Printf("lane digest error: %v", err)
+		return
+	}
+	for _, q := range queues {
+		ok, err := database.ClaimLaneDigest(q.Project, q.Profile, q.Dispatcher, now)
+		if err != nil || !ok {
+			continue
+		}
+		oldest := 0
+		if since, err := time.Parse("2006-01-02T15:04:05.999999Z", q.OldestSince); err == nil {
+			oldest = int(now.Sub(since).Minutes())
+		}
+		text := fmt.Sprintf("QUEUE: profile %s busy — %d pending, oldest %dmin (all live agents hold work; no per-task ACK while busy)", q.Profile, q.Depth, oldest)
+		msg, _, err := database.InsertMessageWithDeliveries(q.Project, "relay", q.Dispatcher, "fyi", text, text, "{}",
+			"P2", -1, nil, nil, []string{q.Dispatcher}, "none")
+		if err != nil {
+			log.Printf("lane digest message error: %s/%s: %v", q.Project, q.Profile, err)
+			continue
+		}
+		notifier.Notify(q.Project, q.Dispatcher, "relay", text, msg.ID)
 	}
 }
 
