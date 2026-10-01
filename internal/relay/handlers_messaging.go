@@ -157,8 +157,10 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 	// resolveTargets maps both to the same target); it is a literal, not an agent
 	// row, so it must be exempted here exactly like "user" — otherwise operator
 	// traffic addressed to "human" is wrongly rejected as an unknown recipient.
+	var recipient *models.Agent
 	if conversationID == nil && to != "*" && to != "user" && to != "human" && !strings.HasPrefix(to, "team:") {
-		recipient, err := h.db.GetAgent(project, to)
+		var err error
+		recipient, err = h.db.GetAgent(project, to)
 		if err != nil {
 			return toolResultError(fmt.Sprintf("failed to resolve recipient '%s': %v", to, err)), nil
 		}
@@ -251,7 +253,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 			h.trackAnswerObligations(project, from, msg, recipients, answerable)
 		}
 
-		return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved))
+		return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved, nil))
 	}
 
 	// Broadcast permission: when teams exist, only admin team members can broadcast
@@ -313,7 +315,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		h.events.Emit(MCPEvent{Type: "message", Action: action, Agent: from, Project: project, Target: to, Label: subject, Priority: priority, MsgType: msgType})
 	}
 
-	return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved))
+	return h.resultJSONTracked(project, from, "send_message", sendResult(msg, replyResolved, recipientInactiveWarning(recipient, msgType)))
 }
 
 // HandleSendStatus posts a typed-status report (DEC-relay-comms-discipline-1
@@ -978,16 +980,49 @@ func resolveReplyTo(d *db.DB, project, from string, replyTo *string) (*bool, str
 	return &resolved, ""
 }
 
-// sendResult adds reply_to_resolved to the send result only when a reply_to
-// was sent, so a plain send keeps its exact prior shape.
-func sendResult(msg *models.Message, replyResolved *bool) any {
-	if replyResolved == nil || msg == nil {
+// sendResult adds reply_to_resolved (only when a reply_to was sent) and the
+// recipient warning (only when there is one), so a plain send keeps its exact
+// prior shape.
+func sendResult(msg *models.Message, replyResolved *bool, warning *recipientWarning) any {
+	if msg == nil || (replyResolved == nil && warning == nil) {
 		return msg
 	}
 	return struct {
 		*models.Message
-		ReplyToResolved bool `json:"reply_to_resolved"`
-	}{msg, *replyResolved}
+		ReplyToResolved *bool             `json:"reply_to_resolved,omitempty"`
+		Warning         *recipientWarning `json:"warning,omitempty"`
+	}{msg, replyResolved, warning}
+}
+
+// recipientWarning tells the sender, at send time, that the message was
+// delivered but its recipient will not read it (W10 dd6b1ab3).
+type recipientWarning struct {
+	Code     string `json:"code"`
+	Name     string `json:"name"`
+	Status   string `json:"status"`
+	LastSeen string `json:"last_seen"`
+	Message  string `json:"message"`
+}
+
+// recipientInactiveWarning returns recipient_inactive for a direct send to a
+// registered non-service agent that is not active or sleeping (the same
+// liveness rule as the sender gate, db.SenderEligibility). The message is
+// still delivered — the inbox is non-destructive and a reactivated agent reads
+// it. ack/fyi sends need no reader and carry no warning.
+func recipientInactiveWarning(recipient *models.Agent, msgType string) *recipientWarning {
+	if recipient == nil || msgType == "ack" || msgType == "fyi" {
+		return nil
+	}
+	if live, _ := db.SenderEligibility(recipient); live {
+		return nil
+	}
+	return &recipientWarning{
+		Code:     "recipient_inactive",
+		Name:     recipient.Name,
+		Status:   recipient.Status,
+		LastSeen: recipient.LastSeen,
+		Message:  fmt.Sprintf("delivered, but %q is %s (last seen %s): nobody is reading it until it is reactivated — escalate or pick another recipient if it is urgent", recipient.Name, recipient.Status, recipient.LastSeen),
+	}
 }
 
 // trackAnswerObligations runs the answer-obligation bookkeeping of a stored
