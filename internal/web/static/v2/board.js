@@ -421,7 +421,7 @@ export function initBoard(root, ctx) {
         if (status === 'blocked') t.blocked_reason = sem.reason || t.blocked_reason;
         indexTasks();
       });
-    } else if (status === 'pending' || evt.action === 'dispatch') {
+    } else if (status === 'pending' || status === 'backlog' || evt.action === 'dispatch') {
       // a new card appeared — refetch lightly, then fade it in via FLIP
       scheduleRefetch();
     }
@@ -537,6 +537,9 @@ export function initBoard(root, ctx) {
     const t = byId.get(id);
     if (!t) return;
     if (columnFor(t) === colKey) return;
+    // A native backlog card leaves only through promote_task (announced like a
+    // dispatch); a drag would make it claimable silently (park P5).
+    if (t.status === 'backlog') return;
     const status = COLUMN_STATUS[colKey];
     if (!status) return;
     const prev = t.status;

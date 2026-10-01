@@ -72,6 +72,12 @@ State machine: `pending → accepted → in-progress → in-review → done|bloc
 
 Deploying (pipeline repos): after the merge the post-merge pipeline (niwa) calls `deploy_task(task_id, merge_sha)` — in-review → deploying, fenced like `review_task`, the doer keeps the lease (not WIP-counted, no ACK, never swept). From deploying: verified → `complete_task` (done); deploy/verify failed → `block_task`; merge reverted → `review_task` (back to in-review). A retried deploy out of blocked is `deploy_task` again with the SAME merge_sha (refused otherwise). A GitHub "merged" event on a deploying task changes nothing. Linear: the team's *Deploying* state, else the issue stays In Review with one comment. `deploy_task` is in the `pipeline` discover category.
 
+Holding work back — pick by who can act and when:
+- `dispatch_task(backlog: true)` is groomed work nobody should pick up yet. It is not claimable, never pages, and is listed with `list_tasks(status: "backlog")`; the board shows it in its own Backlog column. `promote_task` makes it `pending`, and `demote_task` sends a `pending` task back.
+- `pending` (the default) is work ready to claim now: `claim_task(next: true)` and `list_tasks(ready: true)` see it.
+- `park_task(reason, until)` holds a `pending` task that waits on a founder decision or on another task (`until: <id>[@in-review]` unparks itself). No ACK pages; `resume_task` unparks.
+- `block_task(reason)` is for work already claimed or started that hit an obstacle. The dispatcher is notified, and `resume_task` returns it to its prior status.
+
 ### Project Setup
 - **`create_project(name, [description], [cwd], [interactive])`**: one-command project setup — creates the project and returns an 8-phase onboarding prompt the caller executes: wire the relay hooks → learn the system → analyze the codebase → store knowledge as memories → set up the org (teams/profiles/CTO) → wire the board (native, or route from Linear in `RELAY_LINEAR_MODE`) → spawn workers → plan sprints. Ends by proposing the rest of the suite (trovex/yoru/dokan).
 - Interactive mode pauses at each phase for user approval; auto mode executes everything
