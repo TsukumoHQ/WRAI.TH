@@ -527,8 +527,11 @@ func (n *Notifier) resolveTargets(project, target string, payload map[string]any
 		// Fall back to the task's dispatcher (who assigned the work and always
 		// exists) so a blocked task reliably escalates to someone who cares.
 		if agentName := strVal(payload["agent"]); agentName != "" {
+			// A qualified cross-project manager (name@project, W9 S3) is not
+			// a local inbox: resolving it here would black-hole the event, so
+			// it falls through to the dispatcher like a missing manager.
 			if a, err := n.db.GetAgent(project, agentName); err == nil && a != nil &&
-				a.ReportsTo != nil && *a.ReportsTo != "" {
+				a.ReportsTo != nil && *a.ReportsTo != "" && !strings.Contains(*a.ReportsTo, "@") {
 				return []string{*a.ReportsTo}
 			}
 		}

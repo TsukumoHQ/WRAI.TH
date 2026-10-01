@@ -392,22 +392,18 @@ func clampLimit(n int) int {
 }
 
 // sendCrossProject delivers a direct message to an agent in a different project.
-// Both sender and recipient must be is_executive=true — this is the MVP guardrail
-// for peer-to-peer cross-project DM (e.g. two CTOs coordinating between colonies).
-// The message is inserted with project=targetProject (destination scope) so it
+// It is allowed only through one of the arms of xprojectArm (identity-routing.md
+// §3): two executives, a lead escalating up its qualified reports_to to an
+// executive, or a reply on a cross-project thread back to its author. The
+// message is inserted with project=targetProject (destination scope) so it
 // appears in the recipient's inbox naturally. metadata.source_project and
 // metadata.source_agent preserve the origin for UI rendering and reply routing.
 func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstProject, to, msgType, subject, content, callerMetadata string, replyTo *string, priority string, ttlSeconds int) (*mcp.CallToolResult, error) {
-	// Validate sender exists and is executive
 	sender, err := h.db.GetAgent(srcProject, from)
 	if err != nil || sender == nil {
 		return toolResultError(fmt.Sprintf("sender '%s' not found in project '%s'", from, srcProject)), nil
 	}
-	if !sender.IsExecutive {
-		return toolResultError("cross-project messaging requires sender to be is_executive=true"), nil
-	}
 
-	// Validate target exists and is executive
 	target, err := h.db.GetAgent(dstProject, to)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to resolve target '%s' in project '%s': %v", to, dstProject, err)), nil
@@ -418,8 +414,9 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 	if target == nil || target.Status == "deleted" {
 		return toolResultError(h.unknownCrossProjectRecipientError(dstProject, to)), nil
 	}
-	if !target.IsExecutive {
-		return toolResultError(fmt.Sprintf("cross-project messaging requires target '%s' in project '%s' to be is_executive=true", to, dstProject)), nil
+	arm := h.xprojectArm(sender, target, srcProject, dstProject, replyTo)
+	if arm == "" {
+		return xprojectForbidden(from, srcProject, to, dstProject, target.IsExecutive), nil
 	}
 
 	// Merge caller-provided metadata with source tracking fields
@@ -444,6 +441,8 @@ func (h *Handlers) sendCrossProject(ctx context.Context, srcProject, from, dstPr
 	// gated anyway so a future retry-key addition can't silently double-wake
 	// (forward-footgun flagged by review-cee47c61).
 	if !dedupHit {
+		h.auditXProjectSend(arm, srcProject, from, dstProject, to, msg.ID)
+
 		// Push notification if the target has an open session
 		h.registry.Notify(dstProject, to, from, subject, msg.ID)
 

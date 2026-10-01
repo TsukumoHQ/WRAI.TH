@@ -102,6 +102,13 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	role := req.GetString("role", "")
 	description := req.GetString("description", "")
 	reportsTo := optionalStringLower(req.GetString("reports_to", ""))
+	if reportsTo != nil && strings.Contains(*reportsTo, "@") {
+		qualified, res := h.validateQualifiedReportsTo(*reportsTo, project)
+		if res != nil {
+			return res, nil
+		}
+		reportsTo = &qualified
+	}
 	profileSlug := optionalStringLower(req.GetString("profile_slug", ""))
 	isExecutive := req.GetBool("is_executive", false)
 	sessionID := optionalString(req.GetString("session_id", ""))
@@ -433,4 +440,22 @@ func (h *Handlers) HandleSleepAgent(ctx context.Context, req mcp.CallToolRequest
 		"status": "sleeping",
 		"agent":  agent,
 	})
+}
+
+// validateQualifiedReportsTo checks a cross-project reports_to "name@project"
+// (W9 S3, identity-routing.md §3) BEFORE any write: both sides present, the
+// project known and not the agent's own (a same-project manager is a plain
+// name). Returns the normalized value, or the refusal.
+func (h *Handlers) validateQualifiedReportsTo(raw, ownProject string) (string, *mcp.CallToolResult) {
+	name, project, ok := splitQualifiedAgent(raw)
+	if !ok {
+		return "", validationError(CodeInvalidArgument, fmt.Sprintf("reports_to %q: a cross-project manager is name@project (e.g. cto@synergix-dev)", raw))
+	}
+	if project == ownProject {
+		return "", validationError(CodeInvalidArgument, fmt.Sprintf("reports_to %q names this project: use the plain name %q", raw, name))
+	}
+	if known, err := h.db.GetProject(project); err != nil || known == nil {
+		return "", validationError(CodeInvalidArgument, fmt.Sprintf("reports_to %q: unknown project %q", raw, project))
+	}
+	return name + "@" + project, nil
 }

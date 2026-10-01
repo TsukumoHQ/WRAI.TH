@@ -86,11 +86,32 @@ Proposed: a **qualified cross-project `reports_to`**, using the same trust level
 - In `sendCrossProject`, a send is allowed if one of these holds:
   - (a) sender and target are both executives (unchanged);
   - (b) **escalate up:** the sender's `reports_to` is `to@dstProject` and the target is an executive in `dstProject`;
-  - (c) **reply down:** `reply_to` is a `cross_project` message delivered to the target, whose `source_agent` is the target and whose `source_project` is `dstProject`. This grant is scoped to the thread.
+  - (c) **reply down:** `reply_to` is a `cross_project` message that the target sent to the sender. Its `source_agent` is the target and its `source_project` is `dstProject`. This grant is scoped to the thread.
 - Every cross-project send writes an `xproject.send {arm: exec|escalate|reply}` audit entry.
 - A refusal returns a typed `FORBIDDEN` with the hint `set reports_to=<to>@<dstProject> (target must be executive) or relay via <your exec>`.
 - What this does not do: it does not open non-executive → non-executive channels, it does not create a cross-project team, and it does not make cross-project notify channels. An escalation always lands on an executive.
-- niwa sets the qualified `reports_to` from team config. In synergix that means prod leads report to `cto@synergix-dev`, or to `cto-synergix`, whichever the founder rules.
+- niwa sets the qualified `reports_to` from team config. That is a separate niwa ticket.
+
+### Rule (as built, S3; founder Q4 2026-10-01)
+
+Synergix prod leads escalate **directly** to `cto@synergix-dev`. The `cto-synergix` relay hop is no longer required, and it keeps working (arm (a)).
+
+```
+register_agent(project:"synergix", name:"ai-lead", reports_to:"cto@synergix-dev")
+send_message(project:"synergix", as:"ai-lead", target_project:"synergix-dev", to:"cto", ...)   # arm escalate
+send_message(project:"synergix-dev", as:"cto", target_project:"synergix", to:"ai-lead",
+             reply_to:<that message id>, ...)                                                   # arm reply
+```
+
+- **Validation:** `register_agent` checks a qualified `reports_to` before any write and stores it normalized (`CTO@Synergix_Dev` becomes `cto@synergix-dev`). It is refused when:
+  - a side is empty;
+  - the project is unknown;
+  - the project is the agent's own (use the plain name there).
+- **Refusal:** `FORBIDDEN` (permission, not retryable). `hint` names `reports_to=<to>@<project>`, or says the target is not an executive.
+- **Audit:** `xproject.send {arm, to, to_project, message_id}` is recorded in the sender's project, once per send. Cross-project DMs are rare, so this is not a hot path.
+- **Local reads of `reports_to`:**
+  - A qualified value never matches a local name. `CanMessage`, the task chain walk, and the org tree all treat it as "no local manager".
+  - The notifier's `manager` target falls back to the dispatcher instead of resolving it.
 
 ## 4. Slices
 
