@@ -2,6 +2,7 @@ package relay
 
 import (
 	"encoding/json"
+	"time"
 	"unicode/utf8"
 
 	"agent-relay/internal/db"
@@ -232,6 +233,17 @@ type MessageSummary struct {
 	TaskID         *string `json:"task_id,omitempty"`
 	ConversationID *string `json:"conversation_id,omitempty"`
 	ContentPreview string  `json:"content_preview,omitempty"`
+	SentAt         string  `json:"sent_at,omitempty"` // server time, RFC3339 UTC (W12)
+}
+
+// sentAt renders a stored message timestamp as RFC3339 UTC (seconds), the one
+// time an agent should quote (W12); an unparsable value passes through as is.
+func sentAt(createdAt string) string {
+	t, err := time.Parse(time.RFC3339Nano, createdAt)
+	if err != nil {
+		return createdAt
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 // summarizeMessage converts a Message into a MessageSummary with a bounded
@@ -239,6 +251,7 @@ type MessageSummary struct {
 func summarizeMessage(m models.Message) MessageSummary {
 	s := MessageSummary{
 		ID:             m.ID,
+		SentAt:         sentAt(m.CreatedAt),
 		From:           m.From,
 		Subject:        m.Subject,
 		Type:           m.Type,

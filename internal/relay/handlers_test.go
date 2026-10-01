@@ -1937,8 +1937,10 @@ func TestSessionContextByteTargets_R2(t *testing.T) {
 		t.Fatalf("marshal full: %v", err)
 	}
 	t.Logf("R2 full boot payload: %d bytes (R1 was 7477)", len(fb))
-	if len(fb) > 6800 {
-		t.Errorf("full boot payload %d B exceeds R2 target 6800 B", len(fb))
+	// Targets carry the W12 sent_at cost: +33 B per unread preview (RFC3339 UTC,
+	// task 4a4a9913, wraith-cto-2 ruling 2026-10-01): 6800→7100, 2700→3000.
+	if len(fb) > 7100 {
+		t.Errorf("full boot payload %d B exceeds R2 target 7100 B", len(fb))
 	}
 
 	minimal := h.buildSessionContext(project, agent, profile, true)
@@ -1947,8 +1949,8 @@ func TestSessionContextByteTargets_R2(t *testing.T) {
 		t.Fatalf("marshal minimal: %v", err)
 	}
 	t.Logf("R2 minimal boot payload: %d bytes (R1 was 3365)", len(mb))
-	if len(mb) > 2700 {
-		t.Errorf("minimal boot payload %d B exceeds R2 target 2700 B", len(mb))
+	if len(mb) > 3000 {
+		t.Errorf("minimal boot payload %d B exceeds R2 target 3000 B", len(mb))
 	}
 }
 

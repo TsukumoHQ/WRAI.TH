@@ -516,6 +516,7 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 			"subject":    m.Subject,
 			"content":    content,
 			"created_at": m.CreatedAt,
+			"sent_at":    sentAt(m.CreatedAt),
 			"priority":   m.Priority,
 		}
 		if m.ReplyTo != nil {
@@ -562,10 +563,10 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 			}
 			rows[i] = []string{
 				m.ID, strOrDash(m.DeliveryID), m.From, m.To, m.Type,
-				m.Priority, thread, m.CreatedAt, m.Subject, content,
+				m.Priority, thread, m.CreatedAt, sentAt(m.CreatedAt), m.Subject, content,
 			}
 		}
-		table := renderTable([]string{"id", "delivery_id", "from", "to", "type", "priority", "thread", "created_at", "subject", "content"}, rows)
+		table := renderTable([]string{"id", "delivery_id", "from", "to", "type", "priority", "thread", "created_at", "sent_at", "subject", "content"}, rows)
 		return h.resultTextTracked(project, agent, "get_inbox", fmt.Sprintf("%d messages for %s\n%s", len(messages), agent, table))
 	}
 
