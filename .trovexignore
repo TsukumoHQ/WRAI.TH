@@ -21,3 +21,6 @@ docs/typed-tickets.md
 # Per-task decision note the review gate (qa-submit) reads from the worktree
 # root and the scribe folds into the feature-doc — must stay a real file on disk.
 .niwa-decision.md
+# Design specs ruled through the review gate (docs/design/park.md, deploying-status.md,
+# identity-routing.md): ship on the branch next to the code they specify.
+docs/design/**
