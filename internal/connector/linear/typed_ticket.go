@@ -55,6 +55,11 @@ func splitSections(description string) map[string]string {
 			cur = canonSection(title)
 			continue
 		}
+		if key, ok := boldSection(line); ok {
+			flush()
+			cur = key
+			continue
+		}
 		if cur != "" {
 			body = append(body, line)
 		}
@@ -77,17 +82,37 @@ func headerTitle(line string) (string, bool) {
 	return strings.TrimSpace(s), true
 }
 
+// boldSection reads a bold-only label line ("**Acceptance criteria**",
+// "**AC:**") as a section header, but only when it names a typed-ticket
+// section, so bold prose inside a body never splits it.
+func boldSection(line string) (string, bool) {
+	s := strings.TrimSpace(line)
+	for _, m := range []string{"**", "__"} {
+		if len(s) > 2*len(m) && strings.HasPrefix(s, m) && strings.HasSuffix(s, m) {
+			switch key := canonSection(s[len(m) : len(s)-len(m)]); key {
+			case "goal", "acceptance criteria", "dod":
+				return key, true
+			}
+		}
+	}
+	return "", false
+}
+
 // canonSection folds a header title to a canonical section key (lowercased).
+// A trailing colon is ignored ("Acceptance Criteria:" = "Acceptance Criteria").
 func canonSection(title string) string {
-	switch strings.ToLower(strings.TrimSpace(title)) {
+	t := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(title), ":")))
+	t = strings.ReplaceAll(t, "’", "'")
+	switch t {
 	case "goal":
 		return "goal"
-	case "acceptance criteria", "acceptance criterion", "acceptance":
+	case "acceptance criteria", "acceptance criterion", "acceptance", "ac",
+		"critères d'acceptation", "criteres d'acceptation":
 		return "acceptance criteria"
 	case "dod", "definition of done":
 		return "dod"
 	default:
-		return strings.ToLower(strings.TrimSpace(title))
+		return t
 	}
 }
 
@@ -105,11 +130,22 @@ func bulletItems(body string) []string {
 		if !ok {
 			continue
 		}
-		if item = strings.TrimSpace(item); item != "" {
+		if item = stripCheckbox(strings.TrimSpace(item)); item != "" {
 			items = append(items, item)
 		}
 	}
 	return items
+}
+
+// stripCheckbox drops a task-list marker ("[ ] x", "[x] x"), so an unticked
+// empty checkbox is not counted as an acceptance item.
+func stripCheckbox(s string) string {
+	for _, m := range []string{"[ ]", "[x]", "[X]"} {
+		if strings.HasPrefix(s, m) {
+			return strings.TrimSpace(s[len(m):])
+		}
+	}
+	return s
 }
 
 func stripBullet(s string) (string, bool) {

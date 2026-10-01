@@ -238,3 +238,107 @@ func TestIngest_TypedTicket_FlagOff_Unchanged(t *testing.T) {
 		t.Errorf("no-ticket mirror should default acceptance_criteria to '[]', got %q", task.AcceptanceCriteria)
 	}
 }
+
+// W4: AC lands on the mirror whatever heading style the author used.
+func TestParseTicket_ACHeadingVariants(t *testing.T) {
+	for _, h := range []string{
+		"## Acceptance criteria:",
+		"### AC",
+		"## AC",
+		"**Acceptance criteria**",
+		"**AC:**",
+		"## Critères d'acceptation",
+		"## Critères d’acceptation :",
+	} {
+		t.Run(h, func(t *testing.T) {
+			tk := parseTicket("## Goal\ng\n\n" + h + "\n- [ ] first item\n- second item\n\n## DoD\nd")
+			if len(tk.missing) != 0 {
+				t.Errorf("missing = %v, want none", tk.missing)
+			}
+			if len(tk.acceptance) != 2 || tk.acceptance[0] != "first item" || tk.acceptance[1] != "second item" {
+				t.Errorf("acceptance = %q, want [first item, second item]", tk.acceptance)
+			}
+		})
+	}
+}
+
+// W4: an AC heading with zero items is refused by the typed-ticket guard with
+// missing=[acceptance_criteria] — an unticked empty checkbox is not an item.
+func TestIngest_TypedTicket_ZeroACItemsRefused(t *testing.T) {
+	for name, body := range map[string]string{"no bullets": "prose only", "empty checkboxes": "- [ ]\n- [x]"} {
+		t.Run(name, func(t *testing.T) {
+			database := newTestDB(t)
+			c := newTestConn(t, database)
+			database.EnsureProject(c.project)
+			if err := database.SetProjectRequiresTypedTicket(c.project, true); err != nil {
+				t.Fatal(err)
+			}
+			cr := &commentRecorder{}
+			srv := cr.server(t)
+			defer srv.Close()
+			c.gql.url = srv.URL
+
+			desc := "## Goal\ng\n\n## Acceptance criteria\n" + body + "\n\n## DoD\nd"
+			if missing := parseTicket(desc).missing; len(missing) != 1 || missing[0] != "acceptance_criteria" {
+				t.Fatalf("missing = %v, want [acceptance_criteria]", missing)
+			}
+			iss := baseIssue()
+			iss["state"] = map[string]any{"id": "st-todo", "name": "Todo", "type": "unstarted"}
+			iss["description"] = desc
+			b := issueFixture("create", time.Now().UnixMilli(), "human-1", iss, nil)
+			evts, err := c.Ingest(b, sign(testSecret, b))
+			if err != nil {
+				t.Fatal(err)
+			}
+			row, _ := database.GetTaskByLinearIssueID(c.project, "issue-uuid-1")
+			if row == nil || row.Status != linearRefusedStatus || dispatchCount(evts) != 0 || cr.count() != 1 {
+				t.Fatalf("want refused row, 1 comment, 0 dispatch; got row=%+v comments=%d dispatch=%d", row, cr.count(), dispatchCount(evts))
+			}
+		})
+	}
+}
+
+// W4: the path that counted '[]' as filled. A mirror already in flight is
+// never retro-refused (handleTypedTicket proceedNormal), and the webhook
+// dispatch gate (shouldDispatch) did not re-check the ticket the way the
+// reconcile gate does — so a blocked mirror whose description lost its AC
+// dispatched an agent on acceptance_criteria '[]' when the issue went back to
+// In Progress.
+func TestIngest_TypedTicket_InFlightMirrorWithEmptyACNotDispatched(t *testing.T) {
+	database := newTestDB(t)
+	c := newTestConn(t, database)
+	database.EnsureProject(c.project)
+	if err := database.SetProjectRequiresTypedTicket(c.project, true); err != nil {
+		t.Fatal(err)
+	}
+	cr := &commentRecorder{}
+	srv := cr.server(t)
+	defer srv.Close()
+	c.gql.url = srv.URL
+
+	iss := baseIssue()
+	iss["state"] = map[string]any{"id": "st-todo", "name": "Todo", "type": "unstarted"}
+	iss["description"] = conformingDesc()
+	b := issueFixture("create", time.Now().UnixMilli(), "human-1", iss, nil)
+	if _, err := c.Ingest(b, sign(testSecret, b)); err != nil {
+		t.Fatal(err)
+	}
+	row, _ := database.GetTaskByLinearIssueID(c.project, "issue-uuid-1")
+	if _, err := database.ClaimTask(row.ID, "lead", c.project); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.BlockTask(row.ID, "lead", c.project, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	iss["state"] = map[string]any{"id": "st-prog", "name": "In Progress", "type": "started"}
+	iss["description"] = "## Goal\ng\n\n## Acceptance criteria:\n\n## DoD\nd"
+	b = issueFixture("update", time.Now().UnixMilli(), "human-1", iss, map[string]any{"stateId": "st-todo"})
+	evts, err := c.Ingest(b, sign(testSecret, b))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := dispatchCount(evts); n != 0 {
+		t.Errorf("in-flight mirror with AC '[]' dispatched %d time(s), want 0", n)
+	}
+}

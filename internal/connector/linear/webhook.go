@@ -219,7 +219,11 @@ func (c *Connector) Ingest(payload []byte, sig string) ([]connector.TaskEvent, e
 		// target project needs its own registered agent to see/claim its own copy
 		// of the task. Dedupe on updatedFrom: only emit when the state actually
 		// changed in this update.
-		if c.shouldDispatch(env, iss) {
+		// Typed-ticket gate, symmetric with the reconcile poll: a mirror already
+		// in flight is never retro-refused above, so without this a ticket whose
+		// AC parsed to '[]' still launched an agent (W4).
+		if c.shouldDispatch(env, iss) &&
+			(!c.db.ProjectRequiresTypedTicket(seed.Project) || len(parseTicket(iss.Description).missing) == 0) {
 			events = append(events, c.dispatchEvent(taskID, iss.Title, c.dispatchTarget(iss), seed))
 		}
 	}
