@@ -4,7 +4,7 @@
 ## Branch : wraith/b62b3966-escalation-chain (from main)
 ## Relay task : b62b3966-7d67-40fa-9ad1-9375ad7ac74c
 ## Trace : trace=255eaeced52cae57e2f80646478eb60a
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -42,17 +42,24 @@ FAIL
 ## 3. Files changed
 
 ```
-internal/relay/cleanup.go                       |  49 +++++++++++-
- internal/relay/obligations_answer_chain_test.go | 102 ++++++++++++++++++++++++
- 2 files changed, 150 insertions(+), 1 deletion(-)
+...e-from-a-to-b-escalates-to-a-itself-as-b-s-l.md |  58 ++++++++++++
+ internal/relay/cleanup.go                          |  49 +++++++++-
+ internal/relay/obligations_answer_chain_test.go    | 102 +++++++++++++++++++++
+ 3 files changed, 208 insertions(+), 1 deletion(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ❌ REJECTED by review-b62b3966-7d67-40fa-9ad1-9375ad7ac74c
+- 🟢 AC1: AC1 behavior (escalation lands on F when chain is A->B->F) is verified end-to-end: the obligation breaches and opens answer.role on boss. The test is a regression guard; it does not pin the original bug but it does assert AC1's spec. — evidence: internal/relay/obligations_answer_chain_test.go:46-56: dev reports_to mid, mid reports_to boss; after 61min sweep, roleBearer returns bearer='boss', norm='answer.role'. Test PASS with fix; also PASSES with old resolveAckRung2 (1-hop already returned boss). — test: TestAnswerEscalationClimbsRecipientChain internal/relay/obligations_answer_chain_test.go:46
+- 🟢 AC2: Two sub-cases both pin the asker-skipping behavior. Pinning verified by reversion: 2/2 fail under old resolver. assertNoMessageTo also confirms no relay message was sent to the asker. — evidence: internal/relay/obligations_answer_chain_test.go:59-84: subtest 1 sets cto.ReportsTo='founder' and asker=niwa2 (active executive), expects escalation to user/answer.human; subtest 2 sets dev.ReportsTo=lead (asker) and expects escalation to boss, skipping lead. With fix reverted to resolveAckRung2, both subtests FAIL (escalated to niwa2 / lead respectively). — test: TestAnswerEscalationSkipsSender internal/relay/obligations_answer_chain_test.go:59
+- 🟢 AC3: Inactive agent whose reports_to points at the asker does not make the asker the recipient's lead. Pinning verified: this test FAILS with the old resolveAckRung2 (returns niwa2), PASSES with the new resolveAnswerRung (returns user). assertNoMessageTo for both niwa1 and niwa2 confirms no spurious relay traffic. — evidence: internal/relay/obligations_answer_chain_test.go:91-101: niwa1 has reports_to=niwa2 (the asker) and status='inactive'. The walk must skip the inactive niwa1 and not bounce escalation back to niwa2. With fix reverted, escalation lands on niwa2 (the asker) via the executive-fallback; with the fix, lands on user/answer.human. — test: TestAnswerEscalationInactiveReportOfSender internal/relay/obligations_answer_chain_test.go:91
+- 🔴 AC4: AC4 explicitly requires 'root cause named file:line in the PR body'. The doer's commit body is empty; the code comment identifies the function name but not a file:line. The gate's scribe added the file:line retroactively. The doer did not satisfy this AC. — evidence: git show 78011a0 --format=%B prints only the subject; the commit body is empty. The fix commit's PR body (commit body) does not name a root cause file:line. The code comment in cleanup.go:635-641 names the function resolveAckRung2 and the bug, but no specific file:line. The scribe provenance doc d285e31 (gate-authored, post-submission) does include ROOT_CAUSE: internal/relay/cleanup.go:651 — but the doer did not author that. — test: NONE — AC4 is a docs/PR-body requirement, not behavior
+- 🟢 AC5: Machine verify matches AC5; no regression in the surrounding escalation/ack machinery. — evidence: go test -tags fts5 ./internal/... exit 0, all packages OK (cli, config, connector/linear, db, ingest, normalize, relay). Verified directly: full suite green; 5 TestAnswer* pass; prior TestAnswerBreachOpensRoleChildOnce, TestAnswerHumanOnlyAtMaxDepth, TestAnswerRoleChildFulfilledAckUntouched, TestAnswerObligationAskFulfilledByReply, TestAnswerObligationDecideDeclineAndTombstone, TestAnswerObligationNoneForNonAskAndBroadcast still pass — no regression in the ACK ladder or answer obligation engine. — test: go test -tags fts5 ./internal/... (full suite)
 
 ## 5. Timeline
 
+- round 1 → **reject** (review-b62b3966-7d67-40fa-9ad1-9375ad7ac74c)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `b62b3966-7d67-40fa-9ad1-9375ad7ac74c`._
