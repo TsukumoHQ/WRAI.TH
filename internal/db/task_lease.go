@@ -91,7 +91,7 @@ func (d *DB) agentLive(project, name string) bool {
 // fencedStatus reports whether a transition into status publishes the worker's
 // outcome and is therefore fenced to the lease holder (S3 0b980988).
 func fencedStatus(status string) bool {
-	return status == "done" || status == "blocked" || status == "in-review"
+	return status == "done" || status == "blocked" || status == "in-review" || status == "deploying"
 }
 
 // isOverrideActor reports whether caller may act on a task it does not hold:

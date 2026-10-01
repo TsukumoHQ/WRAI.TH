@@ -1137,6 +1137,8 @@ func migrate(conn *sql.DB) error {
 	migrateOrgEdges(conn)
 	// Parked tasks + founder gates (task d43d844e), on top of task_holds.
 	migrateParking(conn)
+	// 'deploying' merge sha per task (W8 D1).
+	migrateDeploying(conn)
 	// Tasks that drifted to the delegating service before N3 (03958111).
 	repairDelegateHeldTasks(conn)
 	// Busy-lane ACK digests (ruling wraith-park-ruling P6).

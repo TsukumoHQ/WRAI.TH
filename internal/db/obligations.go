@@ -124,7 +124,7 @@ const ackQueued = `t.status = 'pending' AND t.archived_at IS NULL AND ` + ackClo
 	AND NOT EXISTS (SELECT 1 FROM task_holds ph WHERE ph.task_id = t.id AND ph.released_at IS NULL AND ph.reason = '` + HoldReasonParked + `')
 	AND LOWER(COALESCE(t.profile_slug, '')) NOT IN ('human', 'user')
 	AND NOT EXISTS (SELECT 1 ` + ackBlockingEdges + ` AND (re.valid_until IS NULL OR re.valid_until > ?)
-		AND NOT (rp.status = 'done' OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))`
+		AND NOT (rp.status = 'done' OR (rp.status IN ('in-review', 'deploying') AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))`
 
 // ackCandidate is ackQueued on a lane that will pick work up: never behind
 // busy live agents (ackLaneBusy). Args: cutoff, now, cutoff.

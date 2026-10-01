@@ -345,7 +345,7 @@ func readyPredicate(alias, now string) (string, []any) {
 		  AND re.type IN (SELECT type FROM edge_semantics WHERE blocks_readiness = 1)
 		  AND (re.valid_until IS NULL OR re.valid_until > ?)
 		  AND NOT (rp.status = 'done'
-		           OR (rp.status = 'in-review' AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))
+		           OR (rp.status IN ('in-review', 'deploying') AND COALESCE(json_extract(re.metadata, '$.until'), 'done') = 'in-review')))
 	  AND NOT EXISTS (SELECT 1 FROM task_holds ph WHERE ph.task_id = %[1]s.id AND ph.released_at IS NULL AND ph.park_until = '`+ParkUntilFounder+`')`, alias), []any{now}
 }
 
@@ -726,7 +726,7 @@ func (d *DB) TaskReadiness(project, taskID string) (bool, []models.EdgeRef, erro
 		WHERE e.src_kind = 'task' AND e.src_id = ? AND e.dst_kind = 'task' AND e.removed_at IS NULL
 		  AND e.type IN (SELECT type FROM edge_semantics WHERE blocks_readiness = 1)
 		  AND (e.valid_until IS NULL OR e.valid_until > ?)
-		  AND NOT (p.status = 'done' OR (p.status = 'in-review' AND COALESCE(json_extract(e.metadata, '$.until'), 'done') = 'in-review'))
+		  AND NOT (p.status = 'done' OR (p.status IN ('in-review', 'deploying') AND COALESCE(json_extract(e.metadata, '$.until'), 'done') = 'in-review'))
 		ORDER BY e.dst_id`, taskID, now)
 	if err != nil {
 		return false, nil, err

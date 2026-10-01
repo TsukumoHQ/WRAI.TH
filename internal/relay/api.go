@@ -1702,6 +1702,8 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		Result  *string `json:"result,omitempty"`
 		Reason  *string `json:"reason,omitempty"`
 		Force   bool    `json:"force,omitempty"`
+		// MergeSHA is required for status=deploying (W8 D1).
+		MergeSHA string `json:"merge_sha,omitempty"`
 	}
 	if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid json"}`, http.StatusBadRequest)
@@ -1753,6 +1755,8 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		task, err = r.DB.StartTask(taskID, body.Agent, body.Project)
 	case "in-review":
 		task, err = r.DB.ReviewTask(taskID, body.Agent, body.Project)
+	case "deploying":
+		task, err = r.DB.DeployTask(taskID, body.Agent, body.Project, body.MergeSHA)
 	case "done":
 		task, err = r.DB.CompleteTask(taskID, body.Agent, body.Project, body.Result)
 	case "blocked":

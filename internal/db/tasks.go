@@ -65,10 +65,15 @@ var validTransitions = map[string][]string{
 	"pending":     {"accepted", "in-progress", "done", "cancelled", "backlog"},
 	"accepted":    {"in-progress", "done", "blocked", "cancelled"},
 	"in-progress": {"in-review", "done", "blocked", "cancelled"},
-	"in-review":   {"in-progress", "done", "blocked", "cancelled"},
-	"blocked":     {"in-progress", "in-review", "done", "cancelled"},
-	"done":        {"cancelled"},
-	"cancelled":   {},
+	"in-review":   {"in-progress", "done", "blocked", "cancelled", "deploying"},
+	// deploying = merged in a pipeline repo, the post-merge pipeline deploys and
+	// verifies it (W8, ruling wraith-deploying-ruling): done on verify, blocked
+	// on a failed deploy/verify, back to in-review on a reverted merge. Out of
+	// blocked only via DeployTask with the same merge sha.
+	"deploying": {"done", "blocked", "cancelled", "in-review"},
+	"blocked":   {"in-progress", "in-review", "done", "cancelled", "deploying"},
+	"done":      {"cancelled"},
+	"cancelled": {},
 }
 
 const taskColumns = "id, profile_slug, assigned_to, dispatched_by, title, description, priority, status, result, blocked_reason, project, dispatched_at, accepted_at, started_at, completed_at, parent_task_id, ack_notified_at, ack_escalated_at, board_id, archived_at, " +
@@ -944,7 +949,8 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 	// the caller only when the task has none yet (a start straight from
 	// pending is its claim).
 	worker := agentName
-	if newStatus == "in-progress" || newStatus == "in-review" {
+	keepsDoer := newStatus == "in-progress" || newStatus == "in-review" || newStatus == "deploying"
+	if keepsDoer {
 		for _, doer := range []string{priorHolder, strVal(task.AssignedTo), strVal(task.ClaimedBy)} {
 			if doer != "" && !IsDelegatingService(doer) {
 				worker = doer
@@ -954,7 +960,7 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 	}
 	// The delegating service (niwa) only ever acts FOR a doer (N3, 03958111):
 	// with no doer on record it is refused rather than handed the task.
-	if (newStatus == "in-progress" || newStatus == "in-review") && IsDelegatingService(worker) {
+	if keepsDoer && IsDelegatingService(worker) {
 		return nil, newTaskError(CodeTaskLeaseFenced,
 			"task %s has no doer for %q to act for (no lease holder, assignee or claimer); a doer must claim it first", taskID, agentName)
 	}
@@ -968,7 +974,7 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 	// Typed edges (design d523e74e): a prerequisite entering or leaving
 	// in-review / done / cancelled can change its held dependents' readiness;
 	// they are settled in the same tx as this CAS (bounded to settleLimit).
-	satisfying := func(s string) bool { return s == "in-review" || s == "done" || s == "cancelled" }
+	satisfying := func(s string) bool { return s == "in-review" || s == "deploying" || s == "done" || s == "cancelled" }
 	needSettle := (satisfying(newStatus) || satisfying(oldStatus)) && d.hasBlockingDependentsRO(taskID)
 	exec := d.writerExec
 	var tx *writerTx
@@ -1069,6 +1075,21 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 				newStatus, worker, now, taskID, project, oldStatus,
 			)
 		}
+	case "deploying":
+		// deploying keeps assigned_to and the lease with the doer (N3); a
+		// retried deploy out of blocked closes the open blocked window.
+		if leavingBlocked {
+			task.BlockedPeriods = closeBlockedPeriod(task.BlockedPeriods, now)
+			res, err = exec(
+				"UPDATE tasks SET status = ?, blocked_periods = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, task.BlockedPeriods, taskID, project, oldStatus,
+			)
+		} else {
+			res, err = exec(
+				"UPDATE tasks SET status = ? WHERE id = ? AND project = ? AND status = ?",
+				newStatus, taskID, project, oldStatus,
+			)
+		}
 	case "done":
 		// done → done_at (alias of completed_at, stamped together)
 		task.CompletedAt = &now
@@ -1156,7 +1177,7 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 
 // applyLeaseOnTransition maintains the task lease as a side effect of a status
 // transition, mutating the in-memory task and its row in lockstep:
-//   - accepted/in-progress/in-review by the working agent → hold + push expiry
+//   - accepted/in-progress/in-review/deploying by the working agent → hold + push expiry
 //     (implicit heartbeat: any forward transition by the holder extends it);
 //   - done/blocked/cancelled/pending → RELEASE (clear holder + expiry). If a
 //     holder existed, stamp task.LeaseTransfer{from,to:"",reason:voluntary} so
@@ -1169,7 +1190,7 @@ func (d *DB) transitionTaskCode(taskID, agentName, project, newStatus string, re
 // still bounds a stale holder.
 func (d *DB) applyLeaseOnTransition(task *models.Task, newStatus, agentName, worker, priorHolder, now string) {
 	switch newStatus {
-	case "accepted", "in-progress", "in-review":
+	case "accepted", "in-progress", "in-review", "deploying":
 		expires := time.Now().UTC().Add(DefaultLeaseTTL).Format(memoryTimeFmt)
 		if _, err := d.writerExec(
 			"UPDATE tasks SET lease_holder = ?, lease_expires_at = ?, lease_heartbeat_at = ? WHERE id = ? AND project = ?",
