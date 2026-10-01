@@ -52,6 +52,10 @@ The authenticated principal is the `(project, name)` that owns a valid `X-Agent-
   - S5 go/no-go is a one-liner over the relay log: `grep -o 'identity.unverified project=[^ ]* as=[^ ]* reason=tokenless count=[0-9]*' relay.log | awk '{split($5,c,"=");s[$2" "$3]+=c[2]} END{for(k in s) print s[k],k}' | sort -rn`. Empty output means go.
 - **Human/user exemption:** applies to `as` = `human`/`user` from a loopback TCP peer, checked on the real `RemoteAddr`, never on `X-Forwarded-For`. It is aggregated into `identity.exempt` audit rows in `warn` and `enforce`.
 - **stdio transport:** it carries no header, so it has no principal. Under `enforce`, only bootstrap tools work over stdio. That is acceptable because `enforce` is opt-in and S5 only flips the HTTP relay.
+- **REST (S4):** `apiIdentityRefused(claimed, project)` applies the same rule to every REST write that names an actor:
+  - routes covered: `/api/messages`, notifications emit, task transition, task archive, memory POST, and `/api/user-response` (acts as `human`);
+  - the audit tool label is `rest:<METHOD> <path>`;
+  - a tokenless write in `enforce` returns 401 `AGENT_TOKEN_REQUIRED`.
 
 ## 2. W2: homonyms across projects
 

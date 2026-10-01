@@ -61,7 +61,13 @@ func (h *Handlers) guardAgentToken(toolName string, next server.ToolHandlerFunc)
 		project := h.resolveProject(ctx, req)
 		if db.IsDelegatingService(bound) {
 			if claimed != "" && claimed != bound {
-				h.ident.noteAudit("identity.delegated", project, bound, claimed, toolName)
+				// An unresolved project audits under the service's own,
+				// never the retired 'default' fallback of RecordAudit.
+				auditProject := project
+				if auditProject == "" {
+					auditProject = boundProject
+				}
+				h.ident.noteAudit("identity.delegated", auditProject, bound, claimed, toolName)
 			}
 			return next(ctx, req)
 		}
@@ -106,25 +112,67 @@ func (h *Handlers) registerToken(ctx context.Context, req mcp.CallToolRequest, p
 	}
 }
 
-// apiIdentityRefused binds a REST actor field (from / agent / as) to the
-// request's X-Agent-Token. It writes the refusal and returns true when the
-// token is unknown (401) or belongs to another agent (403); no token → false.
-func (r *Relay) apiIdentityRefused(w http.ResponseWriter, req *http.Request, claimed string) bool {
+// apiIdentityRefused applies the MCP identity rule (guardAgentToken +
+// guardTokenless, identity_mode.go) to a REST write whose actor is `claimed`
+// in `project` (W1 S4): a token acts only as its (project, name) principal or,
+// for a delegating service, on behalf of anyone (audited); a tokenless write
+// follows RELAY_IDENTITY_MODE, the console human/user exempt on a loopback TCP
+// peer only (audited). It writes the refusal and returns true when refused.
+func (r *Relay) apiIdentityRefused(w http.ResponseWriter, req *http.Request, claimed, project string) bool {
+	claimed = strings.ToLower(strings.TrimSpace(claimed))
+	project = NormalizeProject(project)
+	if project == "default" {
+		project = ""
+	}
+	tool := "rest:" + req.Method + " " + req.URL.Path
+	var ident *identityLedger
+	if r.Handlers != nil {
+		ident = &r.Handlers.ident
+	}
 	tok := strings.TrimSpace(req.Header.Get(AgentTokenHeader))
 	if tok == "" {
+		mode := IdentityMode()
+		switch {
+		case mode == IdentityModeOff:
+			return false
+		case isOperator(claimed) && isLoopbackRemote(req.RemoteAddr):
+			ident.noteAudit("identity.exempt", project, claimed, claimed, tool)
+			return false
+		case mode == IdentityModeEnforce:
+			return apiIdentityRefusal(w, http.StatusUnauthorized, CodeAgentTokenRequired,
+				fmt.Sprintf("RELAY_IDENTITY_MODE=enforce: this write needs an X-Agent-Token header (the token register_agent returned for %q)", claimed))
+		}
+		ident.noteUnverified(project, claimed, "tokenless")
 		return false
 	}
-	_, bound, ok := r.DB.AgentByToken(tok)
-	status, code, msg := 0, "", ""
+	boundProject, bound, ok := r.DB.AgentByToken(tok)
 	switch {
 	case !ok:
-		status, code, msg = http.StatusUnauthorized, CodeAgentTokenInvalid, "X-Agent-Token matches no agent"
-	case strings.ToLower(strings.TrimSpace(claimed)) != bound:
-		status, code, msg = http.StatusForbidden, CodeAgentIdentityMismatch,
-			fmt.Sprintf("this request's X-Agent-Token belongs to %q and cannot act as %q", bound, claimed)
-	default:
+		return apiIdentityRefusal(w, http.StatusUnauthorized, CodeAgentTokenInvalid, "X-Agent-Token matches no agent")
+	case db.IsDelegatingService(bound):
+		if claimed != bound {
+			if project == "" {
+				project = boundProject
+			}
+			ident.noteAudit("identity.delegated", project, bound, claimed, tool)
+		}
 		return false
+	case claimed != bound:
+		return apiIdentityRefusal(w, http.StatusForbidden, CodeAgentIdentityMismatch,
+			fmt.Sprintf("this request's X-Agent-Token belongs to %q and cannot act as %q", bound, claimed))
+	case project != "" && project != boundProject:
+		switch IdentityMode() {
+		case IdentityModeEnforce:
+			return apiIdentityRefusal(w, http.StatusForbidden, CodeAgentIdentityMismatch,
+				fmt.Sprintf("this request's X-Agent-Token belongs to %q in project %q and cannot act in project %q", bound, boundProject, project))
+		case IdentityModeWarn:
+			ident.noteUnverified(project, bound, "project_mismatch")
+		}
 	}
+	return false
+}
+
+func apiIdentityRefusal(w http.ResponseWriter, status int, code, msg string) bool {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	b, _ := json.Marshal(map[string]string{"error": msg, "code": code})

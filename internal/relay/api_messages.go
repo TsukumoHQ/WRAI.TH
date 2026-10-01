@@ -180,7 +180,7 @@ func (r *Relay) apiPostMessage(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, `{"error":"from, to, and content are required"}`, http.StatusBadRequest)
 		return
 	}
-	if r.apiIdentityRefused(w, req, from) {
+	if r.apiIdentityRefused(w, req, from, project) {
 		return
 	}
 	msgType := body.Type

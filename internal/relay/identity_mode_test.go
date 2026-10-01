@@ -224,7 +224,7 @@ func TestIdentityWarnAggregatesPerProjectAs(t *testing.T) {
 	buf.Reset()
 	guarded(t, h, ctx, "get_inbox", map[string]any{"project": "p1", "as": "x count=0\nidentity.unverified project=p1 as=y"})
 	h.flushIdentity()
-	if n := strings.Count(strings.TrimSpace(buf.String()), "\n"); n != 0 || !strings.Contains(buf.String(), "as=x_count_0_identity.unverified_project_p1_as_y reason=tokenless count=1") {
+	if n := strings.Count(strings.TrimSpace(buf.String()), "\n"); n != 0 || !strings.Contains(buf.String(), "as=x_count_0\\nidentity.unverified_project_p1_as_y reason=tokenless count=1") {
 		t.Fatalf("crafted as must log as one sanitized token, got:\n%s", buf.String())
 	}
 

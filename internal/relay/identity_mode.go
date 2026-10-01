@@ -7,9 +7,11 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"agent-relay/internal/models"
 
@@ -106,6 +108,9 @@ type unverifiedKey struct{ project, as, reason string }
 type identityAuditKey struct{ action, project, actor, onBehalfOf, tool string }
 
 func (l *identityLedger) noteUnverified(project, as, reason string) {
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.unverified == nil {
@@ -115,6 +120,9 @@ func (l *identityLedger) noteUnverified(project, as, reason string) {
 }
 
 func (l *identityLedger) noteAudit(action, project, actor, onBehalfOf, tool string) {
+	if l == nil {
+		return
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.audits == nil {
@@ -131,19 +139,28 @@ func (l *identityLedger) drain() (map[unverifiedKey]int, map[identityAuditKey]in
 	return u, a
 }
 
-// logField keeps a caller-supplied value one ASCII token in the log line:
-// whitespace, control characters and '=' become '_', so a crafted `as` cannot
-// forge or split an identity.unverified line the S5 grep counts.
+// logField keeps a caller-supplied value one token in the log line, so a
+// crafted `as` cannot forge or split an identity.unverified line the S5 grep
+// counts: control and other invisible runes are escaped (\n, \u00a0), ' ' and
+// '=' become '_'. Printable UTF-8 stays intact, so "andré" and "andrè" remain
+// distinct and readable.
 func logField(s string) string {
 	if s == "" {
 		return "-"
 	}
-	return strings.Map(func(r rune) rune {
-		if r <= ' ' || r == '=' || r == 0x7f || r > 0x7e {
-			return '_'
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case !unicode.IsPrint(r):
+			q := strconv.QuoteRuneToASCII(r)
+			b.WriteString(q[1 : len(q)-1])
+		case r == ' ' || r == '=':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
 		}
-		return r
-	}, s)
+	}
+	return b.String()
 }
 
 // flushIdentity emits one `identity.unverified` line per (project, as, reason)

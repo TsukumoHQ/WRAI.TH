@@ -1020,6 +1020,10 @@ func (r *Relay) apiPostUserResponse(w http.ResponseWriter, req *http.Request) {
 	if body.Project == "" {
 		body.Project = "default"
 	}
+	// The console operator writes as "human": exempt on loopback only (S4).
+	if r.apiIdentityRefused(w, req, "human", body.Project) {
+		return
+	}
 
 	replyTo := optionalString(body.ReplyTo)
 	replyResolved, errMsg := resolveReplyTo(r.DB, body.Project, "human", replyTo)
@@ -1126,6 +1130,9 @@ func (r *Relay) apiPostMemory(w http.ResponseWriter, req *http.Request) {
 	}
 	if body.AgentName == "" {
 		body.AgentName = "human"
+	}
+	if r.apiIdentityRefused(w, req, body.AgentName, body.Project) {
+		return
 	}
 	if body.Scope == "" {
 		body.Scope = "project"
@@ -1716,7 +1723,7 @@ func (r *Relay) apiTransitionTask(w http.ResponseWriter, req *http.Request, path
 		body.Agent = "user"
 	}
 	// A token-bound caller acts only as itself — never as the "user" default.
-	if r.apiIdentityRefused(w, req, body.Agent) {
+	if r.apiIdentityRefused(w, req, body.Agent, body.Project) {
 		return
 	}
 
@@ -2266,7 +2273,7 @@ func (r *Relay) apiArchiveTaskById(w http.ResponseWriter, req *http.Request, id 
 	if actor == "" {
 		actor = "user"
 	}
-	if r.apiIdentityRefused(w, req, actor) {
+	if r.apiIdentityRefused(w, req, actor, project) {
 		return
 	}
 	ok, err := r.DB.ArchiveTask(project, id, body.Reason, actor)
