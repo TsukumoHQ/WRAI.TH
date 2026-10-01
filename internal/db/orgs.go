@@ -482,7 +482,7 @@ func (d *DB) CanMessage(project, sender, target string) (bool, error) {
 	_ = d.ro().QueryRow(
 		`SELECT COUNT(*) FROM deliveries d
 		 JOIN messages m ON d.message_id = m.id
-		 WHERE d.project = ? AND d.to_agent = ? AND m.from_agent = ?`,
+		 WHERE d.project = ? AND d.to_agent = ? AND m.from_agent = ?`+notCrossProjectMessage,
 		project, sender, target,
 	).Scan(&replyPath)
 	if replyPath > 0 {
@@ -491,6 +491,15 @@ func (d *DB) CanMessage(project, sender, target string) (bool, error) {
 
 	return false, nil
 }
+
+// notCrossProjectMessage excludes, from a reply-path grant, a message that
+// arrived from another project (W2 R3, identity-routing.md §2): its from_agent
+// names an agent of the SOURCE project, so counting it would open a channel to
+// an unrelated same-name agent here. The CASE keeps json_extract off malformed
+// metadata (it would raise and zero the whole COUNT); it runs per joined row
+// after the deliveries index lookup, so the plan is unchanged.
+const notCrossProjectMessage = `
+		   AND (CASE WHEN json_valid(m.metadata) THEN json_extract(m.metadata, '$.cross_project') END) IS NOT 1`
 
 // RecipientIsFleetExpected reports whether `name` is a fleet-known identity that
 // simply hasn't registered YET — as opposed to a genuinely unknown recipient
@@ -517,7 +526,7 @@ func (d *DB) CanReplyTo(project, sender, target string) bool {
 	_ = d.ro().QueryRow(
 		`SELECT COUNT(*) FROM deliveries d
 		 JOIN messages m ON d.message_id = m.id
-		 WHERE d.project = ? AND d.to_agent = ? AND m.from_agent = ?`,
+		 WHERE d.project = ? AND d.to_agent = ? AND m.from_agent = ?`+notCrossProjectMessage,
 		project, sender, target,
 	).Scan(&n)
 	return n > 0

@@ -425,6 +425,9 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		project := h.resolveProject(ctx, req)
 		if project == "" {
+			if res := h.projectAmbiguousError(ctx, req); res != nil {
+				return res, nil
+			}
 			return toolResultError("no project resolved: pass project=<name> (or connect with ?project=<name>) — the 'default' catch-all was removed."), nil
 		}
 		// Archived-project freeze (S3b, DEC-wraith-archive-project-1 §2): refuse
@@ -494,6 +497,28 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 		}
 		return res, err
 	}
+}
+
+// CodeProjectAmbiguous — no project resolved and the caller's name is
+// registered in several projects (W2 R4): which one is meant is the caller's
+// call, never a guess.
+const CodeProjectAmbiguous = "PROJECT_AMBIGUOUS"
+
+// projectAmbiguousError returns PROJECT_AMBIGUOUS with the candidate projects
+// when the unresolved caller's name lives in two or more of them, else nil.
+func (h *Handlers) projectAmbiguousError(ctx context.Context, req mcp.CallToolRequest) *mcp.CallToolResult {
+	agent := strings.ToLower(resolveAgent(ctx, req))
+	if agent == "" {
+		return nil
+	}
+	projects, err := h.db.ProjectsOfAgent(agent)
+	if err != nil || len(projects) < 2 {
+		return nil
+	}
+	sort.Strings(projects)
+	return toolError(CodeProjectAmbiguous, CategoryValidation, false,
+		fmt.Sprintf("%q is registered in projects %s: pass project=<one of them>", agent, strings.Join(projects, ", ")),
+		map[string]any{"agent": agent, "candidates": projects})
 }
 
 // --- Discovery mode (progressive disclosure) ---

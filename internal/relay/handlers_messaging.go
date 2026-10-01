@@ -82,6 +82,17 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 		}
 	}
 
+	// A bare reply to a cross-project message is ambiguous (W2, design
+	// identity-routing.md §2 R2): its author lives in another project, and
+	// resolving the name locally would hand the reply to a same-name agent
+	// here. Refused whatever RELAY_IDENTITY_MODE says; an explicit
+	// target_project (theirs, or this one for the local agent) is the retry.
+	if targetProject == "" {
+		if src := h.crossProjectReplySource(project, to, replyTo); src != "" {
+			return h.recipientAmbiguousError(project, to, src, *replyTo), nil
+		}
+	}
+
 	// Cross-project DM: delivered to a peer executive in a different project.
 	// MVP scope: direct messages only (no broadcast, no team, no conversation).
 	// Both sender and recipient must be registered with is_executive=true.
@@ -997,4 +1008,51 @@ func (h *Handlers) trackAnswerObligations(project, from string, msg *models.Mess
 	if _, err := h.db.OpenAnswerObligations(project, msg.ID, *msg.ActionRequired, recipients, now); err != nil {
 		log.Printf("[obligations] answer open msg=%s: %v", msg.ID, err)
 	}
+}
+
+// CodeRecipientAmbiguous — a recipient name that could mean agents in two
+// projects (a bare reply to a cross-project message). The error names the
+// exact target_project to retry with.
+const CodeRecipientAmbiguous = "RECIPIENT_AMBIGUOUS"
+
+// crossProjectReplySource returns the source project of replyTo when it is a
+// cross-project message stored in project and authored by to, else "".
+func (h *Handlers) crossProjectReplySource(project, to string, replyTo *string) string {
+	if replyTo == nil || to == "" {
+		return ""
+	}
+	parent, err := h.db.GetMessage(*replyTo)
+	if err != nil || parent == nil || parent.Project != project || parent.From != to {
+		return ""
+	}
+	var meta struct {
+		CrossProject  bool   `json:"cross_project"`
+		SourceProject string `json:"source_project"`
+		SourceAgent   string `json:"source_agent"`
+	}
+	if json.Unmarshal([]byte(parent.Metadata), &meta) != nil || !meta.CrossProject {
+		return ""
+	}
+	if meta.SourceAgent != to || meta.SourceProject == "" || meta.SourceProject == project {
+		return ""
+	}
+	return meta.SourceProject
+}
+
+// recipientAmbiguousError lists every agent `to` could mean and the retry.
+func (h *Handlers) recipientAmbiguousError(project, to, src, replyTo string) *mcp.CallToolResult {
+	candidates := []map[string]string{{"name": to, "project": src}}
+	local := ""
+	if a, _ := h.db.GetAgent(project, to); a != nil && a.Status != "deleted" {
+		candidates = append(candidates, map[string]string{"name": to, "project": project})
+		local = fmt.Sprintf(" (or target_project=%s for the local %s)", project, to)
+	}
+	return toolError(CodeRecipientAmbiguous, CategoryValidation, false,
+		fmt.Sprintf("reply_to %s is a cross-project message from %s@%s: retry with target_project=%s%s", replyTo, to, src, src, local),
+		map[string]any{
+			"to":             to,
+			"target_project": src,
+			"hint":           fmt.Sprintf("retry with target_project=%s", src),
+			"candidates":     candidates,
+		})
 }
