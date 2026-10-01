@@ -3,6 +3,100 @@
 All notable changes to wrai.th are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow [Semantic Versioning](https://semver.org/).
 
+## [1.24.0] — 2026-10-01
+
+The relay now knows who is calling.
+- A per-agent token binds a call to its `(project, name)`. Calls without a token are counted, and refused once an operator turns on `RELAY_IDENTITY_MODE=enforce`.
+- Mail between same-name agents in different projects no longer goes to the wrong one.
+- A prod lead can escalate straight to an executive in another project.
+
+Task work gets stricter:
+- An agent holds one active ticket at a time.
+- Only the lease holder can complete, block or submit a task.
+
+Waiting work goes quiet:
+- Parked tasks, tasks behind an unmet prerequisite, and queues behind busy agents no longer page anyone.
+
+The range `v1.23.2..2e5d21d` holds 13 commits.
+
+### Added
+- Per-agent tokens:
+  - `register_agent` mints an `X-Agent-Token` on first registration and returns it once; only its hash is stored (`agents.token_hash`). The token can be rotated.
+  - A request carrying the token acts only as that agent, on every MCP tool and on the REST actor fields (`from`, `agent`, `as`). Another identity returns `AGENT_IDENTITY_MISMATCH` (403); an unknown or rotated token returns `AGENT_TOKEN_INVALID` (401).
+  - `RELAY_TRUST_LOOPBACK=0` refuses tokenless loopback requests. The default is still on.
+
+  (task:05525713, 94cd5ed)
+- `RELAY_IDENTITY_MODE` (`off`, `warn` or `enforce`; default `warn`):
+  - A token now binds its `(project, name)`. Using it under another name is refused in every mode; using it in another project is refused in `enforce` and counted in `warn`.
+  - In `enforce`, a tokenless call is refused with `AGENT_TOKEN_REQUIRED`. Exceptions: `create_project`, `whoami`, `register_agent` minting a first token, and `human`/`user` from a loopback TCP peer (audited as `identity.exempt`).
+  - In `warn`, tokenless calls are counted in memory, with no database write per call. Every 5 minutes the relay logs one line per (project, as, reason): `identity.unverified project=P as=X reason=tokenless|project_mismatch count=N`.
+  - See `docs/design/identity-routing.md` (task:63fbe94b, 7678e25).
+- Cross-project escalation:
+  - A lead whose `reports_to` names an agent in another project (`name@project`, e.g. `cto@synergix-dev`) can send to that executive with `target_project`. The executive can answer on that thread only.
+  - `register_agent` validates the qualified value (both sides present, known project, not its own project) before any write.
+  - Any other cross-project send returns `FORBIDDEN`, with a hint naming `reports_to=<to>@<project>`. Each allowed send is audited as `xproject.send {arm}`.
+  - No traffic between two non-executives, no cross-project team and no notify channel is opened (task:0bbbf8dd, f6256ae).
+- Parking:
+  - `park_task(task_id, reason, until)` stops the ACK ladder for a task. `until` is `founder`, or a task id (with an optional `@in-review`).
+  - A task parked until another one unparks itself when that one reaches done (or in review). `resume_task` unparks.
+  - REST: `POST /api/tasks/{id}/park` and `POST /api/tasks/{id}/unpark`.
+  - Founder gates alert once per new gate (task:d43d844e, 8fb7ae5).
+- Park follow-up:
+  - The dispatcher gets exactly one notice per park, and none on a re-park with the same reason.
+  - ACK timers restart from the moment of unpark.
+  - A task with an unmet `blocked_by` edge is never ACK-escalated.
+  - `block_task` is now allowed from `accepted`; `resume_task` returns the task to its prior status (task:fea65594, 01b9d21).
+- `block_task` and `cancel_task` accept an optional `reason_code`, one of the declared codes. It overrides the lexicon classification of the exception they record; the exception's new `reason_source` column records where the code came from (task:313a2c8a, 2b2d24b)
+- Stale held work: an accepted or in-progress task with no heartbeat or activity for `stale_task_age` (default 2h, setting) alerts its dispatcher once (`tasks.stale_notified_at`) (task:887351ac, a50b809)
+
+### Changed
+- WIP limit: `claim_task` and `start_task` refuse `WIP_LIMIT` when the agent already holds `projects.wip_limit` active (accepted or in-progress) tickets.
+  - The default is 1; 0 means unlimited.
+  - Set it with `PATCH /api/projects/{name}` `{"wip_limit": N}`; read holdings with `GET /api/wip?project=<name>` (task:e2273dc3, 02443ef).
+- Lease fencing: `complete_task`, `block_task` and `review_task` are accepted only from the current lease holder (or an audited `RELAY_OVERRIDE_ACTORS` actor); anyone else gets `TASK_LEASE_FENCED`.
+  - With `RELAY_STRICT_FENCING=1`, the holder must also pass the current `lease_generation` (new column `tasks.lease_generation`).
+  - On the REST surface `/api/*`:
+    - a `Host` that is not a loopback name at the relay's port, or a name in `RELAY_ALLOWED_HOSTS`, returns 421;
+    - an `Origin` that is neither the request's own host nor in `RELAY_CORS_ORIGINS` returns 403;
+    - a state-changing request without `Content-Type: application/json` returns 415.
+
+  (task:0b980988, e18260a)
+- `RELAY_OVERRIDE_ACTORS` tokens (default `niwa`) now act on behalf of any agent, on every tool, in every project. Each such call is audited as `identity.delegated {actor, on_behalf_of, tool, count}`. Before, they could only do this through `register_agent`. The agent flag `is_service` does not grant this (task:63fbe94b, 7678e25)
+- ACK escalation goes only to lanes that will not pick the work up.
+  - A no-ACK escalation fires only when the profile has no live agent, or when a live agent of the profile has been idle past the window.
+  - A queue behind busy agents becomes one digest per profile to the dispatcher, at most hourly, with queue depth and oldest age. The digest is de-duplicated across restarts by the new `ack_lane_digests` table.
+
+  (task:c75105ac, 2e5d21d)
+- No-ACK escalations no longer fire on tickets that are not claimable yet, such as a task with an unmet `blocked_by` (task:887351ac, a50b809)
+- Parking a task, or sending it back to backlog, closes its open ACK obligations as `inactive` instead of `fulfilled`. Promoting or unparking restarts the ACK clock from that moment (task:ddead70f, 972f8a0)
+
+### Fixed
+- Same-name agents in two projects no longer receive each other's mail.
+  - A bare reply (no `target_project`) to a message from another project is refused with `RECIPIENT_AMBIGUOUS`. The refusal names the exact `target_project` to retry with and lists both candidates. **This refusal applies whatever `RELAY_IDENTITY_MODE` says**: it is not behind the mode flag.
+  - A message from another project no longer opens a reply channel to a local agent of the same name.
+  - A write whose project cannot be resolved, from a name registered in several projects, returns `PROJECT_AMBIGUOUS` with the candidate projects.
+
+  (task:d6d29070, 379c0fb)
+- `cancel_task` now emits the `task.cancelled` event that the v2 board listens for (task:14fe2cf5, 052b1ec)
+
+### Upgrade notes
+- **`projects.wip_limit` defaults to 1.** After the restart, an agent that already holds more than one active ticket keeps them but cannot claim or start another until it is under the limit. For a soft landing, set the limit to 0 per project: `PATCH /api/projects/{name}` with `{"wip_limit": 0}`.
+- **`RELAY_IDENTITY_MODE` defaults to `warn`.** Tokenless calls keep working and are counted. Turn on `enforce` only once the warn log shows no tokenless calls from your agents (see the go/no-go one-liner in `docs/design/identity-routing.md`).
+- **`RELAY_OVERRIDE_ACTORS` tokens now delegate on every tool**, audited as `identity.delegated`. Review the list (default `niwa`) before upgrading.
+- If agents or a reverse proxy reach the relay's REST API under a LAN or public hostname, list it in `RELAY_ALLOWED_HOSTS`, and list browser origins in `RELAY_CORS_ORIGINS`. Otherwise `/api/*` returns 421 or 403. Clients must send `Content-Type: application/json` on writes.
+- **All migrations are additive** and run on first start. New columns:
+  - `agents.token_hash`
+  - `tasks.lease_generation`
+  - `tasks.stale_notified_at`
+  - `projects.wip_limit`
+  - `exceptions.reason_source`
+  - `task_holds.park_until`, `task_holds.park_reason`, `task_holds.parked_by`
+
+  New tables are `founder_gates` and `ack_lane_digests`. Older binaries ignore them.
+- New tools: `park_task`. `block_task` and `cancel_task` gain `reason_code`. A qualified `reports_to` (`name@project`) is new input that older binaries treat as a plain, unmatched name.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.23.2...v1.24.0
+
 ## [1.23.2] — 2026-09-27
 
 A patch release: `batch_dispatch_tasks` now treats each item exactly like a single `dispatch_task`, and a failure to record an exception no longer stops the relay from expiring deliveries or releasing a dead holder's lease.
