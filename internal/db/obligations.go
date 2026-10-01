@@ -354,17 +354,20 @@ func (d *DB) transitionTaskAck(obligationID, normID, taskID, declineReason strin
 	return true, nil
 }
 
+// parkedHold is true when task t has an open park (ruling wraith-park-ruling).
+const parkedHold = `EXISTS (SELECT 1 FROM task_holds ph WHERE ph.task_id = t.id AND ph.released_at IS NULL AND ph.reason = '` + HoldReasonParked + `')`
+
 // CloseMootTaskObligations closes active task obligations whose task left the
 // candidate set for good: fulfilled when the task moved on (claimed, started,
 // done…), inactive when the reason is gone (cancelled, archived, became a run
-// container, deleted). Fulfilled beats inactive. No sanction fires. Writes
-// only when something closes.
+// container, deleted, demoted to backlog, parked). Fulfilled beats inactive.
+// No sanction fires. Writes only when something closes.
 func (d *DB) CloseMootTaskObligations(now time.Time) (int, error) {
 	rows, err := d.ro().Query(`SELECT o.id, COALESCE(t.status, ''),
-			t.id IS NULL OR t.status = 'cancelled' OR t.archived_at IS NOT NULL OR (t.run_state IS NOT NULL AND t.run_state <> '')
+			t.id IS NULL OR t.status IN ('cancelled', 'backlog') OR t.archived_at IS NOT NULL OR (t.run_state IS NOT NULL AND t.run_state <> '') OR `+parkedHold+`
 		FROM obligations o LEFT JOIN tasks t ON t.id = o.subject_id
 		WHERE o.state = ? AND o.subject_kind = ?
-		  AND (t.id IS NULL OR t.status <> 'pending' OR t.archived_at IS NOT NULL OR (t.run_state IS NOT NULL AND t.run_state <> ''))`,
+		  AND (t.id IS NULL OR t.status <> 'pending' OR t.archived_at IS NOT NULL OR (t.run_state IS NOT NULL AND t.run_state <> '') OR `+parkedHold+`)`,
 		ObligationActive, SubjectTask)
 	if err != nil {
 		return 0, fmt.Errorf("moot obligations: %w", err)
@@ -396,7 +399,7 @@ func (d *DB) CloseMootTaskObligations(now time.Time) (int, error) {
 	closed := 0
 	for _, c := range todo {
 		state := ObligationInactive
-		if !c.moot || (c.status != "" && c.status != "pending" && c.status != "cancelled") {
+		if !c.moot || (c.status != "" && c.status != "pending" && c.status != "cancelled" && c.status != "backlog") {
 			state = ObligationFulfilled
 		}
 		evidence, _ := json.Marshal(map[string]string{"task_status": c.status})

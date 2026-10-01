@@ -114,6 +114,13 @@ func (d *DB) ParkTask(project, taskID, by, reason, until, untilStatus string) (f
 		AND removed_at IS NULL AND json_extract(metadata, '$.parked') = 1`, now, by, taskID); err != nil {
 		return false, err
 	}
+	// Parked work pages nobody again: its open ACK obligations close inactive
+	// in this same tx (ruling wraith-park-ruling, P2).
+	if _, err := tx.Exec(`UPDATE obligations SET state = ?, closed_at = ?, discharge_evidence = '{"parked":true}'
+		WHERE subject_kind = ? AND subject_id = ? AND state = ? AND norm_id LIKE 'ack.%'`,
+		ObligationInactive, now, SubjectTask, taskID, ObligationActive); err != nil {
+		return false, err
+	}
 	if until == ParkUntilFounder {
 		_, err = tx.Exec(`INSERT INTO task_holds (task_id, project, reason, held_at, park_until, park_reason, parked_by)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
