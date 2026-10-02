@@ -62,6 +62,7 @@ Re-registering the same name+project is a respawn: it updates `role`/`descriptio
 - **`dispatch <profile> <title> [--priority P0-P3] [--board id] [--parent id]`**: Create task. Auto-notifies agents running that profile.
 - **`claim/start/review/done/block <task_id> [result|reason]`**: State transitions (`review_task` = "PR up" → in-review)
 - **`task <id>`**: Details + subtask chain
+- **`update_task(task_id, parent_task_id: <id|prefix>)`**: regroup a live task under an epic; `""` detaches. Dispatcher/exec/lead chain only; refuses self, cycles, other projects; leaves a progress note
 - **`move <task_id> --board <id>`**: `move_task` — move to a different board
 - **`batch-done <tasks_json>`**: `batch_complete_tasks` — complete multiple tasks at once
 - **`batch-dispatch <tasks_json>`**: `batch_dispatch_tasks` — dispatch multiple tasks at once

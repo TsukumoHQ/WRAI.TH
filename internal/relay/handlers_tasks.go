@@ -1289,7 +1289,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	for k := range req.GetArguments() {
 		if !updateTaskArgs[k] {
 			return validationError(CodeInvalidArgument, fmt.Sprintf(
-				"%q is not an updatable field of update_task — updatable: title, description, priority, board_id, assigned_to, profile_slug, progress_note, goal, acceptance_criteria, dod, verify_cmd, blocked_by, blocked_by_remove (change status with start_task/complete_task/block_task/cancel_task/resume_task/review_task)",
+				"%q is not an updatable field of update_task — updatable: title, description, priority, board_id, assigned_to, profile_slug, progress_note, goal, acceptance_criteria, dod, verify_cmd, blocked_by, blocked_by_remove, parent_task_id (change status with start_task/complete_task/block_task/cancel_task/resume_task/review_task)",
 				k)), nil
 		}
 	}
@@ -1304,7 +1304,7 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	// additionally accepts a native array of strings, coerced to its canonical
 	// JSON-string form, for parity with batch_dispatch_tasks' ergonomics.
 	args := req.GetArguments()
-	for _, f := range []string{"title", "description", "priority", "board_id", "assigned_to", "profile_slug", "progress_note", "goal", "dod", "verify_cmd"} {
+	for _, f := range []string{"title", "description", "priority", "board_id", "assigned_to", "profile_slug", "progress_note", "goal", "dod", "verify_cmd", "parent_task_id"} {
 		if raw, given := args[f]; given {
 			if _, ok := raw.(string); !ok {
 				return validationError(CodeInvalidArgument, fmt.Sprintf(
@@ -1393,6 +1393,13 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 		return res, nil
 	}
 
+	// parent_task_id regroups a live task under an epic (or detaches it with "").
+	if raw, given := args["parent_task_id"]; given {
+		if res := h.updateParent(project, agent, taskID, strings.TrimSpace(raw.(string))); res != nil {
+			return res, nil
+		}
+	}
+
 	hasFieldEdit := title != nil || description != nil || priority != nil || boardID != nil ||
 		goal != nil || acceptanceCriteria != nil || dod != nil || verifyCmd != nil
 
@@ -1448,7 +1455,49 @@ var updateTaskArgs = map[string]bool{
 	"title": true, "description": true, "priority": true, "board_id": true,
 	"assigned_to": true, "profile_slug": true, "progress_note": true,
 	"goal": true, "acceptance_criteria": true, "dod": true, "verify_cmd": true,
-	"blocked_by": true, "blocked_by_remove": true,
+	"blocked_by": true, "blocked_by_remove": true, "parent_task_id": true,
+}
+
+// updateParent applies update_task's parent_task_id (task eae0243b): set or
+// clear ("") a task's parent after dispatch. Same authority as a contract edit
+// (dispatcher, executive, or the lead chains contractEditAuthority allows),
+// never the doer. A Linear mirror is refused: its parent syncs from Linear.
+// The parent ref resolves like task_id (short-id prefix). Returns a refusal to
+// hand back, or nil.
+func (h *Handlers) updateParent(project, agent, taskID, parentRef string) *mcp.CallToolResult {
+	task, err := h.db.GetTask(taskID, project)
+	if err != nil {
+		return toolResultError(fmt.Sprintf("failed to update task: %v", err))
+	}
+	if task == nil {
+		return validationError(CodeNotFound, fmt.Sprintf("task not found: %s", taskID))
+	}
+	if task.Source == "linear" {
+		return validationError(CodeInvalidArgument,
+			"task is mirrored from Linear (read-only here — Linear is the source of truth); set its parent in Linear")
+	}
+	if _, refusal := h.contractEditAuthority(project, agent, task); refusal != nil {
+		return permissionError(CodeForbidden, fmt.Sprintf(
+			"parent_task_id can only be changed by this task's dispatcher (%s), an executive, or its lead chain — never by the doer", task.DispatchedBy))
+	}
+	parentID := ""
+	if parentRef != "" {
+		full, err := h.resolveTaskID(parentRef, project)
+		if err != nil {
+			return validationError(CodeInvalidArgument, fmt.Sprintf("parent_task_id: %v", err))
+		}
+		parentID = full
+	}
+	if _, err := h.db.SetTaskParent(taskID, project, agent, parentID); err != nil {
+		switch {
+		case errors.Is(err, db.ErrParentNotFound):
+			return validationError(CodeNotFound, fmt.Sprintf("parent_task_id: no task %q in project %s", parentRef, project))
+		case errors.Is(err, db.ErrParentSelf), errors.Is(err, db.ErrParentCycle):
+			return validationError(CodeInvalidArgument, fmt.Sprintf("parent_task_id: %v", err))
+		}
+		return taskOpError(err, "failed to set parent: %v", err)
+	}
+	return nil
 }
 
 // reassignViaUpdate applies the assigned_to/profile_slug reassignment path of

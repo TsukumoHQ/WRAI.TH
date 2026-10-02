@@ -909,6 +909,7 @@ func updateTaskTool() mcp.Tool {
 		mcp.WithString("verify_cmd", mcp.Description("Optional gate-reviewer validate command")),
 		mcp.WithArray("blocked_by", mcp.WithStringItems()),
 		mcp.WithArray("blocked_by_remove", mcp.WithStringItems()),
+		mcp.WithString("parent_task_id", mcp.Description("Regroup under this parent (id or prefix); '' detaches. Dispatcher-only, audited")),
 	)
 }
 
