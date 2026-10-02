@@ -151,6 +151,10 @@ func (r *Relay) buildHandler(addr string) http.Handler {
 	// MCP handler
 	mux.Handle("/mcp", r.HTTP)
 
+	// Liveness probe that touches the DB (launchd / niwa doctor). Outside /api/
+	// so the Host/Content-Type guard never turns a wedge into a 4xx.
+	mux.HandleFunc("/healthz", r.serveHealthz)
+
 	// REST API
 	mux.HandleFunc("/api/", r.ServeAPI)
 

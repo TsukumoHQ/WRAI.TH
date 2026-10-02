@@ -1,6 +1,8 @@
 package ingest
 
 import (
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 )
@@ -92,5 +94,73 @@ func TestDetector_TickDeliversWhenDrained(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected an idle event in the buffered sink")
+	}
+}
+
+// TestDetector_SlowResolveDoesNotHoldLock is the regression test for the
+// 2026-10-02 wedge (task 55323073): RecordEvent called the resolver (a DB read)
+// with d.mu held, so one resolve parked on a starved reader pool froze every
+// other hook (284 goroutines at detector.go:155) and every GetSessions. A
+// resolve that never returns must now block only its own event.
+func TestDetector_SlowResolveDoesNotHoldLock(t *testing.T) {
+	gate := make(chan struct{})
+	defer close(gate)
+	resolve := func(sid string) (string, string, bool) {
+		if sid == "stuck" {
+			<-gate // a DB read waiting on a pool connection that never frees
+		}
+		return "p", "agent-" + sid, true
+	}
+	d := newDetector(make(chan AgentEvent, 16), resolve, nil)
+
+	go d.RecordEvent(AgentEvent{SessionID: "stuck", Type: EventToolStart, Timestamp: time.Now()})
+	time.Sleep(20 * time.Millisecond) // let it reach the resolver
+
+	done := make(chan struct{})
+	go func() {
+		d.RecordEvent(AgentEvent{SessionID: "other", Type: EventToolStart, Timestamp: time.Now()})
+		_ = d.GetSessions()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("a stuck resolve blocked an unrelated RecordEvent/GetSessions — d.mu is held across the DB read")
+	}
+}
+
+// TestDetector_BurstWithSlowResolver: 200 concurrent first events, each
+// resolve taking 50ms (a loaded DB). Holding d.mu across resolve serialized
+// them (~10s); with the resolve outside the lock the burst finishes in about
+// one resolve's time. Every session still ends up bound to its agent.
+func TestDetector_BurstWithSlowResolver(t *testing.T) {
+	resolve := func(sid string) (string, string, bool) {
+		time.Sleep(50 * time.Millisecond)
+		return "p", "agent-" + sid, true
+	}
+	d := newDetector(make(chan AgentEvent, 16), resolve, nil)
+
+	start := time.Now()
+	var wg sync.WaitGroup
+	for i := 0; i < 200; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			d.RecordEvent(AgentEvent{SessionID: fmt.Sprintf("s%d", i), Type: EventToolStart, Timestamp: time.Now()})
+			_ = d.GetSessions()
+		}(i)
+	}
+	wg.Wait()
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("200-event burst took %s — resolves are serialized under d.mu", el)
+	}
+	sessions := d.GetSessions()
+	if len(sessions) != 200 {
+		t.Fatalf("got %d sessions, want 200", len(sessions))
+	}
+	for _, s := range sessions {
+		if s.Agent != "agent-"+s.SessionID {
+			t.Errorf("session %s bound to %q", s.SessionID, s.Agent)
+		}
 	}
 }

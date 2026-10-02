@@ -329,6 +329,32 @@ func (r *Relay) apiHealth(w http.ResponseWriter) {
 	writeJSON(w, health)
 }
 
+// healthzTimeout bounds each DB probe in /healthz. var so tests can shrink it.
+var healthzTimeout = 2 * time.Second
+
+// serveHealthz is the wedge detector: 200 when a trivial read and a writer
+// checkout both complete within healthzTimeout, 503 otherwise. GET / kept
+// answering 200 through the 2026-10-02 wedge (task 55323073) because static
+// files never touch the DB; this endpoint does.
+func (r *Relay) serveHealthz(w http.ResponseWriter, req *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	checks, err := r.DB.Probe(healthzTimeout)
+	status := http.StatusOK
+	body := map[string]any{"status": "ok", "db": checks}
+	if err != nil {
+		log.Printf("healthz: %v", err)
+		status = http.StatusServiceUnavailable
+		body["status"] = "unavailable"
+	}
+	b, _ := json.Marshal(body)
+	w.WriteHeader(status)
+	_, _ = w.Write(b)
+}
+
 // modeString maps the linear_mode flag to a human-readable mode label the web
 // UI uses to switch behavior (writable native board vs. read-replica mirror).
 func modeString(linear bool) string {

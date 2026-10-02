@@ -1,7 +1,9 @@
 package db
 
 import (
+	"context"
 	"database/sql"
+	"time"
 )
 
 // NewTestDB creates a database at the given path for testing. It mirrors New():
@@ -27,4 +29,52 @@ func NewTestDB(path string) (*DB, error) {
 	}
 	reader.SetMaxOpenConns(10)
 	return &DB{conn: conn, reader: reader, path: path}, nil
+}
+
+// HoldPoolsForTest checks out `readers` reader-pool connections and, when
+// writer is true, the single writer connection, and keeps them until release
+// is called — a deterministic stand-in for the 2026-10-02 wedge (task
+// 55323073), where slow queries pinned every pooled connection. Test-only.
+func (d *DB) HoldPoolsForTest(readers int, writer bool) (release func(), err error) {
+	var held []*sql.Conn
+	release = func() {
+		for _, c := range held {
+			_ = c.Close()
+		}
+		held = nil
+	}
+	ctx := context.Background()
+	for i := 0; i < readers; i++ {
+		c, err := d.reader.Conn(ctx)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		held = append(held, c)
+	}
+	if writer {
+		c, err := d.conn.Conn(ctx)
+		if err != nil {
+			release()
+			return nil, err
+		}
+		held = append(held, c)
+	}
+	return release, nil
+}
+
+// SetReaderTimeoutForTest shrinks readerTimeout so a test can exercise the
+// starved-reader path without a real 10s wait. Returns the restore func.
+func SetReaderTimeoutForTest(t time.Duration) (restore func()) {
+	orig := readerTimeout
+	readerTimeout = t
+	return func() { readerTimeout = orig }
+}
+
+// SetWriterTimeoutForTest is the writerTimeout sibling of
+// SetReaderTimeoutForTest. Returns the restore func.
+func SetWriterTimeoutForTest(t time.Duration) (restore func()) {
+	orig := writerTimeout
+	writerTimeout = t
+	return func() { writerTimeout = orig }
 }

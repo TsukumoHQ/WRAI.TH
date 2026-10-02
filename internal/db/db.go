@@ -165,9 +165,47 @@ func (d *DB) Close() error {
 	return d.conn.Close()
 }
 
-// ro returns the read-only connection pool.
-func (d *DB) ro() *sql.DB {
-	return d.reader
+// ro returns the read-only connection pool, with Query/QueryRow bounded by
+// readerTimeout (see roPool).
+func (d *DB) ro() roPool {
+	return roPool{d.reader}
+}
+
+// readerTimeout bounds every reader-pool Query/QueryRow: the wait to check a
+// connection out of the pool AND the statement itself. Without it a saturated
+// pool wedged the whole relay (2026-10-02, task 55323073): the 10 reader
+// connections sat in sqlite3_step on ListProjectsWithInfoFiltered
+// (projects.go:417) while the host was IO-stalled, and ~170 handlers queued
+// forever in database/sql's conn wait (sql.go:1369) — including the ingest
+// resolver holding Detector.mu, which then parked every hook. With a deadline
+// a starved read errors out (context deadline exceeded) and its handler
+// returns, instead of leaving a CLOSE_WAIT socket behind.
+// var, not const: tests shrink it (same trick as writerTimeout).
+var readerTimeout = 10 * time.Second
+
+// roPool wraps the reader *sql.DB so the plain Query/QueryRow every read site
+// calls (d.ro().Query(...)) runs under readerTimeout. QueryContext and friends
+// pass through untouched: a caller that brings its own ctx owns its deadline.
+type roPool struct{ *sql.DB }
+
+// readerCtx returns a context bounded by readerTimeout. Its cancel is not
+// returned on purpose: the *sql.Rows / *sql.Row outlive the call that created
+// them, and cancelling early would abort the caller's iteration/Scan. The
+// context's own timer releases it at the deadline (the AfterFunc only hands
+// cancel to that moment, where it is a no-op, to keep the vet lostcancel check
+// honest); Rows.Close stops database/sql's watcher goroutine before that.
+func readerCtx() context.Context {
+	ctx, cancel := context.WithTimeout(context.Background(), readerTimeout)
+	_ = context.AfterFunc(ctx, cancel)
+	return ctx
+}
+
+func (p roPool) Query(query string, args ...any) (*sql.Rows, error) {
+	return p.DB.QueryContext(readerCtx(), query, args...)
+}
+
+func (p roPool) QueryRow(query string, args ...any) *sql.Row {
+	return p.DB.QueryRowContext(readerCtx(), query, args...)
 }
 
 // writerTimeout bounds every writer-pool call (Exec and transactions). The
@@ -359,6 +397,43 @@ func (d *DB) Backup(keep int) (string, error) {
 		return "", fmt.Errorf("vacuum into %s: %w", dst, err)
 	}
 	return dst, nil
+}
+
+// Probe is the /healthz liveness check: one trivial read on the reader pool and
+// one checkout of the single writer connection, each bounded by timeout. It
+// fails exactly when a real request would hang — a saturated reader pool or a
+// held/leaked writer — which /api/health (unbounded COUNT(*)s) could not show.
+// The returned map names each pool's outcome ("ok" or the error).
+func (d *DB) Probe(timeout time.Duration) (map[string]string, error) {
+	out := map[string]string{}
+	var firstErr error
+	fail := func(pool string, err error) {
+		out[pool] = err.Error()
+		if firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", pool, err)
+		}
+	}
+
+	rctx, rcancel := context.WithTimeout(context.Background(), timeout)
+	defer rcancel()
+	var one int
+	// Touches a real page (not a bare SELECT 1) so a stalled disk shows too;
+	// always exactly one row, even on an empty DB.
+	if err := d.reader.QueryRowContext(rctx, "SELECT COUNT(*) FROM (SELECT 1 FROM projects LIMIT 1)").Scan(&one); err != nil {
+		fail("reader", err)
+	} else {
+		out["reader"] = "ok"
+	}
+
+	wctx, wcancel := context.WithTimeout(context.Background(), timeout)
+	defer wcancel()
+	if c, err := d.conn.Conn(wctx); err != nil {
+		fail("writer", err)
+	} else {
+		_ = c.Close()
+		out["writer"] = "ok"
+	}
+	return out, firstErr
 }
 
 // GetHealthStats returns aggregate database statistics for the /health endpoint.

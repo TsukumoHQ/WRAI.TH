@@ -152,6 +152,26 @@ func (d *Detector) getSessionsLocked() []SessionState {
 }
 
 func (d *Detector) RecordEvent(evt AgentEvent) {
+	// Resolve the owning agent once per session (and retry while unresolved —
+	// the SessionStart rebind may land after the first activity event). Bounded
+	// to ~1 indexed read per session, never per event once bound.
+	//
+	// The resolve is a DB read, so it runs OUTSIDE d.mu: holding the lock across
+	// it wedged the relay on 2026-10-02 (task 55323073) — one RecordEvent parked
+	// in the reader-pool conn wait at detector.go:168 with d.mu held, and 284
+	// hook handlers + every GetSessions queued behind it for minutes.
+	var proj, name string
+	var resolved bool
+	if d.resolve != nil {
+		d.mu.RLock()
+		s, ok := d.sessions[evt.SessionID]
+		bound := ok && s.agent != ""
+		d.mu.RUnlock()
+		if !bound {
+			proj, name, resolved = d.resolve(evt.SessionID)
+		}
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -160,14 +180,8 @@ func (d *Detector) RecordEvent(evt AgentEvent) {
 		s = &sessionEntry{}
 		d.sessions[evt.SessionID] = s
 	}
-
-	// Resolve the owning agent once per session (and retry while unresolved —
-	// the SessionStart rebind may land after the first activity event). Bounded
-	// to ~1 indexed read per session, never per event once bound.
-	if s.agent == "" && d.resolve != nil {
-		if proj, name, ok := d.resolve(evt.SessionID); ok {
-			s.project, s.agent = proj, name
-		}
+	if resolved && s.agent == "" {
+		s.project, s.agent = proj, name
 	}
 
 	s.lastEvent = evt.Timestamp

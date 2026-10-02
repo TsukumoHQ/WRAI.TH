@@ -366,10 +366,55 @@ func (d *DB) ListProjectsWithInfo() ([]models.ProjectInfo, error) {
 	return d.ListProjectsWithInfoFiltered(false)
 }
 
+// projectsFlightKey identifies one in-flight ListProjectsWithInfoFiltered.
+type projectsFlightKey struct {
+	d               *DB
+	includeArchived bool
+}
+
+type projectsFlightCall struct {
+	done chan struct{}
+	val  []models.ProjectInfo
+	err  error
+}
+
+var (
+	projectsFlightMu sync.Mutex
+	projectsFlight   = map[projectsFlightKey]*projectsFlightCall{}
+)
+
 // ListProjectsWithInfoFiltered returns projects with stats. When includeArchived
 // is false, archived projects (projects.archived_at IS NOT NULL) are excluded;
 // when true they are returned with archived_at populated.
+//
+// Concurrent callers share one query (singleflight, no caching: a call that
+// starts after the in-flight one finished runs fresh). The query aggregates
+// every task and a day of token_usage, and the dashboard polls it from every
+// open tab: on 2026-10-02 (task 55323073) eight copies sat in sqlite3_step at
+// once and starved the 10-conn reader pool for the whole relay.
 func (d *DB) ListProjectsWithInfoFiltered(includeArchived bool) ([]models.ProjectInfo, error) {
+	key := projectsFlightKey{d, includeArchived}
+	projectsFlightMu.Lock()
+	if c, ok := projectsFlight[key]; ok {
+		projectsFlightMu.Unlock()
+		<-c.done
+		return append([]models.ProjectInfo(nil), c.val...), c.err
+	}
+	c := &projectsFlightCall{done: make(chan struct{})}
+	projectsFlight[key] = c
+	projectsFlightMu.Unlock()
+
+	defer func() {
+		projectsFlightMu.Lock()
+		delete(projectsFlight, key)
+		projectsFlightMu.Unlock()
+		close(c.done)
+	}()
+	c.val, c.err = d.listProjectsWithInfo(includeArchived)
+	return append([]models.ProjectInfo(nil), c.val...), c.err
+}
+
+func (d *DB) listProjectsWithInfo(includeArchived bool) ([]models.ProjectInfo, error) {
 	since24h := time.Now().UTC().Add(-24 * time.Hour).Format(time.RFC3339)
 	where := ""
 	if !includeArchived {
