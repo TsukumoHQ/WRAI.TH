@@ -27,17 +27,20 @@ ROOT_CAUSE: internal/relay/cleanup.go:651 (origin/main) resolved the answer.role
 - tool schema unchanged
 
 RED_EVIDENCE:
-cmd: go test -tags fts5 ./internal/relay -run TestAnswerEscalation
-test_sha: 3c54d0d
+cmd: niwa slot run -- go test -tags fts5 -count=1 ./internal/relay -run TestAnswerEscalation
+test_sha: 7c9ccba
 output:
---- FAIL: TestAnswerEscalationSkipsSender (0.09s)
+--- FAIL: TestAnswerEscalationSkipsSender (0.10s)
+    --- FAIL: TestAnswerEscalationSkipsSender/recipient_reports_to_a_non-agent,_asker_is_an_executive (0.05s)
         obligations_answer_chain_test.go:70: escalated to niwa2 (answer.role), want user (answer.human)
+    --- FAIL: TestAnswerEscalationSkipsSender/recipient's_lead_is_the_asker (0.05s)
         obligations_answer_chain_test.go:81: role rung on lead (answer.role), want boss (answer.role): the asker is skipped, next up
---- FAIL: TestAnswerEscalationInactiveReportOfSender (0.05s)
+--- FAIL: TestAnswerEscalationInactiveReportOfSender (0.04s)
     obligations_answer_chain_test.go:98: escalated to niwa2 (answer.role), want user (answer.human)
 FAIL
-FAIL	agent-relay/internal/relay	0.625s
+FAIL	agent-relay/internal/relay	0.700s
 FAIL
+(re-captured 2026-10-03 by wraith-backend after taking over from wraith-engine, at 64e199a = this same test-only commit on base 4b79127; the branch was then rebased onto origin/main 884ce5d with no conflicts, making it 7c9ccba, the test-only parent of fix 395dea0. Suite at the pre-rebase tip (base 4b79127): go test -tags fts5 ./... all ok, internal/relay 47.7s.)
 
 ## 3. Files changed
 
