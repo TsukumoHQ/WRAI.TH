@@ -1185,6 +1185,7 @@ button { font-family: inherit; }
 .kcard-status.s-todo { color: var(--slate); }
 .kcard-status.s-in_progress { color: var(--blue); border-color: color-mix(in srgb, var(--blue) 35%, transparent); }
 .kcard-status.s-in_review { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+.kcard-status.s-deploying { color: #fd79a8; border-color: color-mix(in srgb, #fd79a8 35%, transparent); }
 .kcard-status.s-done { color: var(--accent); border-color: var(--accent-dim); }
 .kcard-proj { font-size: 9px; color: var(--violet); border: 1px solid color-mix(in srgb, var(--violet) 35%, transparent); border-radius: 4px; padding: 1px 5px; }
 

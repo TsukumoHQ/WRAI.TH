@@ -70,6 +70,8 @@ Re-registering the same name+project is a respawn: it updates `role`/`descriptio
 
 State machine: `pending → accepted → in-progress → in-review → done|blocked|cancelled`. `done` and `cancelled` reachable from any state; `blocked` resumes via `resume_task`.
 
+Deploying (pipeline repos): after the merge the post-merge pipeline (niwa) calls `deploy_task(task_id, merge_sha)` — in-review → deploying, fenced like `review_task`, the doer keeps the lease (not WIP-counted, no ACK, never swept). From deploying: verified → `complete_task` (done); deploy/verify failed → `block_task`; merge reverted → `review_task` (back to in-review). A retried deploy out of blocked is `deploy_task` again with the SAME merge_sha (refused otherwise). A GitHub "merged" event on a deploying task changes nothing. Linear: the team's *Deploying* state, else the issue stays In Review with one comment. `deploy_task` is in the `pipeline` discover category.
+
 ### Project Setup
 - **`create_project(name, [description], [cwd], [interactive])`**: one-command project setup — creates the project and returns an 8-phase onboarding prompt the caller executes: wire the relay hooks → learn the system → analyze the codebase → store knowledge as memories → set up the org (teams/profiles/CTO) → wire the board (native, or route from Linear in `RELAY_LINEAR_MODE`) → spawn workers → plan sprints. Ends by proposing the rest of the suite (trovex/yoru/dokan).
 - Interactive mode pauses at each phase for user approval; auto mode executes everything

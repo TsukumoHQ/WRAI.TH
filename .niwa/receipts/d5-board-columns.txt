@@ -1,0 +1,16 @@
+# W8 D5 bbb14f4c board columns receipt (2026-10-01T19:17:57Z, node v26.3.0)
+# v1: internal/web/static/js/kanban.js constants + columnFor evaluated in a node vm
+v1 COLUMNS: BACKLOG | TODO | IN PROGRESS | IN REVIEW | DEPLOYING | DONE
+v1 columnFor(native in-review) = in-review
+v1 columnFor(native deploying) = deploying
+v1 columnFor(native done) = done
+v1 columnFor(linear Deploying) = deploying
+# v2: internal/web/static/v2/api.js imported as an ES module
+v2 COLUMNS: Backlog | Todo | In Progress | In Review | Deploying | Done
+v2 columnFor(in-review) = in_review
+v2 columnFor(deploying) = deploying
+v2 columnFor(done) = done
+v2 columnFor(blocked) = in_progress
+v2 COLUMN_STATUS.deploying = undefined (board.js dropTo returns: no transition)
+v2 eventStatus(task.deploying) = deploying
+# note: a Linear mirror on v1 follows linear_state (team without a Deploying state shows In Review, by ruling Q2)

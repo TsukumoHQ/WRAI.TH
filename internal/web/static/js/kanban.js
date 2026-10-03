@@ -1,7 +1,7 @@
 // kanban.js — agentic task board (read-replica of the Linear mirror + relay overlay)
 //
 // Renders the local `tasks` table only — one fetch per cycle, zero Linear
-// round-trips. Columns: Backlog (collapsed) / Todo / In Progress / In Review /
+// round-trips. Columns: Backlog (collapsed) / Todo / In Progress / In Review / Deploying /
 // Done. State maps from linear_state when source=linear, else from native
 // status. Cards carry the execution overlay (claimed-by agent color, blocked
 // badge, "in review N min"), child roll-up, and a read-only detail panel.
@@ -13,14 +13,16 @@
 import { PALETTE_COLORS } from "./sprite.js";
 
 // ── Columns ──────────────────────────────────────────────────────────────
-// The five board columns in render order. Backlog is collapsed by default.
-const COLUMNS = ["backlog", "todo", "in-progress", "in-review", "done"];
+// The six board columns in render order. Backlog is collapsed by default.
+// Deploying (W8): merged in a pipeline repo, deploy + verify in flight.
+const COLUMNS = ["backlog", "todo", "in-progress", "in-review", "deploying", "done"];
 
 const COLUMN_LABELS = {
   backlog: "BACKLOG",
   todo: "TODO",
   "in-progress": "IN PROGRESS",
   "in-review": "IN REVIEW",
+  deploying: "DEPLOYING",
   done: "DONE",
 };
 
@@ -29,6 +31,7 @@ const COLUMN_COLORS = {
   todo: "#ffd93d",
   "in-progress": "#00e676",
   "in-review": "#74b9ff",
+  deploying: "#fd79a8",
   done: "#6c5ce7",
 };
 
@@ -46,6 +49,7 @@ const NATIVE_STATUS_COLUMN = {
   accepted: "in-progress",
   "in-progress": "in-progress",
   "in-review": "in-review",
+  deploying: "deploying",
   done: "done",
   cancelled: "done",
 };
@@ -58,6 +62,7 @@ function linearStateColumn(state) {
   const s = String(state).toLowerCase();
   if (s.includes("backlog")) return "backlog";
   if (s.includes("review")) return "in-review";
+  if (s.includes("deploy")) return "deploying";
   if (s.includes("progress") || s.includes("started") || s.includes("doing")) return "in-progress";
   if (s.includes("done") || s.includes("complete") || s.includes("merged") || s.includes("closed") || s.includes("cancel")) return "done";
   if (s.includes("todo") || s.includes("to do") || s.includes("unstarted") || s.includes("ready") || s.includes("triage")) return "todo";

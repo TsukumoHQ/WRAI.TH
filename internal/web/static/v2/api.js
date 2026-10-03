@@ -107,11 +107,12 @@ export async function boardForSelection(selection, projectNames) {
 }
 
 // Stable status buckets (authoritative vocabulary: pending, accepted,
-// in-progress, in-review, done, blocked).
+// in-progress, in-review, deploying, done, blocked).
 export const BUCKETS = [
   { key: 'todo', label: 'Todo', color: 'var(--slate)', match: (s) => s === 'pending' },
   { key: 'in_progress', label: 'In Progress', color: 'var(--blue)', match: (s) => s === 'accepted' || s === 'in-progress' },
   { key: 'in_review', label: 'In Review', color: 'var(--amber)', match: (s) => s === 'in-review' },
+  { key: 'deploying', label: 'Deploying', color: 'var(--pink, #fd79a8)', match: (s) => s === 'deploying' },
   { key: 'done', label: 'Done', color: 'var(--accent)', match: (s) => s === 'done' },
   { key: 'blocked', label: 'Blocked', color: 'var(--red)', match: (s) => s === 'blocked' },
 ];
@@ -120,13 +121,15 @@ const ACTIVE = new Set(['accepted', 'in-progress', 'in-review']);
 export const isActive = (s) => ACTIVE.has(s);
 
 // ---------------- Board columns ----------------
-// Five visible columns. Blocked is a card badge, not a column — blocked cards
-// live in In Progress. Cancelled is hidden.
+// Six visible columns. Blocked is a card badge, not a column — blocked cards
+// live in In Progress. Cancelled is hidden. Deploying (W8) has no drop status:
+// only deploy_task (with the merge sha) moves a card there.
 export const COLUMNS = [
   { key: 'backlog', label: 'Backlog', color: 'var(--text-dim)', rail: true },
   { key: 'todo', label: 'Todo', color: 'var(--slate)' },
   { key: 'in_progress', label: 'In Progress', color: 'var(--blue)' },
   { key: 'in_review', label: 'In Review', color: 'var(--amber)' },
+  { key: 'deploying', label: 'Deploying', color: 'var(--pink, #fd79a8)' },
   { key: 'done', label: 'Done', color: 'var(--accent)' },
 ];
 // Map a task to its column key (or null to hide).
@@ -138,6 +141,7 @@ export function columnFor(task) {
     case 'in-progress':
     case 'blocked': return 'in_progress';
     case 'in-review': return 'in_review';
+    case 'deploying': return 'deploying';
     case 'done': return 'done';
     default: return 'todo';
   }
@@ -153,6 +157,7 @@ const EVENT_STATUS = {
   'task.claimed': 'accepted', 'task.claim': 'accepted', claim: 'accepted',
   'task.in_progress': 'in-progress', 'task.start': 'in-progress', start: 'in-progress',
   'task.in_review': 'in-review', 'task.review': 'in-review', review: 'in-review',
+  'task.deploying': 'deploying', deploy: 'deploying',
   'task.done': 'done', 'task.complete': 'done', complete: 'done',
   'task.blocked': 'blocked', 'task.block': 'blocked', block: 'blocked',
 };

@@ -538,6 +538,7 @@ export function initBoard(root, ctx) {
     if (!t) return;
     if (columnFor(t) === colKey) return;
     const status = COLUMN_STATUS[colKey];
+    if (!status) return;
     const prev = t.status;
     reconcile(() => { t.status = status; if (status === 'in-review') t.in_review_at = new Date().toISOString(); if (status === 'done') t.done_at = new Date().toISOString(); });
     try {
