@@ -20,7 +20,7 @@
 ROOT_CAUSE: the DB already filters list_tasks by any status, but the list_tasks schema enum offered no 'backlog', so agents could not ask for groomed work on its own. On the v2 board, columnFor() had no case for a native 'backlog' task: it fell to the default 'todo' and sat beside claimable work (the Backlog column only caught Linear mirrors whose linear_state matched /backlog/). A backlog dispatch event (action 'backlog') mapped to no status, so a new backlog card never appeared live.
 
 DECISION:
-- internal/relay/tools.go: list_tasks status enum gains 'backlog'. Handler and DB unchanged; status='active' semantics unchanged (still all non-done/cancelled, backlog included). Description left as-is: TestToolSchemaBudget margin is 2060 bytes (cap headroom 2048), so no room for prose.
+- internal/relay/tools.go: list_tasks status enum gains 'backlog'. Handler and DB unchanged; status='active' semantics unchanged (still all non-done/cancelled, backlog included). Description left as-is. TestToolSchemaBudget after rebase onto origin/main 884413c: `86 tools, 57120 bytes (~14280 tokens), margin 3296 bytes` (go test -tags fts5 ./internal/relay -run TestToolSchemaBudget -v -count=1). Cap not raised; no other tool description touched.
 - internal/web/static/v2/api.js: columnFor 'backlog' -> Backlog column; EVENT_STATUS maps 'task.backlog' / action 'backlog' -> 'backlog'.
 - internal/web/static/v2/board.js: a backlog event refetches like a dispatch; dropTo ignores a drag of a native backlog card, which would otherwise call REST transition 'pending' (ResetTask) and make it claimable without the promote_task announcement.
 - skill/relay.md: one paragraph: backlog:true vs pending vs park_task vs block_task.
@@ -29,12 +29,12 @@ DECISION:
 AC map:
 - C1: TestListTasksStatusBacklogOnlyBacklog (status=backlog returns only the backlog task; schema enum includes 'backlog').
 - C2: TestListTasksReadyNeverBacklog (ready=true, with and without status=backlog).
-- C3: board DOM-free check of columnFor/eventStatus from api.js under node, before (fea4017) vs after:
-    BEFORE {"status":"backlog"} -> todo        AFTER {"status":"backlog"} -> backlog
-    BEFORE event task/backlog -> null          AFTER event task/backlog -> backlog
-    unchanged: pending -> todo, pending+linear_state Backlog -> backlog, accepted -> in_progress, cancelled -> null
-- C4: skill/relay.md "Holding work back" paragraph under ### Tasks.
-- C5: go test -tags fts5 ./... green (0 FAIL).
+- C3: headless-Chrome DOM test + screenshots, receipt .niwa/receipts/p5-board-backlog-column.txt (script .niwa/receipts/p5-board-shot.mjs, images p5-board-before.png / p5-board-after.png), isolated relay, 2 backlog + 2 pending tasks:
+    BEFORE (base binary): todo 4 [2 Ready + 2 Groomed], no Backlog column
+    AFTER (this branch):  backlog 2 [Groomed: retire legacy v1 board, Groomed: archive sweep cron]; todo 2 [Ready: list_tasks status=backlog, Ready: board backlog column]
+  plus node check of columnFor/eventStatus: {"status":"backlog"} todo before, backlog after; event task/backlog null before, backlog after.
+- C4: skill/relay.md "Holding work back": one paragraph (no bullets) under ### Tasks naming backlog:true, pending, park_task, block_task.
+- C5: niwa slot run -- go test -tags fts5 ./... exit 0 after rebase onto origin/main 884413c (internal/db 75.7s, internal/relay 91.3s, all ok).
 
 RED_EVIDENCE:
   cmd: niwa slot run -- go test -tags fts5 ./internal/relay -run 'TestListTasks(StatusBacklogOnlyBacklog|ReadyNeverBacklog)'

@@ -528,7 +528,7 @@ func claimTaskTool() mcp.Tool {
 func taskEdgeTool() mcp.Tool {
 	return mcp.NewTool(
 		"task_edge",
-		mcp.WithDescription("Add/remove edge task_id to target_id. type: blocked_by (not ready until target done) or discovered_from."),
+		mcp.WithDescription("Add/remove edge task_id->target_id. type: blocked_by (not ready until target done) or discovered_from."),
 		asParam,
 		projectParam,
 		mcp.WithString("op", mcp.Required(), mcp.Enum("add", "remove")),
@@ -547,7 +547,7 @@ func parkTaskTool() mcp.Tool {
 		projectParam,
 		mcp.WithString("task_id", mcp.Required()),
 		mcp.WithString("reason", mcp.Required()),
-		mcp.WithString("until", mcp.Required(), mcp.Description("founder, or [task:]ID[@in-review] (auto-unpark when done/in review)")),
+		mcp.WithString("until", mcp.Required(), mcp.Description("founder, or [task:]<id>[@in-review] (auto-unpark when done/in review)")),
 	)
 }
 
@@ -705,7 +705,7 @@ func blockTaskTool() mcp.Tool {
 func resumeTaskTool() mcp.Tool {
 	return mcp.NewTool(
 		"resume_task",
-		mcp.WithDescription("Blocked task to the status it was blocked from (accepted, else in-progress), or unpark a parked task."),
+		mcp.WithDescription("Blocked task -> the status it was blocked from (accepted, else in-progress), or unpark a parked task."),
 		asParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
