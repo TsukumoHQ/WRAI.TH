@@ -1706,6 +1706,11 @@ func (r *Relay) apiDispatchTask(w http.ResponseWriter, req *http.Request) {
 			jsonError(w, http.StatusBadRequest, bre.Error())
 			return
 		}
+		var te *db.TaskError
+		if errors.As(err, &te) && te.Code == db.CodeTaskNotFound {
+			jsonError(w, http.StatusNotFound, te.Msg) // unknown parent / discovered_from
+			return
+		}
 		apiError(w, http.StatusInternalServerError, "failed to dispatch task", err)
 		return
 	}

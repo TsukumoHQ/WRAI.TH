@@ -1649,6 +1649,11 @@ func migrate(conn *sql.DB) error {
 	// self-route going forward via DispatchTask.
 	runProductBoardRoutingBackfill(conn)
 
+	// One-shot repair + report of short (dangling) parent_task_id values that
+	// dispatch_task stored verbatim before task 98be27bb — see
+	// short_parent_backfill.go. New dispatches resolve the prefix up front.
+	runShortParentBackfill(conn)
+
 	// Promote relay-written metadata.task_id into messages.task_id on historical
 	// rows (DEC-wraith-linkage-1). Touches only NULL rows, so every later boot is
 	// a no-op; new rows are linked at insert by deriveTaskID.

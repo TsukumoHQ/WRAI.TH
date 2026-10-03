@@ -117,8 +117,21 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 		priority = str
 	}
 
-	parentTaskID := optionalString(req.GetString("parent_task_id", ""))
+	parentTaskID := optionalString(strings.TrimSpace(req.GetString("parent_task_id", "")))
 	boardID := optionalString(req.GetString("board_id", ""))
+	// A short parent prefix resolves like task_id and must name a real task here:
+	// refused NOT_FOUND, never stored verbatim as a dangling parent (98be27bb).
+	// db.DispatchTask re-checks for the REST/batch paths.
+	if parentTaskID != nil {
+		full, err := h.resolveTaskID(*parentTaskID, project)
+		if err != nil {
+			return validationError(CodeInvalidArgument, fmt.Sprintf("parent_task_id: %v", err)), nil
+		}
+		if p, _ := h.db.GetTask(full, project); p == nil {
+			return validationError(CodeNotFound, fmt.Sprintf("parent_task_id: no task %q in project %s", *parentTaskID, project)), nil
+		}
+		parentTaskID = &full
+	}
 
 	// Correlation (trace_id v1): an explicit trace_id must be well-formed (32
 	// lowercase hex) — refused, never silently accepted-as-garbage or dropped.
@@ -141,7 +154,11 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	}
 	// blocked_by entries are "<id>" or "<id>@in-review"; a short id prefix
 	// resolves like every other task_id argument.
-	for _, raw := range req.GetStringSlice("blocked_by", nil) {
+	blockedBy, bErr := stringListArg(req.GetArguments(), "blocked_by")
+	if bErr != nil {
+		return validationError(CodeInvalidArgument, bErr.Error()), nil
+	}
+	for _, raw := range blockedBy {
 		id, until, _ := strings.Cut(strings.TrimSpace(raw), "@")
 		if id == "" {
 			continue
@@ -1389,7 +1406,15 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 
 	// blocked_by edits first: a refusal (not the dispatcher, cycle, unknown id)
 	// then lands before any field write.
-	if res := h.updateBlockedBy(project, agent, taskID, req.GetStringSlice("blocked_by", nil), req.GetStringSlice("blocked_by_remove", nil)); res != nil {
+	addBlockers, aErr := stringListArg(args, "blocked_by")
+	if aErr != nil {
+		return validationError(CodeInvalidArgument, aErr.Error()), nil
+	}
+	removeBlockers, rErr := stringListArg(args, "blocked_by_remove")
+	if rErr != nil {
+		return validationError(CodeInvalidArgument, rErr.Error()), nil
+	}
+	if res := h.updateBlockedBy(project, agent, taskID, addBlockers, removeBlockers); res != nil {
 		return res, nil
 	}
 
@@ -1445,6 +1470,53 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "update", Agent: agent, Project: project, Label: task.Title})
 	return h.resultJSONTracked(project, agent, "update_task", task)
+}
+
+// stringListArg reads a list-of-ids argument that callers send in more than
+// one shape: a native array of strings, a JSON-array string ("[\"a\",\"b\"]"),
+// or a comma-separated string. mcp-go's GetStringSlice returns nil for the
+// string forms, so blocked_by sent as a JSON string was silently dropped at
+// dispatch (98be27bb). Any other type, or a non-string element, is refused.
+func stringListArg(args map[string]any, key string) ([]string, error) {
+	raw, given := args[key]
+	if !given || raw == nil {
+		return nil, nil
+	}
+	switch v := raw.(type) {
+	case []string:
+		return v, nil
+	case []any:
+		out := make([]string, 0, len(v))
+		for i, el := range v {
+			str, ok := el.(string)
+			if !ok {
+				return nil, fmt.Errorf("%s[%d] must be a string (got %#v)", key, i, el)
+			}
+			out = append(out, str)
+		}
+		return out, nil
+	case string:
+		t := strings.TrimSpace(v)
+		if t == "" {
+			return nil, nil
+		}
+		if strings.HasPrefix(t, "[") {
+			var out []string
+			if err := json.Unmarshal([]byte(t), &out); err != nil {
+				return nil, fmt.Errorf("%s must be a JSON array of strings: %v", key, err)
+			}
+			return out, nil
+		}
+		var out []string
+		for _, part := range strings.Split(t, ",") {
+			if part = strings.TrimSpace(part); part != "" {
+				out = append(out, part)
+			}
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%s must be an array of task ids (got %#v)", key, raw)
+	}
 }
 
 // updateTaskArgs is the whitelist of arguments update_task recognises. A key

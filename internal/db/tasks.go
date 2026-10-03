@@ -308,6 +308,36 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 	if err != nil {
 		return nil, err
 	}
+	// A subtask's parent is resolved (a short id prefix, like every task_id
+	// argument), must exist in this project, and lends the subtask its board and
+	// trace when those are omitted (task 98be27bb: a prefix used to be stored
+	// verbatim — a dangling parent — and the subtask landed on another board).
+	// Resolved here, the single choke, so MCP, REST and batch dispatch all agree.
+	var parentTrace string
+	if parentTaskID != nil && strings.TrimSpace(*parentTaskID) == "" {
+		parentTaskID = nil
+	}
+	if parentTaskID != nil {
+		full, err := d.ResolveTaskID(strings.TrimSpace(*parentTaskID), project)
+		if err != nil {
+			return nil, fmt.Errorf("parent_task_id: %w", err)
+		}
+		var pBoard, pTrace sql.NullString
+		err = d.ro().QueryRow(`SELECT board_id, trace_id FROM tasks WHERE id = ? AND project = ?`, full, project).Scan(&pBoard, &pTrace)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, newTaskError(CodeTaskNotFound, "parent_task_id %s not found in project %s", *parentTaskID, project)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("parent_task_id: %w", err)
+		}
+		parentTaskID = &full
+		if boardID == nil && pBoard.Valid && pBoard.String != "" {
+			b := pBoard.String
+			boardID = &b
+		}
+		parentTrace = pTrace.String
+	}
+
 	originHolder := ""
 	if ticket.DiscoveredFrom != "" {
 		var oBoard, oTrace, oHolder sql.NullString
@@ -383,12 +413,8 @@ func (d *DB) DispatchTask(project, profileSlug, dispatchedBy, title, description
 	tid := ""
 	if traceID != nil && *traceID != "" {
 		tid = *traceID
-	} else if parentTaskID != nil {
-		var parentTrace sql.NullString
-		_ = d.ro().QueryRow("SELECT trace_id FROM tasks WHERE id = ? AND project = ?", *parentTaskID, project).Scan(&parentTrace)
-		if parentTrace.Valid && parentTrace.String != "" {
-			tid = parentTrace.String
-		}
+	} else if parentTrace != "" {
+		tid = parentTrace
 	}
 	if tid == "" {
 		tid = newTraceID()
