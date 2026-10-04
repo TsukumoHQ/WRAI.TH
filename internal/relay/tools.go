@@ -809,6 +809,7 @@ func listTasksTool() mcp.Tool {
 		),
 		mcp.WithString("assigned_to", mcp.Description("Filter by assignee")),
 		mcp.WithString("board_id", mcp.Description("Filter by board")),
+		mcp.WithString("linear_key", mcp.Description("Filter by Linear key (exact, e.g. SYN-123)")),
 		mcp.WithNumber("limit", mcp.Description("Max results (default 50)")),
 		mcp.WithBoolean("include_archived", mcp.Description("Include archived (default false)")),
 		mcp.WithBoolean("ready", mcp.Description("Pending, prerequisites met")),
