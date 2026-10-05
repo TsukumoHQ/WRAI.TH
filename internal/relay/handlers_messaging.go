@@ -201,7 +201,7 @@ func (h *Handlers) HandleSendMessage(ctx context.Context, req mcp.CallToolReques
 					expected = h.db.RecipientIsFleetExpected(project, to)
 				}
 				if !expected {
-					return toolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
+					return noRouteError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, open task they dispatched to you, notify channel, or reply-path (they haven't messaged you). Ask an admin/executive to relay, or have '%s' message you first (that grants a scoped reply-path).", to, to)), nil
 				}
 			}
 		}
@@ -394,7 +394,7 @@ func (h *Handlers) HandleSendStatus(ctx context.Context, req mcp.CallToolRequest
 				return toolResultError(fmt.Sprintf("permission check failed: %v", err)), nil
 			}
 			if !allowed {
-				return toolResultError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, notify channel, or reply-path.", to)), nil
+				return noRouteError(fmt.Sprintf("not authorized to message '%s' — no shared team, reports_to chain, open task they dispatched to you, notify channel, or reply-path.", to)), nil
 			}
 		}
 	}
