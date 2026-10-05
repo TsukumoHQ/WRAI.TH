@@ -4,7 +4,7 @@
 ## Branch : wraith-backend/e6ee47b4-backlog-list (from main)
 ## Relay task : e6ee47b4-07b3-4ede-bb0e-680d4604c904
 ## Trace : trace=9e09641701f2c1381691b485ddd607d5
-## Status : 🔵 IN REVIEW
+## Status : 🔵 SUBMITTED
 
 ## 1. Product Brief
 
@@ -61,14 +61,14 @@ Notes: no schema change, no DB write path touched, no new tool (schema net -11 b
 .niwa/receipts/p5-board-after.png                  | Bin 0 -> 57420 bytes
  .niwa/receipts/p5-board-backlog-column.txt         |  24 ++++++
  .niwa/receipts/p5-board-before.png                 | Bin 0 -> 56795 bytes
- .niwa/receipts/p5-board-shot.mjs                   |  27 +++++++
- ...ks-are-listable-and-shown-apart-on-the-board.md |  88 +++++++++++++++++++++
- internal/relay/list_backlog_test.go                |  84 ++++++++++++++++++++
+ .niwa/receipts/p5-board-shot.mjs                   |  27 ++++++
+ ...ks-are-listable-and-shown-apart-on-the-board.md |  96 +++++++++++++++++++++
+ internal/relay/list_backlog_test.go                |  84 ++++++++++++++++++
  internal/relay/tools.go                            |   2 +-
  internal/web/static/v2/api.js                      |   2 +
  internal/web/static/v2/board.js                    |   5 +-
  skill/relay.md                                     |   2 +
- 10 files changed, 232 insertions(+), 2 deletions(-)
+ 10 files changed, 240 insertions(+), 2 deletions(-)
 ```
 
 ## 4. QA Log
@@ -87,10 +87,13 @@ Notes: no schema change, no DB write path touched, no new tool (schema net -11 b
 - 🟢 AC4: One paragraph, all four primitives named. Fold happened in 094db84 ('round 2: ... one-paragraph skill note'). — evidence: skill/relay.md:73 — single paragraph 'Holding work back: use dispatch_task(backlog: true) ... Use pending ... Use park_task ... Use block_task ...' names all four primitives in one paragraph. — test: Inherent-docs criterion — text shape observable via grep. No behavioral test; falls under 'pure docs/comment' exception in the brief.
 - 🟢 AC5: 1512 tests pass. Suite exits 0. Budget passes too. Validate command exits 0. — evidence: /opt/homebrew/bin/go test -count=1 -tags fts5 ./... → 9 packages, all ok; internal/relay 35.349s. TestToolSchemaBudget reports 86 tools, 57120 bytes, margin 3296 (round-1 2046 margin failure fixed; main's adding of 'deploying' status gave the headroom). — test: TestToolSchemaBudget internal/relay/toolsize_test.go + full ./... suite
 
+### Round 2 — ❌ REJECTED by human:cto-tsukumo
+
 ## 5. Timeline
 
 - round 1 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
 - round 2 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
+- round 2 → **reject** (human:cto-tsukumo)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `e6ee47b4-07b3-4ede-bb0e-680d4604c904`._
