@@ -4,7 +4,7 @@
 ## Branch : wraith-backend/e6ee47b4-backlog-list (from main)
 ## Relay task : e6ee47b4-07b3-4ede-bb0e-680d4604c904
 ## Trace : trace=9e09641701f2c1381691b485ddd607d5
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -62,13 +62,13 @@ Notes: no schema change, no DB write path touched, no new tool (schema net -11 b
  .niwa/receipts/p5-board-backlog-column.txt         |  24 ++++++
  .niwa/receipts/p5-board-before.png                 | Bin 0 -> 56795 bytes
  .niwa/receipts/p5-board-shot.mjs                   |  27 +++++++
- ...ks-are-listable-and-shown-apart-on-the-board.md |  77 +++++++++++++++++++
- internal/relay/list_backlog_test.go                |  84 +++++++++++++++++++++
+ ...ks-are-listable-and-shown-apart-on-the-board.md |  88 +++++++++++++++++++++
+ internal/relay/list_backlog_test.go                |  84 ++++++++++++++++++++
  internal/relay/tools.go                            |   2 +-
  internal/web/static/v2/api.js                      |   2 +
  internal/web/static/v2/board.js                    |   5 +-
  skill/relay.md                                     |   2 +
- 10 files changed, 221 insertions(+), 2 deletions(-)
+ 10 files changed, 232 insertions(+), 2 deletions(-)
 ```
 
 ## 4. QA Log
@@ -80,9 +80,17 @@ Notes: no schema change, no DB write path touched, no new tool (schema net -11 b
 - 🔴 AC4: Substance is met; form (bullets vs paragraph) diverges from the criterion's wording. Treated as partial per AC traceability rules. — evidence: skill/relay.md:72-76 names backlog:true (groomed, not claimable, listed with status='backlog'), pending (ready to claim, claim_task(next: true)), park_task (pending waiting on founder/task), block_task (claimed/started hit obstacle). Content is accurate to the code. BUT AC4 specifies 'one paragraph'; the diff ships 4 bullets under a subheading, not a paragraph. Form mismatch. — test: NONE — doc-only criterion, no test possible
 - 🔴 AC5: The deterministic gate command itself fails on this PR. The doer's own PR note claims 'margin is 2060 bytes' but actual is 2046 — the doer miscalculated the schema budget impact and shipped without raising the cap. — evidence: Re-ran 'go test -tags fts5 ./...' on HEAD: FAIL — TestToolSchemaBudget fails because total tool schema size is 56322 bytes (margin 2046 bytes, below the 2048-byte headroom). The PR added 'backlog' to internal/relay/tools.go:791 but did NOT raise toolSchemaBudgetBytes from 58368 (comment at internal/relay/toolsize_test.go:24 explicitly says 'Raise the cap deliberately in the same PR when a genuinely new surface lands; never shrink headroom to pass'). 1461 passed, 1 failed across 12 packages. — test: TestToolSchemaBudget internal/relay/toolsize_test.go:38 — failing
 
+### Round 2 — ❌ REJECTED by review-e6ee47b4-07b3-4ede-bb0e-680d4604c904
+- 🟢 AC1: PASS locally (0.05s). Dispatch_task(backlog:true) writes a real row with status='backlog'; the handler filter holds for both branches. — evidence: internal/relay/tools.go:803 adds 'backlog' to listTasksTool()'s status enum. internal/relay/list_backlog_test.go:39 TestListTasksStatusBacklogOnlyBacklog asserts list_tasks{status:'backlog'} returns ONLY the backlog task and the enum contains 'backlog'. — test: TestListTasksStatusBacklogOnlyBacklog internal/relay/list_backlog_test.go:39
+- 🟢 AC2: PASS locally (0.04s). Pins both the alone-path and the status='backlog' combined path. — evidence: internal/relay/list_backlog_test.go:62 TestListTasksReadyNeverBacklog asserts list_tasks{ready:true} never returns the backlog task, alone AND combined with status='backlog'. Handler-side listTasks excludes status='backlog' from the ready branch. — test: TestListTasksReadyNeverBacklog internal/relay/list_backlog_test.go:62
+- 🟢 AC3: Headless-Chrome DOM dump + 56K before/after PNGs. Branch tip verified end-to-end against isolated relay + scratch DB. Backlog column appears distinct from Todo. — evidence: .niwa/receipts/p5-board-backlog-column.txt + p5-board-before.png + p5-board-after.png + p5-board-shot.mjs. shot.mjs opens v2 board headlessly via CDP, dumps every section[data-col] with cards. Before (base d6b53fa): 4 backlog cards in 'todo' column. After (this branch): 2 backlog cards in 'backlog' column, 2 ready cards in 'todo'. internal/web/static/v2/api.js:137 adds `case 'backlog': return 'backlog';` so status='backlog' no longer falls to default 'todo'. — test: DOM receipt in .niwa/receipts/p5-board-backlog-column.txt (no in-tree browser test; receipt IS the verifying artifact per AC text 'screenshot or DOM test in PR body')
+- 🟢 AC4: One paragraph, all four primitives named. Fold happened in 094db84 ('round 2: ... one-paragraph skill note'). — evidence: skill/relay.md:73 — single paragraph 'Holding work back: use dispatch_task(backlog: true) ... Use pending ... Use park_task ... Use block_task ...' names all four primitives in one paragraph. — test: Inherent-docs criterion — text shape observable via grep. No behavioral test; falls under 'pure docs/comment' exception in the brief.
+- 🟢 AC5: 1512 tests pass. Suite exits 0. Budget passes too. Validate command exits 0. — evidence: /opt/homebrew/bin/go test -count=1 -tags fts5 ./... → 9 packages, all ok; internal/relay 35.349s. TestToolSchemaBudget reports 86 tools, 57120 bytes, margin 3296 (round-1 2046 margin failure fixed; main's adding of 'deploying' status gave the headroom). — test: TestToolSchemaBudget internal/relay/toolsize_test.go + full ./... suite
+
 ## 5. Timeline
 
 - round 1 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
+- round 2 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `e6ee47b4-07b3-4ede-bb0e-680d4604c904`._
