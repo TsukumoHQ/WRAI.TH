@@ -701,6 +701,17 @@ func sendAnswerSanction(database *db.DB, notifier ackNotifier, a db.AnswerDue, c
 	} else {
 		text = fmt.Sprintf(child.SanctionTemplate, action, a.Asker, a.Recipient, minutes, answerQuote(a))
 	}
+	// What the recipient already wrote the asker since, so the bearer does
+	// not chase a question that is answered off-thread (task 8f62ecb7).
+	if last, err := database.LastMessageTo(a.Project, a.Recipient, a.Asker, a.AskedAt); err != nil {
+		log.Printf("[obligations] answer sanction %s last message: %v", child.ID, err)
+	} else if last != nil {
+		id := last.ID
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		text += fmt.Sprintf(" | %s last wrote %s at %s (msg %s): %q", a.Recipient, a.Asker, last.CreatedAt, id, last.Subject)
+	}
 	meta := fmt.Sprintf(`{"obligation_id":%q,"norm":%q,"message_id":%q}`, child.ID, child.NormID, a.MessageID)
 	replyTo := a.MessageID
 	msg, _, err := database.InsertMessageWithDeliveries(a.Project, "relay", child.Bearer, "notification", text, text, meta,

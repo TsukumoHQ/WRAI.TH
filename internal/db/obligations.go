@@ -836,6 +836,7 @@ func (d *DB) AnswerObligationByID(project, id string) (*AnswerObligation, error)
 const (
 	answerMatchReplyTo = "reply_to" // the reply's reply_to chain reaches the ask
 	answerMatchIDCite  = "id_cite"  // a message to the asker cites the ask id
+	answerMatchTaskID  = "task_id"  // a message to the asker on the ask's task
 )
 
 // answerCiteLen is how much of the ask id a cite must carry: the 8-hex prefix
@@ -846,8 +847,9 @@ const answerCiteLen = 8
 // discharge and at breach instead of trusting the claim: one of from sent,
 // at or after since, a message whose reply_to chain reaches messageID
 // (reply_to), else a message to the ask's sender whose subject or content
-// contains messageID's first 8 hex chars (id_cite). It returns the reply id
-// and the match kind; ok is false when neither exists.
+// contains messageID's first 8 hex chars (id_cite), else a message to the
+// ask's sender tied to the ask's task (task_id, task 8f62ecb7). It returns the
+// reply id and the match kind; ok is false when none exists.
 func answeredBy(q answerQ, project string, from []string, messageID, since string) (replyID, match string, ok bool) {
 	if len(from) == 0 {
 		return "", "", false
@@ -877,30 +879,38 @@ func answeredBy(q answerQ, project string, from []string, messageID, since strin
 		}
 	}
 
-	if len(messageID) < answerCiteLen {
-		return "", "", false
-	}
 	var asker string
-	err = q.QueryRow(`SELECT from_agent FROM messages WHERE id = ? AND project = ?`, messageID, project).Scan(&asker)
+	var taskID sql.NullString
+	err = q.QueryRow(`SELECT from_agent, task_id FROM messages WHERE id = ? AND project = ?`, messageID, project).Scan(&asker, &taskID)
 	if errors.Is(err, sql.ErrNoRows) {
-		err = q.QueryRow(`SELECT from_agent FROM message_tombstones WHERE id = ? AND project = ?`, messageID, project).Scan(&asker)
+		err = q.QueryRow(`SELECT from_agent, task_id FROM message_tombstones WHERE id = ? AND project = ?`, messageID, project).Scan(&asker, &taskID)
 	}
 	if err != nil || asker == "" {
 		return "", "", false
 	}
 	// Bearer -> asker only: addressed to the asker, or delivered to it.
-	cite := strings.ToLower(messageID[:answerCiteLen])
-	err = q.QueryRow(`SELECT m.id FROM messages m
-		WHERE m.project = ? AND m.from_agent IN (`+ph+`) AND m.created_at >= ? AND m.id <> ?
+	toAsker := `SELECT m.id FROM messages m
+		WHERE m.project = ? AND m.from_agent IN (` + ph + `) AND m.created_at >= ? AND m.id <> ?
 		  AND (lower(m.to_agent) = lower(?)
-		    OR EXISTS (SELECT 1 FROM deliveries dl WHERE dl.message_id = m.id AND lower(dl.to_agent) = lower(?)))
-		  AND (instr(lower(m.subject), ?) > 0 OR instr(lower(m.content), ?) > 0)
-		ORDER BY m.created_at, m.id LIMIT 1`,
-		append(append(args, since, messageID, asker, asker), cite, cite)...).Scan(&replyID)
+		    OR EXISTS (SELECT 1 FROM deliveries dl WHERE dl.message_id = m.id AND lower(dl.to_agent) = lower(?)))`
+	base := append(args, since, messageID, asker, asker)
+	if len(messageID) >= answerCiteLen {
+		cite := strings.ToLower(messageID[:answerCiteLen])
+		err = q.QueryRow(toAsker+` AND (instr(lower(m.subject), ?) > 0 OR instr(lower(m.content), ?) > 0)
+			ORDER BY m.created_at, m.id LIMIT 1`, append(base[:len(base):len(base)], cite, cite)...).Scan(&replyID)
+		if err == nil {
+			return replyID, answerMatchIDCite, true
+		}
+	}
+	if taskID.String == "" {
+		return "", "", false
+	}
+	err = q.QueryRow(toAsker+` AND m.task_id = ? ORDER BY m.created_at, m.id LIMIT 1`,
+		append(base[:len(base):len(base)], taskID.String)...).Scan(&replyID)
 	if err != nil {
 		return "", "", false
 	}
-	return replyID, answerMatchIDCite, true
+	return replyID, answerMatchTaskID, true
 }
 
 // DischargeAnswerObligation fulfils an active answer obligation only if its
@@ -1120,6 +1130,28 @@ func (d *DB) BreachAnswerObligation(due AnswerDue, childNorm, bearer string, now
 		return nil, false, fmt.Errorf("answer breach commit: %w", err)
 	}
 	return child, true, nil
+}
+
+// LastMessage is the message an answer sanction quotes.
+type LastMessage struct{ ID, Subject, CreatedAt string }
+
+// LastMessageTo is from's most recent message to to (addressed to it, or
+// delivered to it) created after since, for the answer sanction to quote
+// (task 8f62ecb7). nil when there is none. Read-only.
+func (d *DB) LastMessageTo(project, from, to, since string) (*LastMessage, error) {
+	var m LastMessage
+	err := d.ro().QueryRow(`SELECT m.id, m.subject, m.created_at FROM messages m
+		WHERE m.project = ? AND lower(m.from_agent) = lower(?) AND m.created_at > ?
+		  AND (lower(m.to_agent) = lower(?)
+		    OR EXISTS (SELECT 1 FROM deliveries dl WHERE dl.message_id = m.id AND lower(dl.to_agent) = lower(?)))
+		ORDER BY m.created_at DESC, m.id DESC LIMIT 1`, project, from, since, to, to).Scan(&m.ID, &m.Subject, &m.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("last message %s -> %s: %w", from, to, err)
+	}
+	return &m, nil
 }
 
 // UnansweredAsk is one recipient's count of answer obligations left
