@@ -4,7 +4,7 @@
 ## Branch : wraith-backend/e6ee47b4-backlog-list (from main)
 ## Relay task : e6ee47b4-07b3-4ede-bb0e-680d4604c904
 ## Trace : trace=9e09641701f2c1381691b485ddd607d5
-## Status : 🔵 SUBMITTED
+## Status : 🔵 IN REVIEW
 
 ## 1. Product Brief
 
@@ -59,16 +59,16 @@ Notes: no schema change, no DB write path touched, no new tool (schema net -11 b
 
 ```
 .niwa/receipts/p5-board-after.png                  | Bin 0 -> 57420 bytes
- .niwa/receipts/p5-board-backlog-column.txt         |  24 ++++++
+ .niwa/receipts/p5-board-backlog-column.txt         |  24 +++++
  .niwa/receipts/p5-board-before.png                 | Bin 0 -> 56795 bytes
  .niwa/receipts/p5-board-shot.mjs                   |  27 ++++++
- ...ks-are-listable-and-shown-apart-on-the-board.md |  96 +++++++++++++++++++++
- internal/relay/list_backlog_test.go                |  84 ++++++++++++++++++
+ ...ks-are-listable-and-shown-apart-on-the-board.md |  99 +++++++++++++++++++++
+ internal/relay/list_backlog_test.go                |  84 +++++++++++++++++
  internal/relay/tools.go                            |   2 +-
  internal/web/static/v2/api.js                      |   2 +
  internal/web/static/v2/board.js                    |   5 +-
  skill/relay.md                                     |   2 +
- 10 files changed, 240 insertions(+), 2 deletions(-)
+ 10 files changed, 243 insertions(+), 2 deletions(-)
 ```
 
 ## 4. QA Log
@@ -89,11 +89,19 @@ Notes: no schema change, no DB write path touched, no new tool (schema net -11 b
 
 ### Round 2 — ❌ REJECTED by human:cto-tsukumo
 
+### Round 3 — ❌ REJECTED by review-e6ee47b4-07b3-4ede-bb0e-680d4604c904
+- 🟢 AC1: AC1 met: behavioral test dispatches one backlog + one pending task and asserts HandleListTasks(status=backlog) returns exactly the backlog task; also asserts the schema enum contains backlog so a future regression removing the enum value would fail — evidence: internal/relay/tools.go:803 adds backlog to listTasksTool() status enum (one of the original P5 hunks preserved across all 3 fix rounds) — test: TestListTasksStatusBacklogOnlyBacklog at internal/relay/list_backlog_test.go:39 - go test -tags fts5 -run TestListTasksStatusBacklogOnlyBacklog -v PASS 0.06s; behavioral (dispatches real tasks, calls HandleListTasks, asserts returned ids)
+- 🟢 AC2: AC2 met: behavioral test pins that ready=true never returns the backlog task; combined status=backlog must not override the ready predicate (this would be a regression if the handler were ever refactored to AND status into the ready branch) — evidence: internal/relay/list_backlog_test.go:62 - TestListTasksReadyNeverBacklog runs both ready=true alone AND ready=true & status=backlog branches against a fleet with one backlog + one pending task — test: TestListTasksReadyNeverBacklog at internal/relay/list_backlog_test.go:62 - go test -tags fts5 -run TestListTasksReadyNeverBacklog -v PASS 0.05s
+- 🟢 AC3: AC3 met: the AC text names the verifying artifact (screenshot or DOM test in PR body) and the diff ships the DOM receipt + screenshots + script; no in-tree browser test exists for this repo, consistent with console_v2_boards_test.go style. The receipt was produced against an isolated relay with a live DB (not mocks). — evidence: internal/web/static/v2/api.js:140 adds case backlog in columnFor() so a native backlog task no longer falls to default todo; backlog shown in own column. DOM receipt .niwa/receipts/p5-board-backlog-column.txt + screenshots p5-board-before.png / p5-board-after.png + script p5-board-shot.mjs (headless Chrome over CDP dumps every section[data-col]) — test: DOM receipt .niwa/receipts/p5-board-backlog-column.txt (AC text explicitly allows screenshot or DOM test in PR body); BEFORE (base d6b53fa) shows 4 tasks in todo column including 2 groomed; AFTER (branch) shows backlog 2 / todo 2 - exception applies: AC3 is inherently a receipt in PR body criterion per its own text
+- 🟢 AC4: AC4 met: form (one paragraph, not bullets) preserved across rounds 2 and 3; substance (all four primitives named with their semantics) matches the tool implementations. No behavioral test possible for a prose criterion. — evidence: skill/relay.md:73 - single paragraph Holding work back: use dispatch_task(backlog: true) ... Use pending ... Use park_task ... Use block_task ... names all four primitives in one paragraph (no bullets) — test: Inherent-docs criterion (pure prose); verifiable via grep: AC4 falls under pure docs/comment exception per AC text. The paragraph content is accurate to the code: dispatch_task(backlog:true) writes status=backlog, park_task holds pending on a founder/task with auto-unpark, block_task returns to prior status on resume_task
+- 🟢 AC5: AC5 met: full suite green; targeted AC tests green. Round-2 blocker (TestBoardsShowDeployingColumn deletion) RESOLVED - the deleted test has been restored in this rounds delta and passes. Round-2 AC5 blocker (TestToolSchemaBudget margin 2046 < 2048 headroom) RESOLVED - round-3 delta bumped toolSchemaBudgetBytes to 60416 with documented justification, current margin 3206. — evidence: go test -tags fts5 -count=1 ./... executed in review worktree at HEAD (35158cd): all 9 packages OK (agent-relay 0.405s, agent-relay/internal/cli 0.210s, agent-relay/internal/config 0.764s, agent-relay/internal/connector/linear 6.417s, agent-relay/internal/db 39.920s, agent-relay/internal/ingest 1.222s, agent-relay/internal/normalize 1.309s, agent-relay/internal/relay 47.158s; 4 packages no-test-files). Also go vet -tags fts5 ./... and go build -tags fts5 ./... silent. TestToolSchemaBudget PASS margin 3206 (headroom 2048). — test: Full suite go test -tags fts5 ./... ; plus targeted TestBoardsShowDeployingColumn (PASS 0.00s), TestListTasksStatusBacklogOnlyBacklog (PASS 0.06s), TestListTasksReadyNeverBacklog (PASS 0.05s), TestListTasks_LinearKeyFilter / UnknownLinearKey / LinearKeyAndStatus (PASS ~0.06s each), TestListTasks_StatusDeploying (PASS 0.07s)
+
 ## 5. Timeline
 
 - round 1 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
 - round 2 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
 - round 2 → **reject** (human:cto-tsukumo)
+- round 3 → **reject** (review-e6ee47b4-07b3-4ede-bb0e-680d4604c904)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `e6ee47b4-07b3-4ede-bb0e-680d4604c904`._
