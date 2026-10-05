@@ -393,11 +393,16 @@ func (d *DB) GetNotifyChannels(agentName, project string) ([]string, error) {
 
 // --- Permission check ---
 
+// reportsChainMaxDepth bounds the reports_to walk in CanMessage (and stops a
+// cycle).
+const reportsChainMaxDepth = 8
+
 // CanMessage checks if sender can message target.
 // Rules:
 //   - Broadcast ("*") → only admin team members
 //   - Same team → allowed
-//   - reports_to chain → allowed
+//   - reports_to chain (up from sender, or target directly under sender) → allowed
+//   - target dispatched sender a task not done/cancelled → allowed
 //   - notify_channels → allowed
 //   - Admin team type → unrestricted
 func (d *DB) CanMessage(project, sender, target string) (bool, error) {
@@ -441,17 +446,34 @@ func (d *DB) CanMessage(project, sender, target string) (bool, error) {
 		return true, nil
 	}
 
-	// reports_to chain check (direct only — sender reports to target or target reports to sender)
+	// reports_to chain check: target anywhere up sender's reports_to chain
+	// (task be29e23f), or target reporting directly to sender.
 	var reportsChain int
 	_ = d.ro().QueryRow(
-		`SELECT COUNT(*) FROM agents
-		 WHERE project = ? AND (
-			(name = ? AND reports_to = ?) OR
-			(name = ? AND reports_to = ?)
-		 )`,
-		project, sender, target, target, sender,
+		`WITH RECURSIVE up(name, depth) AS (
+			SELECT reports_to, 1 FROM agents WHERE project = ? AND name = ? AND reports_to IS NOT NULL AND reports_to <> ''
+			UNION
+			SELECT a.reports_to, up.depth + 1 FROM agents a JOIN up ON a.name = up.name
+			WHERE a.project = ? AND a.reports_to IS NOT NULL AND a.reports_to <> '' AND up.depth < ?
+		 )
+		 SELECT (SELECT COUNT(*) FROM up WHERE name = ?)
+		      + (SELECT COUNT(*) FROM agents WHERE project = ? AND name = ? AND reports_to = ?)`,
+		project, sender, project, reportsChainMaxDepth, target, project, target, sender,
 	).Scan(&reportsChain)
 	if reportsChain > 0 {
+		return true, nil
+	}
+
+	// Dispatcher route (task be29e23f): a doer can always answer the agent
+	// that dispatched it a still-open task, even after the dispatch notice
+	// (and so its reply-path) was purged by TTL.
+	var dispatched int
+	_ = d.ro().QueryRow(
+		`SELECT COUNT(*) FROM tasks
+		 WHERE project = ? AND assigned_to = ? AND dispatched_by = ? AND status NOT IN ('done', 'cancelled')`,
+		project, sender, target,
+	).Scan(&dispatched)
+	if dispatched > 0 {
 		return true, nil
 	}
 

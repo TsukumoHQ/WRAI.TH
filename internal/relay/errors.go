@@ -73,6 +73,16 @@ func permissionError(code, message string) *mcp.CallToolResult {
 	return toolError(code, CategoryPermission, false, message, nil)
 }
 
+// ruleNoRoute names the send permission rule that refuses a message when
+// CanMessage finds no route (task be29e23f).
+const ruleNoRoute = "send.no_route"
+
+// noRouteError is the FORBIDDEN refusal of a send with no route; the body
+// carries the refusing rule in its message and in a "rule" field.
+func noRouteError(message string) *mcp.CallToolResult {
+	return toolError(CodeForbidden, CategoryPermission, false, ruleNoRoute+": "+message, map[string]any{"rule": ruleNoRoute})
+}
+
 // transientError marks an error whose same-call retry may later succeed.
 func transientError(code, message string) *mcp.CallToolResult {
 	return toolError(code, CategoryTransient, true, message, nil)
