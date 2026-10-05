@@ -28,15 +28,15 @@ ROOT_CAUSE: internal/relay/cleanup.go:651 (origin/main) resolved the answer.role
 
 RED_EVIDENCE:
 cmd: go test -tags fts5 ./internal/relay -run TestAnswerEscalation
-test_sha: 3c54d0d
+test_sha: 06f0c8c
 output:
---- FAIL: TestAnswerEscalationSkipsSender (0.09s)
+--- FAIL: TestAnswerEscalationSkipsSender (0.27s)
         obligations_answer_chain_test.go:70: escalated to niwa2 (answer.role), want user (answer.human)
         obligations_answer_chain_test.go:81: role rung on lead (answer.role), want boss (answer.role): the asker is skipped, next up
---- FAIL: TestAnswerEscalationInactiveReportOfSender (0.05s)
+--- FAIL: TestAnswerEscalationInactiveReportOfSender (0.12s)
     obligations_answer_chain_test.go:98: escalated to niwa2 (answer.role), want user (answer.human)
 FAIL
-FAIL	agent-relay/internal/relay	0.625s
+FAIL	agent-relay/internal/relay	0.940s
 FAIL
 
 ## 3. Files changed
