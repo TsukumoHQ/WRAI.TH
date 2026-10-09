@@ -2,8 +2,13 @@
 # Stop → relay. Two things, both fire-and-forget and fail-silent:
 #   1. activity event (agent turn ended → waiting for user)
 #   2. real token usage: read the NEW transcript lines since last Stop and sum
-#      .message.usage, so the relay records true input/output/cache tokens
+#      their usage, so the relay records true input/output/cache tokens
 #      instead of a bytes/4 estimate. Line-offset per session avoids re-counting.
+#      Claude Code writes one line per content block, each repeating its
+#      message's usage: count each message.id once. Codex rollouts carry usage
+#      in event_msg token_count (info.last_token_usage, per turn); its
+#      input_tokens includes the cached part and output_tokens already includes
+#      reasoning. Any other shape ingests nothing and warns once on stderr.
 RELAY_URL="${RELAY_URL:-http://localhost:8090}"
 INPUT=$(cat)
 command -v jq >/dev/null 2>&1 || exit 0
@@ -29,15 +34,40 @@ if [ -n "$TP" ] && [ -f "$TP" ]; then
   TOTAL=$(wc -l < "$TP" 2>/dev/null | tr -d ' ')
   case "$TOTAL" in ''|*[!0-9]*) TOTAL=0 ;; esac
   if [ "$TOTAL" -gt "$OFFSET" ]; then
-    BODY=$(tail -n +$((OFFSET + 1)) "$TP" 2>/dev/null | jq -s --arg s "$SID" --arg ts "$TS" '
-      [ .[] | select(.message.usage != null) ] as $m
-      | [ $m[].message.usage ] as $u
-      | { session_id: $s, ts: $ts,
-          input:          ([ $u[].input_tokens              // 0 ] | add // 0),
-          output:         ([ $u[].output_tokens             // 0 ] | add // 0),
-          cache_read:     ([ $u[].cache_read_input_tokens    // 0 ] | add // 0),
-          cache_creation: ([ $u[].cache_creation_input_tokens // 0 ] | add // 0),
-          model:          ([ $m[].message.model // empty ] | last // "") }' 2>/dev/null)
+    BODY=$(tail -n +$((OFFSET + 1)) "$TP" 2>/dev/null | jq -c -s --arg s "$SID" --arg ts "$TS" '
+      [ .[] | objects ] as $l
+      | (if any($l[]; (.payload | type) == "object"
+                  and (.type == "session_meta" or .type == "turn_context" or .type == "event_msg" or .type == "response_item"))
+           then "codex"
+         elif any($l[]; (.message | type) == "object" or (.sessionId | type) == "string")
+           then "claude"
+         else "unknown" end) as $fmt
+      | if $fmt == "codex" then
+          [ $l[] | select(.type == "event_msg" and .payload.type == "token_count")
+                 | .payload.info.last_token_usage // empty ] as $u
+          | { format: $fmt, session_id: $s, ts: $ts,
+              input:          ([ $u[] | (.input_tokens // 0) - (.cached_input_tokens // 0) ] | add // 0),
+              output:         ([ $u[].output_tokens            // 0 ] | add // 0),
+              cache_read:     ([ $u[].cached_input_tokens      // 0 ] | add // 0),
+              cache_creation: ([ $u[].cache_write_input_tokens // 0 ] | add // 0),
+              model:          ([ $l[] | select(.type == "turn_context") | .payload.model // empty ] | last // "") }
+        else
+          [ $l[] | select(.message.usage != null) ] as $m
+          | [ $m | to_entries[] | {key: (.value.message.id // "#\(.key)"), value: .value.message.usage} ]
+            | from_entries | [ .[] ] as $u
+          | { format: $fmt, session_id: $s, ts: $ts,
+              input:          ([ $u[].input_tokens                // 0 ] | add // 0),
+              output:         ([ $u[].output_tokens               // 0 ] | add // 0),
+              cache_read:     ([ $u[].cache_read_input_tokens     // 0 ] | add // 0),
+              cache_creation: ([ $u[].cache_creation_input_tokens // 0 ] | add // 0),
+              model:          ([ $m[].message.model // empty ] | last // "") }
+        end' 2>/dev/null)
+    case "$BODY" in
+      ''|*'"format":"unknown"'*)
+        echo "agent-relay ingest-stop: unrecognised transcript format, 0 tokens ingested ($TP)" >&2
+        BODY="" ;;
+      *) BODY=$(printf '%s' "$BODY" | jq -c 'del(.format)' 2>/dev/null) ;;
+    esac
     if [ -n "$BODY" ]; then
       curl -fsS -m 2 -X POST "$RELAY_URL/api/ingest/tokens" "${AUTH[@]}" \
         -H "Content-Type: application/json" -d "$BODY" >/dev/null 2>&1 &
