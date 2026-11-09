@@ -686,6 +686,22 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 		hardCeil = maxBytes * budgetHardMultiplier
 	}
 	floorSeen := map[string]int{}
+	// Reserve sessionFloorCeiling room for the behavior/context floor rows up
+	// front (round 1 review, ffd35635): constraints come first in the input, so
+	// against a plain running total fat constraints spent the whole ceiling and
+	// the behavior/context floors — guaranteed since af783f93 — dropped out. The
+	// reserved rows are exactly the first sessionLayerFloor rows of each of those
+	// layers in input order, which the loop below always routes to the floor
+	// branch (floorSeen <= index-in-layer), so each releases its own reservation.
+	reserved := 0
+	reservedLeft := map[string]int{}
+	for _, m := range mems {
+		if m.Layer == "constraints" || reservedLeft[m.Layer] >= sessionLayerFloor(m.Layer) {
+			continue
+		}
+		reservedLeft[m.Layer]++
+		reserved += memorySummaryBytes(summarizeMemory(m))
+	}
 	for _, m := range mems {
 		s := summarizeMemory(m)
 		b := memorySummaryBytes(s)
@@ -703,9 +719,15 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 		// sessionFloorCeiling, so fat constraints (long keys) can no longer push
 		// relevant_memories past B_max of the production budget. Independent of
 		// maxBytes so the floor stays guaranteed under a tiny caller budget. The
-		// first entry always surfaces.
+		// first entry always surfaces. The ceiling check counts the bytes still
+		// reserved for the behavior/context floors not yet met, so a constraint
+		// floor row cannot take their room.
 		if floorSeen[m.Layer] < sessionLayerFloor(m.Layer) {
-			if used+b > sessionFloorCeiling && len(out) > 0 {
+			if reservedLeft[m.Layer] > 0 {
+				reservedLeft[m.Layer]--
+				reserved -= b
+			}
+			if used+b+reserved > sessionFloorCeiling && len(out) > 0 {
 				continue
 			}
 			floorSeen[m.Layer]++

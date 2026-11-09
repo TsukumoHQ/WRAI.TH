@@ -337,3 +337,51 @@ func TestProjectMemories_ConstraintsCountInBudget(t *testing.T) {
 		t.Fatalf("floor pushed relevant_memories to %dB > hard ceiling %dB", used, sessionMemoryBudget*budgetHardMultiplier)
 	}
 }
+
+// AC4 round 1 review: the floor ceiling must not let a constraint-heavy boot
+// starve the guaranteed behavior/context floors. Repro: 8 constraints whose
+// floor rows alone exceed sessionFloorCeiling, then one behavior and one
+// context memory — both must still surface, and the total stays bounded.
+func TestProjectMemories_FloorCeilingKeepsBehaviorContextFloors(t *testing.T) {
+	var mems []models.Memory
+	for i := 0; i < sessionConstraintFloor; i++ {
+		mems = append(mems, models.Memory{
+			Key: fmt.Sprintf("%02d-%s", i, strings.Repeat("k", 500)), Value: strings.Repeat("v", 400),
+			Scope: "project", Layer: "constraints",
+		})
+	}
+	mems = append(mems,
+		models.Memory{Key: "beh-floor", Value: strings.Repeat("b", 150), Scope: "project", Layer: "behavior"},
+		models.Memory{Key: "ctx-floor", Value: strings.Repeat("x", 150), Scope: "project", Layer: "context"},
+	)
+	all := 0
+	for _, m := range mems[:sessionConstraintFloor] {
+		all += memorySummaryBytes(summarizeMemory(m))
+	}
+	if all <= sessionFloorCeiling {
+		t.Fatalf("fixture too small: constraint floor %dB must exceed ceiling %dB", all, sessionFloorCeiling)
+	}
+	out := projectMemories(mems, sessionMemoryBudget)
+	layers := map[string]int{}
+	used := 0
+	for _, s := range out {
+		used += memorySummaryBytes(s)
+		switch {
+		case s.Key == "beh-floor":
+			layers["behavior"]++
+		case s.Key == "ctx-floor":
+			layers["context"]++
+		default:
+			layers["constraints"]++
+		}
+	}
+	if layers["behavior"] != 1 || layers["context"] != 1 {
+		t.Fatalf("behavior/context floors dropped by fat constraints: layers %v", layers)
+	}
+	if layers["constraints"] == 0 {
+		t.Fatalf("constraint floor emptied: layers %v", layers)
+	}
+	if used > sessionFloorCeiling {
+		t.Fatalf("relevant_memories %dB > floor ceiling %dB (layers %v)", used, sessionFloorCeiling, layers)
+	}
+}
