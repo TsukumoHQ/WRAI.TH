@@ -2140,8 +2140,14 @@ func TestRecallCaptureEndToEnd(t *testing.T) {
 	if _, err := h.HandleGetMemory(ctx, call(map[string]any{"project": "p1", "as": "dev", "key": "auth-policy"})); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.HandleSearchMemory(ctx, call(map[string]any{"project": "p1", "as": "dev", "query": "fridays"})); err != nil {
+	searchRes, err := h.HandleSearchMemory(ctx, call(map[string]any{"project": "p1", "as": "dev", "query": "fridays"}))
+	if err != nil {
 		t.Fatal(err)
+	}
+	// search_memory is FTS5: without -tags fts5 it errors and serves nothing to
+	// capture (same skip as the other FTS5 tests; the verify_cmd may omit the tag).
+	if searchRes.IsError {
+		t.Skip("FTS5 not available in this build")
 	}
 	if _, err := h.HandleRecallDecisions(ctx, call(map[string]any{"project": "p1", "as": "dev"})); err != nil {
 		t.Fatal(err)
