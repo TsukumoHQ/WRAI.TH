@@ -35,6 +35,10 @@ var formatParam = mcp.WithString("format", mcp.Description("'md' (default, markd
 // register_agent and get_session_context.
 var sessionContextParam = mcp.WithString("session_context", mcp.Description("'full' (default) or 'minimal' (lean boot payload)"), mcp.Enum("full", "minimal"))
 
+// registerSessionContextParam is register_agent's session_context: same values,
+// but the default depends on whether the agent is already live (ffd35635).
+var registerSessionContextParam = mcp.WithString("session_context", mcp.Description("'full' or 'minimal'. Default: minimal when re-registering a live agent, full otherwise"), mcp.Enum("full", "minimal"))
+
 func whoamiTool() mcp.Tool {
 	return mcp.NewTool(
 		"whoami",
@@ -60,7 +64,7 @@ func registerAgentTool() mcp.Tool {
 		mcp.WithString("cwd", mcp.Description("Worktree dir ($PWD): identity key that rebinds session_id after /clear. A shared cwd resolves by name.")),
 		mcp.WithString("interest_tags", mcp.Description("JSON array of tags for context budget filtering")),
 		mcp.WithNumber("max_context_bytes", mcp.Description("Max bytes for budget-pruned inbox (default 16384)")),
-		sessionContextParam,
+		registerSessionContextParam,
 	)
 }
 
@@ -489,6 +493,7 @@ func dispatchTaskTool() mcp.Tool {
 		"dispatch_task",
 		mcp.WithDescription("Dispatch a pending task to a profile; profile='human' for a human action. No board_id: auto with 0-1 boards, refused if several."),
 		asParam,
+		verboseParam,
 		projectParam,
 		mcp.WithString("profile", mcp.Description("Profile slug to dispatch to"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("Task title"), mcp.Required()),
@@ -717,6 +722,7 @@ func cancelTaskTool() mcp.Tool {
 		"cancel_task",
 		mcp.WithDescription("Cancel a task from any state. Notifies the dispatcher."),
 		asParam,
+		verboseParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("reason", mcp.Description("Why cancelled")),
@@ -895,6 +901,7 @@ func updateTaskTool() mcp.Tool {
 		"update_task",
 		mcp.WithDescription("Update fields (not status); progress_note appends. goal/acceptance_criteria/dod/verify_cmd: dispatcher-only, audited. assigned_to moves a claimed lease (old doer notified); profile_slug alone on a claimed task is refused. Unknown fields refused."),
 		asParam,
+		verboseParam,
 		projectParam,
 		mcp.WithString("task_id", mcp.Description("Task ID"), mcp.Required()),
 		mcp.WithString("title", mcp.Description("New title")),

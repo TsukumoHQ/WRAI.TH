@@ -70,7 +70,7 @@ func TestUpdateTask_SelfDispatchedContractNeedsSignoffFromAbove(t *testing.T) {
 
 	// The doer's reports_to lead may sign off the new contract.
 	res, _ := h.HandleUpdateTask(ctx, call(map[string]any{
-		"project": "p1", "as": "lead", "task_id": taskID,
+		"project": "p1", "as": "lead", "task_id": taskID, "verbose": true,
 		"goal": "signed goal", "acceptance_criteria": `["ac1","ac2"]`, "dod": "signed dod",
 	}))
 	if res.IsError {
@@ -86,7 +86,7 @@ func TestUpdateTask_SelfDispatchedContractNeedsSignoffFromAbove(t *testing.T) {
 		t.Fatalf("register exec: %v", err)
 	}
 	exRes, _ := h.HandleUpdateTask(ctx, call(map[string]any{
-		"project": "p1", "as": "chief", "task_id": taskID, "dod": "exec dod",
+		"project": "p1", "as": "chief", "task_id": taskID, "dod": "exec dod", "verbose": true,
 	}))
 	if exRes.IsError {
 		t.Fatalf("an executive should be able to sign off the contract: %s", expectError(t, exRes))

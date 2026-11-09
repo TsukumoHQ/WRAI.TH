@@ -66,6 +66,11 @@ const sessionMemoryBudget = 2600
 // of the 20 KB boot payload (WRAITH R1).
 const sessionConstraintFloor = 8
 
+// sessionFloorCeiling bounds the guaranteed layer floors in bytes: B_max of the
+// production budget. Ten floor rows at the 200-byte preview fit far below it;
+// only pathological rows (multi-KB keys) hit it (tokens L3, ffd35635).
+const sessionFloorCeiling = sessionMemoryBudget * budgetHardMultiplier
+
 // sessionBehaviorFloor and sessionContextFloor guarantee the newest
 // behavior-layer and context-layer memory a place in boot, like the constraint
 // floor: without them a constraint-heavy project spends the whole budget on the
@@ -694,7 +699,15 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 		// remainder. Beyond its floor, a memory is treated like any other
 		// (previously ALL constraints bypassed the budget, making it dead — the
 		// 20 KB-boot root cause, WRAITH R1).
+		// The floor is bounded too (tokens L3, ffd35635): a floor row obeys
+		// sessionFloorCeiling, so fat constraints (long keys) can no longer push
+		// relevant_memories past B_max of the production budget. Independent of
+		// maxBytes so the floor stays guaranteed under a tiny caller budget. The
+		// first entry always surfaces.
 		if floorSeen[m.Layer] < sessionLayerFloor(m.Layer) {
+			if used+b > sessionFloorCeiling && len(out) > 0 {
+				continue
+			}
 			floorSeen[m.Layer]++
 			out = append(out, s)
 			used += b

@@ -29,7 +29,7 @@ func TestUpdateTask_NativeArrayACCoercedWithProgressNote(t *testing.T) {
 	taskID := dispatchForTypedFieldTest(t, h, "native array ac")
 
 	res, _ := h.HandleUpdateTask(ctx, call(map[string]any{
-		"project": "p1", "as": "cto", "task_id": taskID,
+		"project": "p1", "as": "cto", "task_id": taskID, "verbose": true,
 		"acceptance_criteria": []any{"AC one thing", "AC two thing"},
 		"progress_note":       "made progress",
 	}))

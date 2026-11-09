@@ -23,7 +23,7 @@ func TestUpdateTask_DispatcherRescopesContract_Audited(t *testing.T) {
 	taskID := task["id"].(string)
 
 	updateRes, _ := h.HandleUpdateTask(ctx, call(map[string]any{
-		"project": "p1", "as": "cto", "task_id": taskID,
+		"project": "p1", "as": "cto", "task_id": taskID, "verbose": true,
 		"goal": "new goal", "acceptance_criteria": `["new ac"]`, "dod": "new dod",
 	}))
 	if updateRes.IsError {

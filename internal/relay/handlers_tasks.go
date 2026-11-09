@@ -205,7 +205,10 @@ func (h *Handlers) HandleDispatchTask(ctx context.Context, req mcp.CallToolReque
 	}
 	profile = task.ProfileSlug
 
-	resp := map[string]any{"task": task}
+	resp := map[string]any{"task": dispatchEcho(task)}
+	if req.GetBool("verbose", false) {
+		resp["task"] = task
+	}
 	if autoBoard != nil {
 		resp["auto_board"] = autoBoard
 		resp["hint"] = fmt.Sprintf("Auto-created 'backlog' board (id: %s) since no boards existed.", autoBoard.ID)
@@ -1284,7 +1287,10 @@ func (h *Handlers) HandleCancelTask(ctx context.Context, req mcp.CallToolRequest
 		}
 	}
 
-	return h.resultJSONTracked(project, agent, "cancel_task", task)
+	if req.GetBool("verbose", false) {
+		return h.resultJSONTracked(project, agent, "cancel_task", task)
+	}
+	return h.resultJSONTracked(project, agent, "cancel_task", taskEchoBase(task))
 }
 
 func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -1469,7 +1475,10 @@ func (h *Handlers) HandleUpdateTask(ctx context.Context, req mcp.CallToolRequest
 	}
 
 	h.events.Emit(MCPEvent{Type: "task", Action: "update", Agent: agent, Project: project, Label: task.Title})
-	return h.resultJSONTracked(project, agent, "update_task", task)
+	if req.GetBool("verbose", false) {
+		return h.resultJSONTracked(project, agent, "update_task", task)
+	}
+	return h.resultJSONTracked(project, agent, "update_task", updateEcho(task, req.GetArguments()))
 }
 
 // stringListArg reads a list-of-ids argument that callers send in more than
@@ -1528,6 +1537,7 @@ var updateTaskArgs = map[string]bool{
 	"assigned_to": true, "profile_slug": true, "progress_note": true,
 	"goal": true, "acceptance_criteria": true, "dod": true, "verify_cmd": true,
 	"blocked_by": true, "blocked_by_remove": true, "parent_task_id": true,
+	"verbose": true,
 }
 
 // updateParent applies update_task's parent_task_id (task eae0243b): set or

@@ -128,7 +128,7 @@ func TestDispatchTask_TypedTicket_CompletePersistsAndReadsBack(t *testing.T) {
 	h := testHandlers(t)
 
 	res, _ := h.HandleDispatchTask(ctx, call(map[string]any{
-		"project": "niwa", "as": "cto", "profile": "dev", "title": "typed",
+		"project": "niwa", "as": "cto", "profile": "dev", "title": "typed", "verbose": true,
 		"goal":                "determinise task birth",
 		"acceptance_criteria": `["refuses without goal","reads back"]`,
 		"dod":                 "go test ./... green",
@@ -161,7 +161,7 @@ func TestDispatchTask_FreeFormProject_NoTicketNeeded(t *testing.T) {
 	h := testHandlers(t)
 
 	res, _ := h.HandleDispatchTask(ctx, call(map[string]any{
-		"project": "p1", "as": "cto", "profile": "dev", "title": "free form",
+		"project": "p1", "as": "cto", "profile": "dev", "title": "free form", "verbose": true,
 	}))
 	task := parseJSON(t, res)["task"].(map[string]any)
 	if task["status"] != "pending" {

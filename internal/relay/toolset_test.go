@@ -14,7 +14,7 @@ import (
 func TestDiscoverTools(t *testing.T) {
 	h := testHandlers(t)
 
-	res, err := h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "messaging"}))
+	res, err := h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "messaging", "verbose": true}))
 	if err != nil {
 		t.Fatalf("discover: %v", err)
 	}
@@ -29,6 +29,16 @@ func TestDiscoverTools(t *testing.T) {
 	first := tools[0].(map[string]any)
 	if first["name"] == "" || first["inputSchema"] == nil {
 		t.Errorf("tool schema incomplete: %v", first)
+	}
+
+	// The default (compact) form lists the same tools, each with its params.
+	compact := parseJSON(t, result(h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "messaging"}))))
+	ctools := compact["tools"].([]any)
+	if len(ctools) != 10 {
+		t.Errorf("compact messaging tools = %d, want 10", len(ctools))
+	}
+	if c := ctools[0].(map[string]any); c["name"] == "" || c["params"] == nil {
+		t.Errorf("compact tool incomplete: %v", c)
 	}
 
 	res, _ = h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "nope"}))
@@ -150,7 +160,7 @@ func TestDiscoverPayloadSize(t *testing.T) {
 // Guard against schema drift: discover_tools output must round-trip as JSON.
 func TestDiscoverSchemasValidJSON(t *testing.T) {
 	h := testHandlers(t)
-	res, _ := h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "tasks"}))
+	res, _ := h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "tasks", "verbose": true}))
 	var parsed struct {
 		Tools []struct {
 			Name        string         `json:"name"`
