@@ -66,6 +66,11 @@ const sessionMemoryBudget = 2600
 // of the 20 KB boot payload (WRAITH R1).
 const sessionConstraintFloor = 8
 
+// sessionFloorCeiling bounds the guaranteed layer floors in bytes: B_max of the
+// production budget. Ten floor rows at the 200-byte preview fit far below it;
+// only pathological rows (multi-KB keys) hit it (tokens L3, ffd35635).
+const sessionFloorCeiling = sessionMemoryBudget * budgetHardMultiplier
+
 // sessionBehaviorFloor and sessionContextFloor guarantee the newest
 // behavior-layer and context-layer memory a place in boot, like the constraint
 // floor: without them a constraint-heavy project spends the whole budget on the
@@ -681,6 +686,22 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 		hardCeil = maxBytes * budgetHardMultiplier
 	}
 	floorSeen := map[string]int{}
+	// Reserve sessionFloorCeiling room for the behavior/context floor rows up
+	// front (round 1 review, ffd35635): constraints come first in the input, so
+	// against a plain running total fat constraints spent the whole ceiling and
+	// the behavior/context floors — guaranteed since af783f93 — dropped out. The
+	// reserved rows are exactly the first sessionLayerFloor rows of each of those
+	// layers in input order, which the loop below always routes to the floor
+	// branch (floorSeen <= index-in-layer), so each releases its own reservation.
+	reserved := 0
+	reservedLeft := map[string]int{}
+	for _, m := range mems {
+		if m.Layer == "constraints" || reservedLeft[m.Layer] >= sessionLayerFloor(m.Layer) {
+			continue
+		}
+		reservedLeft[m.Layer]++
+		reserved += memorySummaryBytes(summarizeMemory(m))
+	}
 	for _, m := range mems {
 		s := summarizeMemory(m)
 		b := memorySummaryBytes(s)
@@ -694,7 +715,21 @@ func projectMemories(mems []models.Memory, maxBytes int) []MemorySummary {
 		// remainder. Beyond its floor, a memory is treated like any other
 		// (previously ALL constraints bypassed the budget, making it dead — the
 		// 20 KB-boot root cause, WRAITH R1).
+		// The floor is bounded too (tokens L3, ffd35635): a floor row obeys
+		// sessionFloorCeiling, so fat constraints (long keys) can no longer push
+		// relevant_memories past B_max of the production budget. Independent of
+		// maxBytes so the floor stays guaranteed under a tiny caller budget. The
+		// first entry always surfaces. The ceiling check counts the bytes still
+		// reserved for the behavior/context floors not yet met, so a constraint
+		// floor row cannot take their room.
 		if floorSeen[m.Layer] < sessionLayerFloor(m.Layer) {
+			if reservedLeft[m.Layer] > 0 {
+				reservedLeft[m.Layer]--
+				reserved -= b
+			}
+			if used+b+reserved > sessionFloorCeiling && len(out) > 0 {
+				continue
+			}
 			floorSeen[m.Layer]++
 			out = append(out, s)
 			used += b

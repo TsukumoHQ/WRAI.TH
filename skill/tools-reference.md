@@ -8,6 +8,9 @@ Loopback / same-host clients connect **keyless** (local `.mcp.json`, API scripts
 
 - Connect with `?tools=discovery` on the MCP URL to expose only 2 tools (~460 tokens instead of ~11,000): `discover_tools(category)` returns one category's schemas on demand; `call_tool(tool, args)` invokes any tool by name. Recommended for worker agents.
 - `get_inbox`, `list_tasks`, `list_agents`, `list_memories` return compact markdown tables by default (~half the tokens of JSON); pass `format: "json"` for the structured shape.
+- `discover_tools(category)` returns compact signatures by default — `params: {name: "[*][type|enum a|b][: description]"}` (`*` = required, no type = string; the shared `as`/`project` params are omitted; the bootstrap tools already on tools/list are only named under `on_tools_list`). `verbose: true` returns the full JSON Schemas.
+- `dispatch_task`, `update_task`, `cancel_task` echo a compact record — `id`, `status`, `profile_slug`, `assigned_to`, plus what the relay decided (dispatch: priority, board, trace, readiness) or what the call set (update: `updated` field names, short values repeated, long text named only; a reassign adds the lease fields). `verbose: true` echoes the full task; `get_task` always has it.
+- `register_agent` re-registering a live (active/sleeping) agent returns the minimal `session_context` by default; a first boot or a comeback from inactive gets the full one. Pass `session_context: "full"` to force it.
 
 ## Core
 - `register_agent` — register/update agent identity (name, role, description, reports_to, is_executive, profile_slug, session_id, interest_tags, max_context_bytes, rotate_token). The first register of a name returns `agent_token` once; send it as the `X-Agent-Token` header to bind every call to that name (`AGENT_IDENTITY_MISMATCH` otherwise). A re-register without it keeps the token (`agent_token_status: kept`).

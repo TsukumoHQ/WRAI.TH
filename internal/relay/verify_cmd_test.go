@@ -33,7 +33,7 @@ func TestDispatchTask_VerifyCmd_PersistsAndReadsBack(t *testing.T) {
 	h := testHandlers(t)
 
 	res, _ := h.HandleDispatchTask(ctx, call(map[string]any{
-		"project": "niwa", "as": "cto", "profile": "dev", "title": "with verify_cmd",
+		"project": "niwa", "as": "cto", "profile": "dev", "title": "with verify_cmd", "verbose": true,
 		"goal": "g", "acceptance_criteria": `["a"]`, "dod": "d",
 		"verify_cmd": `go test ./... -run TestFoo`,
 	}))

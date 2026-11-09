@@ -134,6 +134,13 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 		IsServiceSet:   isServiceSet,
 	}
 
+	// A live row (active or sleeping) before this call makes it a re-register of
+	// a running agent: its boot defaults to the minimal session_context (tokens
+	// L3, ffd35635 — register_agent averaged 12.7 KB). Read before the write that
+	// re-activates the row; the read only picks the payload shape.
+	prior, _ := h.db.GetAgent(project, name)
+	wasLive := prior != nil && (prior.Status == "active" || prior.Status == "sleeping")
+
 	agent, isRespawn, err := h.db.RegisterAgent(project, name, role, description, reportsTo, profileSlug, isExecutive, sessionID, interestTags, maxContextBytes, opts)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("failed to register agent: %v", err)), nil
@@ -185,11 +192,17 @@ func (h *Handlers) HandleRegisterAgent(ctx context.Context, req mcp.CallToolRequ
 	}
 
 	// Build session_context for the response (Phase 2: boot-in-register).
-	// session_context='minimal' (WRAITH R1) returns the lean boot shape (<1.5 KB);
-	// any other value (default 'full') returns the full budgeted shape.
-	minimalCtx := req.GetString("session_context", "full") == "minimal"
+	// session_context='minimal' (WRAITH R1) returns the lean boot shape (<1.5 KB),
+	// 'full' the full budgeted shape. Omitted: minimal when this re-registers a
+	// live agent (it already booted), full on a first boot or a comeback from
+	// inactive/deleted.
+	ctxMode := req.GetString("session_context", "")
+	minimalCtx := ctxMode == "minimal" || (ctxMode == "" && wasLive)
 	sessionCtx := h.buildSessionContext(project, name, profileSlug, minimalCtx)
 	sessionCtx["is_respawn"] = isRespawn
+	if ctxMode == "" && wasLive {
+		sessionCtx["mode"] = "minimal: re-register of a live agent; session_context='full' for the full boot"
+	}
 
 	action := "register"
 	if isRespawn {

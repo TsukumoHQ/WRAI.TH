@@ -544,6 +544,7 @@ func discoverToolsTool() mcp.Tool {
 		discoveryToolName,
 		mcp.WithDescription("Get the tool schemas for one category. Then invoke them via call_tool(tool, args).\n\nCategories:\n"+strings.Join(lines, "\n")),
 		mcp.WithString("category", mcp.Description("Category to load"), mcp.Enum(names...), mcp.Required()),
+		mcp.WithBoolean("verbose", mcp.Description("Full schemas (default: compact)")),
 	)
 }
 
@@ -569,24 +570,157 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 		return toolResultError(fmt.Sprintf("unknown category %q — call discover_tools without reading its description? Valid: see enum", category)), nil
 	}
 
-	type toolSchema struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		InputSchema any    `json:"inputSchema"`
-	}
-	var out []toolSchema
-	for _, rt := range h.toolRegistry() {
-		if rt.category == category {
-			out = append(out, toolSchema{rt.Tool.Name, rt.Tool.Description, rt.Tool.InputSchema})
+	// verbose=true returns the registered JSON Schemas verbatim. The default is
+	// the compact form (tokens L3, ffd35635): discover_tools averaged ~10 KB a
+	// call and agents re-read it every session. Compact keeps every parameter's
+	// name, type, required flag and enum — only descriptions are capped and the
+	// JSON Schema scaffolding is folded into one signature string per param.
+	if req.GetBool("verbose", false) {
+		type toolSchema struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+			InputSchema any    `json:"inputSchema"`
 		}
+		var out []toolSchema
+		for _, rt := range h.toolRegistry() {
+			if rt.category == category {
+				out = append(out, toolSchema{rt.Tool.Name, rt.Tool.Description, rt.Tool.InputSchema})
+			}
+		}
+		sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+		return discoverResult(map[string]any{"category": category, "tools": out})
+	}
+
+	// coreDiscoveryTools are already on tools/list whenever discover_tools is
+	// (discovery mode): the client holds their full schema, so the compact form
+	// only names them instead of sending the schema twice.
+	var out []compactToolSchema
+	var onToolsList []string
+	for _, rt := range h.toolRegistry() {
+		if rt.category != category {
+			continue
+		}
+		if coreDiscoveryTools[rt.Tool.Name] {
+			onToolsList = append(onToolsList, rt.Tool.Name)
+			continue
+		}
+		out = append(out, compactTool(rt.Tool))
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	sort.Strings(onToolsList)
+	resp := map[string]any{"category": category, "params_format": discoverParamsFormat, "tools": out}
+	if len(onToolsList) > 0 {
+		resp["on_tools_list"] = onToolsList
+	}
+	return discoverResult(resp)
+}
 
-	b, err := json.Marshal(map[string]any{"category": category, "tools": out})
+func discoverResult(resp map[string]any) (*mcp.CallToolResult, error) {
+	b, err := json.Marshal(resp)
 	if err != nil {
 		return toolResultError(fmt.Sprintf("marshal schemas: %v", err)), nil
 	}
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+// Compact discover_tools limits (tokens L3, ffd35635).
+const (
+	// discoverToolDescMax caps a tool description in the compact form.
+	discoverToolDescMax = 200
+	// discoverParamDescMax caps a parameter description in the compact form.
+	discoverParamDescMax = 60
+)
+
+// discoverParamsFormat documents the compact signature "[*][type|enum][: desc]"
+// once per payload. The shared as/project params are stripped from every tool:
+// the server instructions already state that most tools accept them.
+const discoverParamsFormat = "*=required; no type=string; as/project omitted; verbose=true: full schemas"
+
+// sharedParamDescs are the shared as/project parameters (asParam, projectParam),
+// named once in discoverParamsFormat instead of on every tool. Only a property
+// carrying exactly this description is stripped, so a tool whose own "as" or
+// "project" means something else keeps it.
+var sharedParamDescs = map[string]string{
+	"as":      "Acting agent name.",
+	"project": "Project namespace.",
+}
+
+// compactToolSchema is one tool in the compact discover_tools payload.
+type compactToolSchema struct {
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Params      map[string]string `json:"params,omitempty"`
+}
+
+// compactText cuts s to at most max bytes (rune-safe) and marks the cut with "…".
+func compactText(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut, _ := truncatePreview(s, max-len("…"))
+	return strings.TrimRight(cut, " ") + "…"
+}
+
+// compactTool folds a tool's JSON Schema into one signature per parameter
+// (see discoverParamsFormat). Lossless on name/type/required/enum — pinned by
+// TestDiscoverCompactMatchesSchema against the verbose schema.
+func compactTool(t mcp.Tool) compactToolSchema {
+	out := compactToolSchema{Name: t.Name, Description: compactText(t.Description, discoverToolDescMax)}
+	raw, err := json.Marshal(t.InputSchema)
+	if err != nil {
+		return out
+	}
+	var schema struct {
+		Properties map[string]map[string]any `json:"properties"`
+		Required   []string                  `json:"required"`
+	}
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return out
+	}
+	required := map[string]bool{}
+	for _, r := range schema.Required {
+		required[r] = true
+	}
+	for name, prop := range schema.Properties {
+		desc, _ := prop["description"].(string)
+		if shared, isShared := sharedParamDescs[name]; isShared && desc == shared && !required[name] {
+			continue
+		}
+		if out.Params == nil {
+			out.Params = map[string]string{}
+		}
+		out.Params[name] = paramSignature(prop, required[name], desc)
+	}
+	return out
+}
+
+// paramSignature renders one property as "[*][type|enum][: description]".
+func paramSignature(prop map[string]any, required bool, desc string) string {
+	var sig strings.Builder
+	if required {
+		sig.WriteString("*")
+	}
+	if enum, ok := prop["enum"].([]any); ok && len(enum) > 0 {
+		vals := make([]string, len(enum))
+		for i, v := range enum {
+			vals[i] = fmt.Sprint(v)
+		}
+		sig.WriteString(strings.Join(vals, "|"))
+	} else if typ, _ := prop["type"].(string); typ != "" && typ != "string" {
+		sig.WriteString(typ)
+		if items, ok := prop["items"].(map[string]any); ok {
+			if it, _ := items["type"].(string); it != "" {
+				sig.WriteString("<" + it + ">")
+			}
+		}
+	}
+	if desc != "" {
+		if sig.Len() > 0 {
+			sig.WriteString(": ")
+		}
+		sig.WriteString(compactText(desc, discoverParamDescMax))
+	}
+	return sig.String()
 }
 
 func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
