@@ -76,8 +76,10 @@ func (c *identityCache) put(project, name string, a *models.Agent, now time.Time
 	c.m[identityKey(project, name)] = identityEntry{agent: *a, expires: now.Add(identityCacheTTL)}
 }
 
-// invalidate drops a cached row so the next check reads the DB (register,
-// deactivate, delete, sleep: the paths that change what the gate decides).
+// invalidate drops a cached row so the next check reads the DB. Called from
+// cascadeDeactivatedAgent (every deactivate/delete path). Other status changes
+// (e.g. sleep) are bounded by identityCacheTTL; register needs no hook because
+// refusals are never cached.
 func (c *identityCache) invalidate(project, name string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
