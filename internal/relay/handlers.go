@@ -46,6 +46,10 @@ type Handlers struct {
 	recalls     recallBuffer
 	consumeDone chan struct{}
 
+	// idCache serves the identity gate's repeat checks (task 33dab33d,
+	// identity_cache.go). Zero value ready.
+	idCache identityCache
+
 	// federation forwards direct messages to/from trusted peer relays. Nil-safe:
 	// a disabled Federation (no peers) makes the send path behave as before.
 	federation *Federation
