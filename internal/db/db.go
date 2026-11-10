@@ -1247,6 +1247,19 @@ func migrate(conn *sql.DB) error {
 		UNIQUE(table_name, row_id, ref_col, class)
 	)`)
 	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_integrity_open ON integrity_quarantine(class, resolved_at)`)
+	// Narrow covering index for the 8 tasks-table classes of the referential scan
+	// (refChecks, referential_integrity.go). Without it each class is a full SCAN
+	// of tasks (wide rows: descriptions, ACs) — ~2.9k pages per class, ~24k pages
+	// (~94MB) per 2-min scan on the live DB (task 33dab33d). Under host memory
+	// pressure those pages are evicted between scans, so every scan re-read them
+	// from disk: the 5-25s "integrity scan: took" lines, slowest class always the
+	// first (orphan_dispatcher, cold cache). Partial on archived_at IS NULL (every
+	// tasks class filters on it) and carrying archived_at + id so each class is a
+	// COVERING index scan (~90 pages) that never touches the table. Plan pinned by
+	// TestRefScan_TasksClassesUseCoveringIndex.
+	_, _ = conn.Exec(`CREATE INDEX IF NOT EXISTS idx_tasks_refscan ON tasks(
+		project, status, dispatched_by, assigned_to, claimed_by, profile_slug,
+		parent_task_id, board_id, archived_at, id) WHERE archived_at IS NULL`)
 
 	// Exceptions + exception classes (design 220f4f3d). After integrity_quarantine:
 	// the exception_occurrences view unions it in.
