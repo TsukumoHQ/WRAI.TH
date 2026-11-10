@@ -417,6 +417,9 @@ func (h *Handlers) HandleDeleteAgent(ctx context.Context, req mcp.CallToolReques
 // memberships. Best-effort + non-fatal — a cascade failure never fails the
 // deactivate/delete (the periodic lease + integrity sweeps are the backstop).
 func (h *Handlers) cascadeDeactivatedAgent(project, name string) {
+	// Every deactivate/delete path (MCP + REST) lands here: drop the identity
+	// gate's cached grant now instead of waiting out identityCacheTTL (33dab33d).
+	h.idCache.invalidate(project, name)
 	res, err := h.db.CascadeAgentDeactivation(project, name)
 	if err != nil {
 		log.Printf("integrity cascade (%s/%s): %v", project, name, err)

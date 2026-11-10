@@ -188,3 +188,51 @@ func TestReferentialScanLogsSlowDuration(t *testing.T) {
 		t.Fatalf("want `integrity scan: took` on a slow scan, got:\n%s", out)
 	}
 }
+
+// TestWriterHoldLogsHolder (33dab33d B3): the HOLDER of the writer connection is
+// logged with its op/caller and hold ms once it holds past writerHoldSlow — the
+// `writer wait:` lines only ever named the victims queueing behind it. A fast
+// holder stays silent.
+func TestWriterHoldLogsHolder(t *testing.T) {
+	d := testDB(t)
+	orig := writerHoldSlow
+	writerHoldSlow = 30 * time.Millisecond
+	defer func() { writerHoldSlow = orig }()
+
+	out := captureLog(t, func() {
+		wtx, err := acquireWriterTxForTest(d)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		time.Sleep(60 * time.Millisecond) // hold the writer past the threshold
+		_ = wtx.Commit()
+	})
+	if !strings.Contains(out, "writer hold: caller=acquireWriterTxForTest held=") {
+		t.Fatalf("want writer hold line naming the tx caller, got:\n%s", out)
+	}
+
+	quiet := captureLog(t, func() {
+		if _, err := d.writerExec("UPDATE agents SET last_seen = ? WHERE name = ?", "x", "nobody"); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+		wtx, err := acquireWriterTxForTest(d)
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		_ = wtx.Rollback()
+	})
+	if strings.Contains(quiet, "writer hold:") {
+		t.Fatalf("fast holders must be silent, got:\n%s", quiet)
+	}
+
+	// writerExec: a statement that itself runs past the threshold names its op.
+	writerHoldSlow = 0
+	execOut := captureLog(t, func() {
+		if _, err := d.writerExec("UPDATE agents SET last_seen = ? WHERE name = ?", "x", "nobody"); err != nil {
+			t.Fatalf("exec: %v", err)
+		}
+	})
+	if !strings.Contains(execOut, "writer hold: op=UPDATE agents SET last_seen") {
+		t.Fatalf("want writer hold line naming the exec op, got:\n%s", execOut)
+	}
+}

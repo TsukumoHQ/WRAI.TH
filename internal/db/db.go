@@ -256,11 +256,35 @@ func (d *DB) writerExec(query string, args ...interface{}) (sql.Result, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), writerTimeout)
 	defer cancel()
 	start := time.Now()
-	res, err := d.conn.ExecContext(ctx, query, args...)
+	// Acquire the single writer connection explicitly so the time it is HELD
+	// (the statement) is measured apart from the time spent queueing for it.
+	conn, err := d.conn.Conn(ctx)
+	var res sql.Result
+	if err == nil {
+		acquired := time.Now()
+		res, err = conn.ExecContext(ctx, query, args...)
+		logWriterHold("op="+writerQueryPrefix(query), time.Since(acquired))
+		_ = conn.Close() // return it to the pool
+	}
 	if waited := time.Since(start); waited >= writerSlowWait {
 		log.Printf("writer wait: %s waited=%s", writerQueryPrefix(query), waited.Round(time.Millisecond))
 	}
 	return res, err
+}
+
+// writerHoldSlow is the threshold above which the HOLDER of the single writer
+// connection is logged (`writer hold:` op/caller + held ms). The `writer wait:`
+// lines only name the victims queueing behind the writer; the 2026-11-10 field
+// window (task 33dab33d) showed 15-23s waits with no attributable holder. A var
+// so tests shrink it.
+var writerHoldSlow = 2 * time.Second
+
+// logWriterHold logs one `writer hold:` line when the writer connection was held
+// for at least writerHoldSlow. who is "op=<query prefix>" or "caller=<func>".
+func logWriterHold(who string, held time.Duration) {
+	if held >= writerHoldSlow {
+		log.Printf("writer hold: %s held=%dms", who, held.Milliseconds())
+	}
 }
 
 // writerTx wraps *sql.Tx to release the ctx bounding its lifetime as soon as
@@ -277,6 +301,10 @@ type writerTx struct {
 	*sql.Tx
 	cancel context.CancelFunc
 	conn   *sql.Conn
+
+	// caller and acquired attribute the hold (`writer hold:` line) on release.
+	caller   string
+	acquired time.Time
 }
 
 func (t *writerTx) Commit() error {
@@ -297,6 +325,7 @@ func (t *writerTx) Rollback() error {
 // the common Commit()-then-deferred-Rollback() pattern doesn't double-close it.
 func (t *writerTx) release() {
 	if t.conn != nil {
+		logWriterHold("caller="+t.caller, time.Since(t.acquired))
 		_ = t.conn.Close()
 		t.conn = nil
 	}
@@ -322,13 +351,14 @@ func (d *DB) beginWriterTx() (*writerTx, error) {
 	start := time.Now()
 	conn, err := d.conn.Conn(acqCtx)
 	acqCancel()
-	if waited := time.Since(start); waited >= writerSlowWait {
-		caller := "?"
-		if pc, _, _, ok := runtime.Caller(1); ok {
-			if fn := runtime.FuncForPC(pc); fn != nil {
-				caller = shortFuncName(fn.Name())
-			}
+	acquired := time.Now()
+	caller := "?"
+	if pc, _, _, ok := runtime.Caller(1); ok {
+		if fn := runtime.FuncForPC(pc); fn != nil {
+			caller = shortFuncName(fn.Name())
 		}
+	}
+	if waited := acquired.Sub(start); waited >= writerSlowWait {
 		log.Printf("writer wait: begin-tx caller=%s waited=%s", caller, waited.Round(time.Millisecond))
 	}
 	if err != nil {
@@ -341,7 +371,7 @@ func (d *DB) beginWriterTx() (*writerTx, error) {
 		_ = conn.Close() // return the connection to the pool
 		return nil, err
 	}
-	return &writerTx{Tx: tx, cancel: cancel, conn: conn}, nil
+	return &writerTx{Tx: tx, cancel: cancel, conn: conn, caller: caller, acquired: acquired}, nil
 }
 
 // Path returns the database file path.
@@ -352,11 +382,26 @@ func (d *DB) Path() string {
 // Optimize runs PRAGMA optimize and a passive WAL checkpoint on the writer.
 // Safe to call periodically (e.g. every 5 minutes).
 func (d *DB) Optimize() {
-	_, _ = d.conn.Exec("PRAGMA optimize")
-	_, _ = d.conn.Exec("PRAGMA wal_checkpoint(PASSIVE)")
-	// The analytics WAL is small (telemetry deltas) and separate from the coord
-	// DB — checkpointing it here never churns the coordination file (R0).
-	_, _ = d.conn.Exec("PRAGMA analytics.wal_checkpoint(PASSIVE)")
+	// Not writerExec (no writerTimeout: optimize/checkpoint must finish), but the
+	// writer connection is checked out once so each statement's HOLD is logged
+	// apart from the queueing — a slow optimize/checkpoint is attributable as a
+	// writer holder (33dab33d).
+	conn, err := d.conn.Conn(context.Background())
+	if err != nil {
+		return
+	}
+	defer func() { _ = conn.Close() }()
+	for _, q := range []string{
+		"PRAGMA optimize",
+		"PRAGMA wal_checkpoint(PASSIVE)",
+		// The analytics WAL is small (telemetry deltas) and separate from the
+		// coord DB — checkpointing it here never churns the coordination file (R0).
+		"PRAGMA analytics.wal_checkpoint(PASSIVE)",
+	} {
+		start := time.Now()
+		_, _ = conn.ExecContext(context.Background(), q)
+		logWriterHold("op="+q, time.Since(start))
+	}
 }
 
 // Backup writes a consistent snapshot of the database next to it via SQLite's

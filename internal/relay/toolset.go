@@ -444,7 +444,9 @@ func (h *Handlers) guardIdentity(toolName string, next server.ToolHandlerFunc) s
 		if from == "" {
 			return toolResultError("no agent identity: pass `as`=<name> (or connect with ?agent=<name>) after register_agent — the 'anonymous' fallback was removed."), nil
 		}
-		agent, err := h.db.GetAgent(project, from)
+		// Retry-once + short-TTL cache (task 33dab33d): a host stall of a few
+		// seconds no longer fails the call. See identity_cache.go.
+		agent, err := h.identityAgent(project, from)
 		if err != nil {
 			return toolResultError(fmt.Sprintf("identity check failed: %v", err)), nil
 		}
