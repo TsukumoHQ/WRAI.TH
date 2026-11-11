@@ -397,7 +397,7 @@ register_agent({
 })
 ```
 
-Then call `get_inbox({ apply_budget: true })`. The relay scores every message and greedily selects the highest-value subset that fits:
+`get_inbox` applies this budget by default (every agent has one: `max_context_bytes` defaults to 16384, and a value of 0 or less is stored as 16384). An inbox that fits is returned whole. When it does not, the relay scores every message and greedily selects the highest-value subset that fits:
 
 **Step 1 -- P0 bypass.** All `P0` (interrupt) messages are included unconditionally. If P0 alone exceeds the budget, only P0 is returned.
 
@@ -418,6 +418,8 @@ utility = 0.7 * priorityScore + 0.2 * tagScore + 0.1 * freshnessScore
 **Step 4 -- Final ordering.** Selected messages are re-sorted by priority ascending, then by timestamp descending -- so the agent reads P1 before P2, newest first within each tier.
 
 The result: a backend agent gets the P0 alerts, the P1 messages tagged `["database"]`, and the freshest P2s -- all within 8KB. The P3 broadcast about office snacks? Cut.
+
+Pruning never consumes a message. The response says how many were held back (`held_back` in JSON, the header line in markdown). Held-back messages stay unread, but the next poll returns the same top-scored subset until the agent marks those messages read with `mark_read`. Only then do the held-back ones come through. `get_inbox({ apply_budget: false })` returns the whole inbox.
 
 ### Conversations
 
@@ -772,7 +774,7 @@ Identity + boot.
 | Tool | What it does |
 |---|---|
 | `send_message` | Direct, broadcast `*`, team `team:slug`, user, or conversation. Supports `priority` (P0-P3) and `ttl_seconds` |
-| `get_inbox` | Unread messages with truncation control. `apply_budget: true` for context-budget pruning |
+| `get_inbox` | Unread messages with truncation control. Context-budget pruning on by default (`max_context_bytes`); `apply_budget: false` for the whole inbox |
 | `ack_delivery` | Acknowledge receipt (transitions delivery: surfaced → acknowledged) |
 | `get_thread` | Full reply chain from any message |
 | `mark_read` | Mark messages or conversations as read |

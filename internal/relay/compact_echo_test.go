@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 
@@ -180,20 +181,21 @@ func TestRegister_ReRegisterOfLiveAgentDefaultsMinimal(t *testing.T) {
 	}
 }
 
-// AC3: the default discover_tools payload is >=40% smaller per category than
-// the verbose JSON Schemas, and lossless on every param's name, type, required
-// flag and enum.
-func TestDiscoverCompact_SizeAndLossless(t *testing.T) {
+// AC1 (audit T5, 6ead6bed): the default discover_tools payload is terse — one
+// "(required params) one-line description" string per tool — and stays under
+// discoverTerseMaxBytes for every category. It lists every tool of the
+// category (core discovery tools by name only) and its required params exactly
+// as the verbose schema declares them; verbose=true keeps the full schemas.
+func TestDiscoverTerse_SizeAndRequired(t *testing.T) {
 	h := testHandlers(t)
 	bg := context.Background()
 	for _, c := range toolCategories {
 		vres, _ := h.HandleDiscoverTools(bg, call(map[string]any{"category": c.name, "verbose": true}))
-		cres, _ := h.HandleDiscoverTools(bg, call(map[string]any{"category": c.name}))
-		vb, cb := len(vres.Content[0].(mcp.TextContent).Text), len(cres.Content[0].(mcp.TextContent).Text)
-		gain := 1 - float64(cb)/float64(vb)
-		t.Logf("discover_tools %-14s verbose=%5dB compact=%5dB  -%.0f%%", c.name, vb, cb, gain*100)
-		if gain < 0.40 {
-			t.Errorf("category %s: compact saves %.0f%%, want >= 40%%", c.name, gain*100)
+		tres, _ := h.HandleDiscoverTools(bg, call(map[string]any{"category": c.name}))
+		vtext, ttext := vres.Content[0].(mcp.TextContent).Text, tres.Content[0].(mcp.TextContent).Text
+		t.Logf("discover_tools %-14s verbose=%5dB terse=%5dB", c.name, len(vtext), len(ttext))
+		if len(ttext) > discoverTerseMaxBytes {
+			t.Errorf("category %s: terse payload %dB > %dB", c.name, len(ttext), discoverTerseMaxBytes)
 		}
 
 		var verbose struct {
@@ -206,74 +208,65 @@ func TestDiscoverCompact_SizeAndLossless(t *testing.T) {
 				} `json:"inputSchema"`
 			} `json:"tools"`
 		}
-		var compact struct {
-			Tools       []compactToolSchema `json:"tools"`
-			OnToolsList []string            `json:"on_tools_list"`
+		var terse struct {
+			Tools       map[string]string `json:"tools"`
+			OnToolsList []string          `json:"on_tools_list"`
 		}
-		if err := json.Unmarshal([]byte(vres.Content[0].(mcp.TextContent).Text), &verbose); err != nil {
+		if err := json.Unmarshal([]byte(vtext), &verbose); err != nil {
 			t.Fatalf("verbose %s: %v", c.name, err)
 		}
-		if err := json.Unmarshal([]byte(cres.Content[0].(mcp.TextContent).Text), &compact); err != nil {
-			t.Fatalf("compact %s: %v", c.name, err)
-		}
-		byName := map[string]compactToolSchema{}
-		for _, ct := range compact.Tools {
-			byName[ct.Name] = ct
-			if len(ct.Description) > discoverToolDescMax {
-				t.Errorf("%s description %dB > %d", ct.Name, len(ct.Description), discoverToolDescMax)
-			}
+		if err := json.Unmarshal([]byte(ttext), &terse); err != nil {
+			t.Fatalf("terse %s: %v", c.name, err)
 		}
 		onList := map[string]bool{}
-		for _, n := range compact.OnToolsList {
+		for _, n := range terse.OnToolsList {
 			onList[n] = true
 			if !coreDiscoveryTools[n] {
 				t.Errorf("%s listed as on tools/list but is not a core discovery tool", n)
 			}
 		}
+		if got, want := len(terse.Tools)+len(terse.OnToolsList), len(verbose.Tools); got != want {
+			t.Errorf("category %s: terse names %d tools, verbose %d", c.name, got, want)
+		}
 		for _, vt := range verbose.Tools {
 			if vt.InputSchema.Type != "object" {
 				t.Errorf("verbose %s inputSchema.type = %q", vt.Name, vt.InputSchema.Type)
 			}
+			if len(vt.InputSchema.Properties) == 0 && len(vt.InputSchema.Required) > 0 {
+				t.Errorf("verbose %s lost its properties", vt.Name)
+			}
 			if onList[vt.Name] {
 				continue
 			}
-			ct, ok := byName[vt.Name]
+			line, ok := terse.Tools[vt.Name]
 			if !ok {
-				t.Errorf("compact %s lost tool %s", c.name, vt.Name)
+				t.Errorf("terse %s lost tool %s", c.name, vt.Name)
 				continue
 			}
-			req := map[string]bool{}
-			for _, r := range vt.InputSchema.Required {
-				req[r] = true
+			req := append([]string(nil), vt.InputSchema.Required...)
+			sort.Strings(req)
+			if prefix := "(" + strings.Join(req, ",") + ") "; !strings.HasPrefix(line, prefix) {
+				t.Errorf("%s: terse %q does not start with required params %q", vt.Name, line, prefix)
 			}
-			for pname, prop := range vt.InputSchema.Properties {
-				sig, ok := ct.Params[pname]
-				desc, _ := prop["description"].(string)
-				if !ok {
-					if sharedParamDescs[pname] == desc && !req[pname] {
-						continue // as/project, named once in params_format
-					}
-					t.Errorf("%s.%s missing from compact params", vt.Name, pname)
-					continue
-				}
-				if req[pname] != strings.HasPrefix(sig, "*") {
-					t.Errorf("%s.%s required=%v but signature %q", vt.Name, pname, req[pname], sig)
-				}
-				if enum, ok := prop["enum"].([]any); ok && len(enum) > 0 {
-					for _, e := range enum {
-						if !strings.Contains(sig, fmt.Sprint(e)) {
-							t.Errorf("%s.%s enum value %v lost: %q", vt.Name, pname, e, sig)
-						}
-					}
-				} else if typ, _ := prop["type"].(string); typ != "string" && !strings.Contains(sig, typ) {
-					t.Errorf("%s.%s type %s lost: %q", vt.Name, pname, typ, sig)
-				}
+			if desc := strings.TrimPrefix(line, "("+strings.Join(req, ",")+") "); desc == "" || strings.Contains(desc, "\n") || len(desc) > discoverToolDescMax {
+				t.Errorf("%s: description %q not one line <= %dB", vt.Name, desc, discoverToolDescMax)
 			}
-			for pname := range ct.Params {
-				if _, ok := vt.InputSchema.Properties[pname]; !ok {
-					t.Errorf("%s.%s invented by the compact form", vt.Name, pname)
-				}
-			}
+		}
+	}
+}
+
+// oneLine keeps the first sentence only.
+func TestDiscoverTerse_OneLine(t *testing.T) {
+	for in, want := range map[string]string{
+		"Send a message. Use to=* for broadcast.": "Send a message",
+		"Claim a task (accepted).\nMore detail.":  "Claim a task",
+		"Hold a task; no ACK pages":               "Hold a task",
+		"Read state — see deliveries":             "Read state",
+		"  Archive done tasks.  ":                 "Archive done tasks",
+		"Move: a -> b":                            "Move: a -> b",
+	} {
+		if got := oneLine(in); got != want {
+			t.Errorf("oneLine(%q) = %q, want %q", in, got, want)
 		}
 	}
 }

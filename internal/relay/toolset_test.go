@@ -31,14 +31,15 @@ func TestDiscoverTools(t *testing.T) {
 		t.Errorf("tool schema incomplete: %v", first)
 	}
 
-	// The default (compact) form lists the same tools, each with its params.
-	compact := parseJSON(t, result(h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "messaging"}))))
-	ctools := compact["tools"].([]any)
-	if len(ctools) != 10 {
-		t.Errorf("compact messaging tools = %d, want 10", len(ctools))
+	// The default (terse) form names the same tools, each with its required
+	// params and a one-line description.
+	terse := parseJSON(t, result(h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "messaging"}))))
+	ttools := terse["tools"].(map[string]any)
+	if len(ttools) != 10 {
+		t.Errorf("terse messaging tools = %d, want 10", len(ttools))
 	}
-	if c := ctools[0].(map[string]any); c["name"] == "" || c["params"] == nil {
-		t.Errorf("compact tool incomplete: %v", c)
+	if line, _ := ttools["send_message"].(string); !strings.HasPrefix(line, "(content,subject,to) ") {
+		t.Errorf("terse send_message = %q, want required params (content,subject,to) first", line)
 	}
 
 	res, _ = h.HandleDiscoverTools(context.Background(), call(map[string]any{"category": "nope"}))

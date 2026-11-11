@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -546,7 +547,7 @@ func discoverToolsTool() mcp.Tool {
 		discoveryToolName,
 		mcp.WithDescription("Get the tool schemas for one category. Then invoke them via call_tool(tool, args).\n\nCategories:\n"+strings.Join(lines, "\n")),
 		mcp.WithString("category", mcp.Description("Category to load"), mcp.Enum(names...), mcp.Required()),
-		mcp.WithBoolean("verbose", mcp.Description("Full schemas (default: compact)")),
+		mcp.WithBoolean("verbose", mcp.Description("Full schemas incl. optional params (default: required params only)")),
 	)
 }
 
@@ -573,10 +574,8 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 	}
 
 	// verbose=true returns the registered JSON Schemas verbatim. The default is
-	// the compact form (tokens L3, ffd35635): discover_tools averaged ~10 KB a
-	// call and agents re-read it every session. Compact keeps every parameter's
-	// name, type, required flag and enum — only descriptions are capped and the
-	// JSON Schema scaffolding is folded into one signature string per param.
+	// the terse form (audit T5, 6ead6bed): one "(required) description" string
+	// per tool, <= discoverTerseMaxBytes per category — see terseTool.
 	if req.GetBool("verbose", false) {
 		type toolSchema struct {
 			Name        string `json:"name"`
@@ -594,9 +593,9 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 	}
 
 	// coreDiscoveryTools are already on tools/list whenever discover_tools is
-	// (discovery mode): the client holds their full schema, so the compact form
+	// (discovery mode): the client holds their full schema, so the terse form
 	// only names them instead of sending the schema twice.
-	var out []compactToolSchema
+	tools := map[string]string{}
 	var onToolsList []string
 	for _, rt := range h.toolRegistry() {
 		if rt.category != category {
@@ -606,53 +605,43 @@ func (h *Handlers) HandleDiscoverTools(ctx context.Context, req mcp.CallToolRequ
 			onToolsList = append(onToolsList, rt.Tool.Name)
 			continue
 		}
-		out = append(out, compactTool(rt.Tool))
+		tools[rt.Tool.Name] = terseTool(rt.Tool)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	sort.Strings(onToolsList)
-	resp := map[string]any{"category": category, "params_format": discoverParamsFormat, "tools": out}
+	resp := map[string]any{"category": category, "params_format": discoverParamsFormat, "tools": tools}
 	if len(onToolsList) > 0 {
 		resp["on_tools_list"] = onToolsList
 	}
 	return discoverResult(resp)
 }
 
+// discoverResult marshals without HTML escaping: descriptions carry "->" and
+// "<", which the default encoder would inflate to > / <.
 func discoverResult(resp map[string]any) (*mcp.CallToolResult, error) {
-	b, err := json.Marshal(resp)
-	if err != nil {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(resp); err != nil {
 		return toolResultError(fmt.Sprintf("marshal schemas: %v", err)), nil
 	}
-	return mcp.NewToolResultText(string(b)), nil
+	return mcp.NewToolResultText(strings.TrimRight(buf.String(), "\n")), nil
 }
 
-// Compact discover_tools limits (tokens L3, ffd35635).
+// Terse discover_tools (audit T5, task 6ead6bed). The default payload is one
+// string per tool: "(required,params) one-line description". Optional params,
+// types, enums and param descriptions live only in verbose=true. Bounded by
+// discoverTerseMaxBytes per category (TestDiscoverTerse_SizeAndRequired);
+// discover_tools ran ~100x/day at up to 7 KB a category in the previous
+// all-params compact form (ffd35635).
 const (
-	// discoverToolDescMax caps a tool description in the compact form.
-	discoverToolDescMax = 200
-	// discoverParamDescMax caps a parameter description in the compact form.
-	discoverParamDescMax = 60
+	// discoverToolDescMax caps the one-line description of a tool.
+	discoverToolDescMax = 60
+	// discoverTerseMaxBytes is the per-category ceiling of the terse payload.
+	discoverTerseMaxBytes = 1500
 )
 
-// discoverParamsFormat documents the compact signature "[*][type|enum][: desc]"
-// once per payload. The shared as/project params are stripped from every tool:
-// the server instructions already state that most tools accept them.
-const discoverParamsFormat = "*=required; no type=string; as/project omitted; verbose=true: full schemas"
-
-// sharedParamDescs are the shared as/project parameters (asParam, projectParam),
-// named once in discoverParamsFormat instead of on every tool. Only a property
-// carrying exactly this description is stripped, so a tool whose own "as" or
-// "project" means something else keeps it.
-var sharedParamDescs = map[string]string{
-	"as":      "Acting agent name.",
-	"project": "Project namespace.",
-}
-
-// compactToolSchema is one tool in the compact discover_tools payload.
-type compactToolSchema struct {
-	Name        string            `json:"name"`
-	Description string            `json:"description"`
-	Params      map[string]string `json:"params,omitempty"`
-}
+// discoverParamsFormat is stated once per payload.
+const discoverParamsFormat = "(required params) description; optional params, types, enums: verbose=true"
 
 // compactText cuts s to at most max bytes (rune-safe) and marks the cut with "…".
 func compactText(s string, max int) string {
@@ -663,66 +652,39 @@ func compactText(s string, max int) string {
 	return strings.TrimRight(cut, " ") + "…"
 }
 
-// compactTool folds a tool's JSON Schema into one signature per parameter
-// (see discoverParamsFormat). Lossless on name/type/required/enum — pinned by
-// TestDiscoverCompactMatchesSchema against the verbose schema.
-func compactTool(t mcp.Tool) compactToolSchema {
-	out := compactToolSchema{Name: t.Name, Description: compactText(t.Description, discoverToolDescMax)}
-	raw, err := json.Marshal(t.InputSchema)
-	if err != nil {
-		return out
-	}
-	var schema struct {
-		Properties map[string]map[string]any `json:"properties"`
-		Required   []string                  `json:"required"`
-	}
-	if err := json.Unmarshal(raw, &schema); err != nil {
-		return out
-	}
-	required := map[string]bool{}
-	for _, r := range schema.Required {
-		required[r] = true
-	}
-	for name, prop := range schema.Properties {
-		desc, _ := prop["description"].(string)
-		if shared, isShared := sharedParamDescs[name]; isShared && desc == shared && !required[name] {
-			continue
+// oneLine keeps the first sentence of a tool description: up to the first
+// newline, then cut at the first ". ", "; ", " — " or " (" (whichever comes
+// first), trailing period dropped.
+func oneLine(s string) string {
+	s = strings.TrimSpace(strings.SplitN(strings.TrimSpace(s), "\n", 2)[0])
+	cut := len(s)
+	for _, sep := range []string{". ", "; ", " — ", " ("} {
+		if i := strings.Index(s, sep); i > 0 && i < cut {
+			cut = i
 		}
-		if out.Params == nil {
-			out.Params = map[string]string{}
-		}
-		out.Params[name] = paramSignature(prop, required[name], desc)
 	}
-	return out
+	return strings.TrimSuffix(s[:cut], ".")
 }
 
-// paramSignature renders one property as "[*][type|enum][: description]".
-func paramSignature(prop map[string]any, required bool, desc string) string {
-	var sig strings.Builder
-	if required {
-		sig.WriteString("*")
+// requiredParams returns a tool's required parameter names, sorted.
+func requiredParams(t mcp.Tool) []string {
+	raw, err := json.Marshal(t.InputSchema)
+	if err != nil {
+		return nil
 	}
-	if enum, ok := prop["enum"].([]any); ok && len(enum) > 0 {
-		vals := make([]string, len(enum))
-		for i, v := range enum {
-			vals[i] = fmt.Sprint(v)
-		}
-		sig.WriteString(strings.Join(vals, "|"))
-	} else if typ, _ := prop["type"].(string); typ != "" && typ != "string" {
-		sig.WriteString(typ)
-		if items, ok := prop["items"].(map[string]any); ok {
-			if it, _ := items["type"].(string); it != "" {
-				sig.WriteString("<" + it + ">")
-			}
-		}
+	var schema struct {
+		Required []string `json:"required"`
 	}
-	if desc != "" {
-		if sig.Len() > 0 {
-			sig.WriteString(": ")
-		}
-		sig.WriteString(compactText(desc, discoverParamDescMax))
+	if err := json.Unmarshal(raw, &schema); err != nil {
+		return nil
 	}
-	return sig.String()
+	sort.Strings(schema.Required)
+	return schema.Required
+}
+
+// terseTool renders "(required,params) one-line description".
+func terseTool(t mcp.Tool) string {
+	return "(" + strings.Join(requiredParams(t), ",") + ") " + compactText(oneLine(t.Description), discoverToolDescMax)
 }
 
 func (h *Handlers) HandleCallTool(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

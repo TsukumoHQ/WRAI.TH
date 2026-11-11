@@ -440,7 +440,31 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 	unreadOnly := req.GetBool("unread_only", true)
 	limit := clampLimit(req.GetInt("limit", 10))
 	fullContent := req.GetBool("full_content", false)
+
+	// apply_budget defaults ON for an agent with a context budget (audit T5,
+	// 6ead6bed): the inbox is pruned to max_context_bytes unless the caller
+	// passes apply_budget=false. An explicit value always wins. When the budget
+	// is only defaulted, an inbox that already fits is returned as-is (no
+	// pruning pass, no [budget] journal line on every poll).
+	//
+	// The agent row comes from the identity read (3s cache, one retry on a
+	// deadline) so this hot path adds no reader-pool query on a cache hit. A
+	// failed read must not silently drop the budget when the host is loaded:
+	// the poll keeps the column-default budget and logs the failure.
+	_, budgetExplicit := req.GetArguments()["apply_budget"]
 	budgetMode := req.GetBool("apply_budget", false)
+	agentObj, agentErr := h.identityAgent(project, agent)
+	budgetBytes, budgetTags := 0, "[]"
+	switch {
+	case agentObj != nil:
+		budgetBytes, budgetTags = agentObj.MaxContextBytes, agentObj.InterestTags
+	case agentErr != nil:
+		log.Printf("[budget] get_inbox %s/%s: agent read failed, using default budget %d: %v", project, agent, defaultInboxBudgetBytes, agentErr)
+		budgetBytes = defaultInboxBudgetBytes
+	}
+	if !budgetExplicit {
+		budgetMode = budgetBytes > 0
+	}
 
 	_ = h.db.TouchAgent(project, agent)
 
@@ -475,13 +499,17 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 		messages = []models.Message{}
 	}
 
-	// Apply context budget pruning if requested
+	// Apply context budget pruning if requested. heldBack counts the messages
+	// the budget dropped from this response: they stay unread, and the caller is
+	// told so it never mistakes a pruned inbox for the whole one.
+	heldBack := 0
 	if budgetMode && len(messages) > 0 {
-		agentObj, _ := h.db.GetAgent(project, agent)
-		if agentObj != nil {
+		if (agentObj != nil || agentErr != nil) && (budgetExplicit || inboxBytes(messages) > budgetBytes) {
 			var tags []string
-			_ = json.Unmarshal([]byte(agentObj.InterestTags), &tags)
-			messages = applyBudget(messages, tags, agentObj.MaxContextBytes)
+			_ = json.Unmarshal([]byte(budgetTags), &tags)
+			fetched := len(messages)
+			messages = applyBudget(messages, tags, budgetBytes)
+			heldBack = fetched - len(messages)
 		}
 		// Surface only the deliveries that survived the budget filter
 		var surviving []string
@@ -567,15 +595,28 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 			}
 		}
 		table := renderTable([]string{"id", "delivery_id", "from", "to", "type", "priority", "thread", "created_at", "sent_at", "subject", "content"}, rows)
-		return h.resultTextTracked(project, agent, "get_inbox", fmt.Sprintf("%d messages for %s\n%s", len(messages), agent, table))
+		header := fmt.Sprintf("%d messages for %s", len(messages), agent)
+		if heldBack > 0 {
+			header += fmt.Sprintf(" (%d more held back by the context budget, still unread: %s)", heldBack, budgetHeldBackHint)
+		}
+		return h.resultTextTracked(project, agent, "get_inbox", header+"\n"+table)
 	}
 
-	return h.resultJSONTracked(project, agent, "get_inbox", map[string]any{
+	resp := map[string]any{
 		"agent":    agent,
 		"count":    len(messages),
 		"messages": formatted,
-	})
+	}
+	if heldBack > 0 {
+		resp["held_back"] = heldBack
+		resp["held_back_hint"] = budgetHeldBackHint
+	}
+	return h.resultJSONTracked(project, agent, "get_inbox", resp)
 }
+
+// budgetHeldBackHint tells an agent how to reach the messages the inbox budget
+// held back.
+const budgetHeldBackHint = "mark_read what you got to see them, or apply_budget=false for the whole inbox"
 
 func (h *Handlers) HandleAckDelivery(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	deliveryID := req.GetString("delivery_id", "")

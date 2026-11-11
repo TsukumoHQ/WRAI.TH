@@ -125,7 +125,7 @@ func getInboxTool() mcp.Tool {
 		mcp.WithBoolean("unread_only", mcp.Description("Only unread (default true)")),
 		mcp.WithNumber("limit", mcp.Description("Max messages (default 10)")),
 		mcp.WithBoolean("full_content", mcp.Description("Full content, not 300-char truncated (default false)")),
-		mcp.WithBoolean("apply_budget", mcp.Description("Prune to fit max_context_bytes (default false)")),
+		mcp.WithBoolean("apply_budget", mcp.Description("Prune to fit max_context_bytes (default on when the agent has one; false = whole inbox)")),
 		mcp.WithString("min_priority", mcp.Description("Minimum priority (e.g. 'P1' returns P0+P1)"), mcp.Enum("P0", "P1", "P2", "P3")),
 		mcp.WithString("from", mcp.Description("Filter by sender")),
 		mcp.WithString("since", mcp.Description("Only messages after this ISO timestamp")),
