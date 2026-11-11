@@ -53,9 +53,16 @@ RED_EVIDENCE:
     FAIL	agent-relay/internal/relay	1.548s
   AC1 red: on b1d3b6f the default (compact) discover_tools payload for tasks was 7234B > the 1500B bound TestDiscoverTerse_SizeAndRequired asserts.
 
+## r1 findings addressed (eab1068)
+- W1 skill/tools-reference.md:11: rewritten to the terse shape ({tools:{name:"(required) desc"}}, e.g. send_message) + get_inbox budget default/held_back line.
+- W2 handlers_messaging.go: agent row via h.identityAgent (3s cache + one deadline retry, same read guardIdentity uses) — no uncached reader query per poll on a cache hit. Read error => budget stays on at defaultInboxBudgetBytes (16384, column default) + [budget] log line; not-found (nil,nil) unchanged (no prune). Test TestInboxBudget_FailedAgentReadKeepsDefaultBudget (identityLookup forced to DeadlineExceeded): mutation fallback=0 => FAIL "got 30 of 30"; restored => PASS. Trade-off: a re-register that changes max_context_bytes takes up to identityCacheTTL (3s) to apply.
+- N1 CHANGELOG.md: says held-back messages come through only after mark_read of the returned ones; same subset until then.
+- N2 README.md:400 + :775: budget on by default, apply_budget:false for the whole inbox, held_back + mark_read behavior.
+Gate on eab1068: gofmt OK / vet OK / go test -tags fts5 ./... 8 packages ok.
+
 ## review-wraith verdict: SHIP-WITH-NITS
 Scope: internal/relay/toolset.go (discover_tools terse), handlers_messaging.go + budget.go (get_inbox budget default, held_back), tools.go/handlers.go/handlers_ingest.go (descriptions/hints), tests (inbox_budget_default_test, compact_echo_test, toolset_test), CHANGELOG.md, skill/relay.md
-Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (8 packages ok, 82ad3e8)
+Gate: build -tags fts5 OK / vet OK / gofmt OK / test -tags fts5 OK (8 packages ok, eab1068)
 
 BLOCKERS (must fix before merge):
 - none. No schema/migration, no agentColumns/scanAgent touch. No new write on the poll path: budget path = FetchInboxDeliveries + MarkDeliveriesSurfaced(survivors), the same single UPDATE GetInboxViaDeliveries already does (deliveries.go:80), empty list = no-op. Inbox stays non-destructive (pruned deliveries stay queued; TestInboxBudget_PrunedStayUnread drains all 6 by mark_read). P0 never pruned, first-surfacing full-content rule untouched. Tool registry single source; stdio/HTTP parity unchanged.
@@ -68,26 +75,36 @@ NITS (non-blocking):
 ## 3. Files changed
 
 ```
-CHANGELOG.md                                |   7 ++
- internal/relay/budget.go                    |  10 ++
- internal/relay/compact_echo_test.go         | 105 +++++++++---------
- internal/relay/handlers.go                  |   2 +-
- internal/relay/handlers_ingest.go           |   2 +-
- internal/relay/handlers_messaging.go        |  40 +++++--
- internal/relay/inbox_budget_default_test.go | 162 ++++++++++++++++++++++++++++
- internal/relay/tools.go                     |   2 +-
- internal/relay/toolset.go                   | 144 +++++++++----------------
- internal/relay/toolset_test.go              |  15 +--
- skill/relay.md                              |   6 +-
- 11 files changed, 330 insertions(+), 165 deletions(-)
+CHANGELOG.md                                       |   7 +
+ README.md                                          |   6 +-
+ features/CHANGELOG.md                              |  22 +++
+ ...ver-tools-terse-by-default-re-register-minim.md |  93 ++++++++++
+ ...-seconds-never-fails-an-authed-call-and-the-.md |  39 +++--
+ internal/relay/budget.go                           |  15 ++
+ internal/relay/compact_echo_test.go                | 105 ++++++------
+ internal/relay/handlers.go                         |   2 +-
+ internal/relay/handlers_ingest.go                  |   2 +-
+ internal/relay/handlers_messaging.go               |  57 ++++++-
+ internal/relay/inbox_budget_default_test.go        | 189 +++++++++++++++++++++
+ internal/relay/tools.go                            |   2 +-
+ internal/relay/toolset.go                          | 144 ++++++----------
+ internal/relay/toolset_test.go                     |  15 +-
+ skill/relay.md                                     |   6 +-
+ skill/tools-reference.md                           |   3 +-
+ 16 files changed, 525 insertions(+), 182 deletions(-)
 ```
 
 ## 4. QA Log
 
-_(no review round yet)_
+### Round 1 — ❌ REJECTED by review-6ead6bed-c274-46f1-8bad-f233fc8bec46
+- 🟢 AC1: Terse-by-default, name + one-line description + required params, <=1.5k per category, verbose=true unchanged, handler tests present and RED without the change. — evidence: internal/relay/toolset.go:571-616 (default branch builds the name->'(required params) description' map; verbose branch unchanged), :641 discoverTerseMaxBytes=1500, :658-688 oneLine/requiredParams/terseTool. Executed: go test -tags fts5 ./internal/relay/ -run 'TestDiscoverTerse|TestDiscoverTools|TestDiscoverPayloadSize|TestDiscoverSchemasValidJSON|TestTokenReductionDiscoveryVsFull' -count=1 => PASS; the test logged terse per category 217B(projects)..1381B(tasks) vs verbose 1244B..13810B, every category <= 1500B. Mutation check in an out-of-tree copy (/tmp/rev6ead/mut_discover, default forced non-terse): TestDiscoverTerse_SizeAndRequired FAILS 'terse payload 3112B > 1500B' and TestDiscoverTools panics on the shape change - the test really pins the default. — test: TestDiscoverTerse_SizeAndRequired internal/relay/compact_echo_test.go:189 (behavioural: calls HandleDiscoverTools per category, measures the payload, and cross-checks each terse line's '(required,params)' prefix against the verbose schema's Required list) + TestDiscoverTools internal/relay/toolset_test.go:14 + TestDiscoverTerse_OneLine internal/relay/compact_echo_test.go:259; verbose=true keeps the full schemas, pinned by the pre-existing TestDiscoverSchemasValidJSON internal/relay/toolset_test.go:162
+- 🟢 AC2: Re-register of a live agent already defaults to minimal and the first registration is unchanged; verified by a pre-existing passing test, mutation-proven to be pinned. — evidence: No runtime change in this diff for register_agent - the behaviour pre-exists on origin/main (git show origin/main:internal/relay/handlers_agents.go -> wasLive at :142, minimalCtx at :200, identical to the tip). The diff documents it (skill/relay.md:44, CHANGELOG.md:14). Exception claimed: the criterion is covered by a PRE-EXISTING test the diff leaves passing. Executed: go test -tags fts5 ./internal/relay/ -run TestRegister_ReRegisterOfLiveAgentDefaultsMinimal -count=1 => PASS on the tip; mutation in /tmp/rev6ead/mut_register (wasLive forced false) => FAILS 're-register of a live agent must default to minimal', so the pre-existing test really pins it. — test: TestRegister_ReRegisterOfLiveAgentDefaultsMinimal internal/relay/compact_echo_test.go:137 - pre-existing (present on origin/main at compact_echo_test.go:136), unchanged by this diff; it pins first boot = full, re-register of a live agent = minimal, explicit session_context=full = full, comeback-after-deactivate = full
+- 🟢 AC3: apply_budget defaults on for an agent with a budget, an explicit value wins, pruned messages stay unread, and the non-destructive inbox is pinned by a behavioural test. — evidence: internal/relay/handlers_messaging.go:443-452 (budgetExplicit detection, default-on when agentObj.MaxContextBytes>0, explicit value always wins), :489-497 (applyBudget + heldBack), :585-599 (held_back / held_back_hint / markdown header), internal/relay/budget.go:18-24 (inboxBytes, the same per-message measure applyBudget uses). Executed: go test -tags fts5 ./internal/relay/ -run TestInboxBudget -count=1 => PASS (5 tests); mutation in /tmp/rev6ead/mut_budget (default-on block removed) => TestInboxBudget_DefaultOnPrunesOverBudget FAILS 'got 6 of 6' and TestInboxBudget_PrunedStayUnread FAILS its precondition. The pre-existing non-destructive test TestInboxNonDestructivePeek internal/relay/handlers_test.go:702 still passes. — test: TestInboxBudget_DefaultOnPrunesOverBudget internal/relay/inbox_budget_default_test.go:48 + TestInboxBudget_PrunedStayUnread internal/relay/inbox_budget_default_test.go:87 (drains poll by poll with mark_read and asserts all 6 messages eventually surface - the non-destructive guarantee) + TestInboxBudget_ExplicitFalseWins :77 + TestInboxBudget_FitsReturnsAll :119 + TestInboxBudget_P0NeverPruned :136 + TestInboxBudget_ZeroBudgetDisablesDefault :156
+- 🔴 AC4: [partial] The two named artifacts document verbose and session_context, but the skill package's tools-reference.md:11 was left describing the payload format this diff replaced, so the skill as installed misdescribes the contract it documents; the CHANGELOG's held-back sentence is also contradicted by execution. — evidence: CHANGELOG.md:9-14 does document verbose and session_context, and skill/relay.md:44 (session_context full/minimal), :102 (inbox budget + apply_budget=false) and :146 (terse discover_tools + verbose=true) do too. But the same shipped skill package still asserts the superseded discover_tools contract at skill/tools-reference.md:11 ('returns compact signatures by default - params: {name: ...}'), verified by executing both payloads (origin/main default = array of {name,description,params}; tip default = {"tools":{"send_message":"(content,subject,to) Send a message"}}), and install.sh:721 installs that file next to relay.md in every agent's skill dir. CHANGELOG.md:10 also overstates the pruned-message behaviour ('come back on a later poll'; by execution the same 3 ids come back on poll1/2/3 and the held-back 3 only surface after mark_read, as skill/relay.md:102 correctly says). — test: NONE - documentation criterion (inherently untestable: prose). The prose was checked by reading it against the executed payload, not by a test.
 
 ## 5. Timeline
 
+- round 1 → **reject** (review-6ead6bed-c274-46f1-8bad-f233fc8bec46)
 
 ---
 _Auto-assembled by the niwa scribe from the Q&A gate. Task `6ead6bed-c274-46f1-8bad-f233fc8bec46`._
