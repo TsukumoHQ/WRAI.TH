@@ -158,20 +158,15 @@ func TestInboxBudget_P0NeverPruned(t *testing.T) {
 	}
 }
 
-func TestInboxBudget_ZeroBudgetDisablesDefault(t *testing.T) {
-	// max_context_bytes=0 means no budget: the default stays off.
-	h := budgetFixture(t, 0, 6, 600)
-	if got := inboxIDs(t, h, nil); len(got) != 6 {
-		t.Fatalf("agent without a budget must get the whole inbox, got %d of 6", len(got))
-	}
-}
-
 // A failed agent read (host stall: the identity read times out twice) must not
 // silently turn the budget off and hand back the whole inbox: the poll keeps
 // the column-default budget (defaultInboxBudgetBytes).
 func TestInboxBudget_FailedAgentReadKeepsDefaultBudget(t *testing.T) {
-	// 30 x 1000B = ~30 KB of unread, over the 16 KB default budget.
-	h := budgetFixture(t, defaultInboxBudgetBytes, 30, 1000)
+	// 30 x ~1048B = ~31 KB of unread. The agent's own budget (5000B, about 4
+	// messages) differs from the fallback (16384B, about 15) so the count tells
+	// which one applied: a successful uncached read would give ~4, a budget
+	// dropped on failure 30.
+	h := budgetFixture(t, 5000, 30, 1000)
 	orig := identityLookup
 	defer func() { identityLookup = orig }()
 	identityLookup = func(d *db.DB, project, name string) (*models.Agent, error) {
@@ -180,10 +175,28 @@ func TestInboxBudget_FailedAgentReadKeepsDefaultBudget(t *testing.T) {
 	h.idCache.invalidate("p1", "bot-b")
 
 	got := inboxIDs(t, h, nil)
-	if len(got) == 0 || len(got) >= 30 {
-		t.Fatalf("failed agent read must keep the default budget: got %d of 30", len(got))
+	perMsg := 1000 + 48 // content + id/from/to/subject/metadata overhead
+	if lo, hi := 5000/perMsg+1, defaultInboxBudgetBytes/perMsg; len(got) < lo || len(got) > hi {
+		t.Fatalf("failed agent read must prune to the default budget (%d..%d of 30), got %d", lo, hi, len(got))
 	}
 	if all := inboxIDs(t, h, map[string]any{"apply_budget": false}); len(all) != 30 {
 		t.Fatalf("explicit apply_budget=false must still return the whole inbox, got %d of 30", len(all))
+	}
+}
+
+// max_context_bytes <= 0 is not a "no budget" switch: it is stored as the
+// default, so the inbox stays budgeted (README / skill/relay.md say so). The
+// per-call apply_budget=false is the only way to skip the budget.
+func TestInboxBudget_ZeroMaxContextBytesStoresDefault(t *testing.T) {
+	h := budgetFixture(t, 0, 30, 1000)
+	a, err := h.db.GetAgent("p1", "bot-b")
+	if err != nil || a == nil {
+		t.Fatalf("get agent: %v", err)
+	}
+	if a.MaxContextBytes != defaultInboxBudgetBytes {
+		t.Fatalf("max_context_bytes=0 stored as %d, want %d", a.MaxContextBytes, defaultInboxBudgetBytes)
+	}
+	if got := inboxIDs(t, h, nil); len(got) >= 30 {
+		t.Fatalf("a 0-registered agent's 31 KB inbox must still be pruned, got %d of 30", len(got))
 	}
 }

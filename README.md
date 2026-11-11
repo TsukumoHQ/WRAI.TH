@@ -397,7 +397,7 @@ register_agent({
 })
 ```
 
-`get_inbox` applies this budget by default (every agent has one: `max_context_bytes` defaults to 16384; register with `0` to turn it off). An inbox that fits is returned whole. When it does not, the relay scores every message and greedily selects the highest-value subset that fits:
+`get_inbox` applies this budget by default (every agent has one: `max_context_bytes` defaults to 16384, and a value of 0 or less is stored as 16384). An inbox that fits is returned whole. When it does not, the relay scores every message and greedily selects the highest-value subset that fits:
 
 **Step 1 -- P0 bypass.** All `P0` (interrupt) messages are included unconditionally. If P0 alone exceeds the budget, only P0 is returned.
 
