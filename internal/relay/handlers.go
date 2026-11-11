@@ -663,7 +663,7 @@ func buildOnboardingPrompt(name, description, cwd string, interactive, linearMod
 	b.WriteString("## Phase 2 — Learn how the relay works\n\n")
 	b.WriteString("Your live context is the source of truth — there is no separate docs vault. Read it:\n\n")
 	b.WriteString("```\nget_session_context()   // your profile, project memories, pending tasks, unread messages\n```\n\n")
-	b.WriteString("Tools use progressive disclosure to stay cheap: the default tool list is lean. To see a tool's schema, call `discover_tools(category)` then `call_tool(tool, args)`; or append `?tools=full` to the relay MCP URL and run `/mcp` to list every tool directly. The bundled skill (`skill/relay.md`) and the README document the full surface.\n\n")
+	b.WriteString("Tools use progressive disclosure to stay cheap: the default tool list is lean. To see a category's tools and their required params, call `discover_tools(category)` (`verbose=true` for full schemas) then `call_tool(tool, args)`; or append `?tools=full` to the relay MCP URL and run `/mcp` to list every tool directly. The bundled skill (`skill/relay.md`) and the README document the full surface.\n\n")
 
 	b.WriteString("---\n\n")
 

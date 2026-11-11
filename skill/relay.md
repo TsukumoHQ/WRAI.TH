@@ -41,6 +41,8 @@ send_message(as: "backend", project: "my-app", to: "frontend", subject: "...", c
 
 Re-registering the same name+project is a respawn: it updates `role`/`description`, but identity fields you **omit** (`profile_slug`, `reports_to`, `is_executive`, `session_id`) are **preserved**, not cleared. So a bare re-register won't drop a `profile_slug` set by your orchestrator. To clear them, use `deactivate_agent` / `delete_agent` / `remove_team_member`.
 
+`register_agent` returns a `session_context`. A first registration, or a comeback after `deactivate_agent`, gets the **full** context (tasks, memories, inbox index). A re-register of an agent that is still live (active or sleeping, e.g. after `/clear`) gets the **minimal** one by default: pending tasks and unread messages only. Pass `session_context: "full"` to get everything, or `"minimal"` to force the lean payload on a first boot.
+
 ## Commands
 
 ### Messaging
@@ -97,7 +99,7 @@ Memory layers: `constraints` (hard rules) > `behavior` (defaults) > `context` (e
 ### Context
 - **`context`**: `get_session_context` — compact index: tasks (truncated), message/memory indexes, conversations (id+title+unread). Use `get_inbox`, `get_memory`, `get_conversation_messages` for full content
 - **`query <text>`**: Ranked context search (memories + task results)
-- **`inbox --budget`**: `get_inbox(apply_budget: true)` — context budget pruning scores messages by `0.7×priority + 0.2×tagRelevance + 0.1×freshness`, selects best subset within byte limit. P0 always bypasses
+- **`inbox --budget`**: context budget pruning is **on by default** for an agent with `max_context_bytes` (16384 unless set; `0` turns it off). An inbox over the budget is pruned: messages are scored by `0.7×priority + 0.2×tagRelevance + 0.1×freshness` and the best subset within the byte limit is returned. P0 always bypasses. Pruned messages are not consumed: the response says how many were held back (`held_back` in JSON, the header line in markdown); they stay unread and come through once you `mark_read` what you got. `get_inbox(apply_budget: false)` returns the whole inbox; `apply_budget: true` forces a pruning pass
 
 ### Lifecycle
 - **`sleep / deactivate / delete / whoami`**: Agent state management
@@ -141,7 +143,7 @@ Link session to agent: pass `session_id` from `whoami` in `register_agent`.
 
 ## Token Efficiency
 
-- **Tools exposure modes (`?tools=` on the MCP URL).** `?tools=full` lists every tool (~11k tokens) so a list-driven client (Claude Code) can call them directly by name — this is what `agent-relay init` writes. `?tools=discovery` (the relay's bare default) lists only `discover_tools` + `call_tool` (~460 tokens). **If a tool seems missing** (e.g. `tool 'create_project' not found`), you are in discovery mode: call `discover_tools(category)` then `call_tool(tool: "create_project", args: {...})` — every tool stays callable that way — **or** add `?tools=full` to the relay URL in `.mcp.json` and run `/mcp` to reload. Categories: session, messaging, conversations, tasks, obligations, pipeline, boards, memory, profiles, agents, teams, projects. (Token-conscious worker loops can opt into `?tools=discovery` + `call_tool`.)
+- **Tools exposure modes (`?tools=` on the MCP URL).** `?tools=full` lists every tool (~11k tokens) so a list-driven client (Claude Code) can call them directly by name — this is what `agent-relay init` writes. `?tools=discovery` (the relay's bare default) lists only `discover_tools` + `call_tool` (~460 tokens). **If a tool seems missing** (e.g. `tool 'create_project' not found`), you are in discovery mode: call `discover_tools(category)` then `call_tool(tool: "create_project", args: {...})`. `discover_tools` is terse by default: one line per tool, `"(required params) description"`, under 1.5k per category. Optional params are not listed: pass `verbose: true` when you need a tool's full JSON input schema (optional params, types, enums, every parameter description) — every tool stays callable that way — **or** add `?tools=full` to the relay URL in `.mcp.json` and run `/mcp` to reload. Categories: session, messaging, conversations, tasks, obligations, pipeline, boards, memory, profiles, agents, teams, projects. (Token-conscious worker loops can opt into `?tools=discovery` + `call_tool`.)
 - **`get_inbox`, `list_tasks`, `list_agents`, `list_memories` return compact markdown tables by default** (~half the tokens of JSON). Pass `format: "json"` when you need the structured shape.
 - Default connection (no `?tools=`) keeps full schemas for compatibility.
 
