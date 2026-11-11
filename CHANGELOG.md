@@ -34,9 +34,11 @@ Subtasks and Linear get easier to manage:
 - Claiming a Linear mirror no longer writes In Progress to Linear, and a park posts one comment there.
 - Backlog tasks can be listed on their own and get their own board column.
 
-Token usage counts each assistant message once. Usage numbers recorded from now on are lower than before for the same work.
+Token usage is counted right:
+- A Claude Code session counts each assistant message once. Its usage numbers from now on are lower than before for the same work.
+- A Codex session now reports its token usage. Before, it recorded zero.
 
-The range `v1.25.0..v1.26.0` holds 21 commits. The schema changes are additive and apply on startup: a new `task_deploys` table, a new `tasks.park_noticed_at` column, and a new `idx_tasks_refscan` index (`CREATE ... IF NOT EXISTS`). On first start the relay also rewrites short `parent_task_id` values to full ids, once, and logs how many it repaired.
+This release holds 20 changes since v1.25.0, release-notes commits excluded. The schema changes are additive and apply on startup: a new `task_deploys` table, a new `task_holds.park_noticed_at` column, and a new `idx_tasks_refscan` index (`CREATE ... IF NOT EXISTS`). On first start the relay also rewrites short `parent_task_id` values to full ids, once, and logs how many it repaired.
 
 ### Added
 - Deploy stage:
@@ -50,6 +52,7 @@ The range `v1.25.0..v1.26.0` holds 21 commits. The schema changes are additive a
 - `list_tasks` accepts `status: "backlog"`. Backlog tasks get their own board column and never appear with `ready=true` (1591118).
 - `update_task` can set or clear `parent_task_id`. `""` detaches the task. Short ids are resolved, and a cycle, the task itself or a parent in another project is refused (093796d).
 - `/healthz` probes the reader pool with a 2-second limit and returns 503 when reads are starved (ecb50bd).
+- The Stop hook reads Codex rollout transcripts. It sums the `token_count` events and records the model of the last turn. Before, every Codex session ingested 0 tokens. A transcript in neither format posts no tokens and logs one `unrecognised transcript format` line (9f444ad).
 
 ### Changed
 - `discover_tools` returns one line per tool by default: its required params and a short description, under 1.5k per category. `verbose: true` still returns the full JSON schemas, optional params included (96caef7).
@@ -68,7 +71,22 @@ The range `v1.25.0..v1.26.0` holds 21 commits. The schema changes are additive a
 - A PR-merged event (webhook, `reconcile_pr`, PR poll) on a deploying task no longer forces it to done (9fd5640).
 - MCP and REST calls no longer hang for 20 seconds or more when the reader pool is starved. Every database read has a 10-second deadline (ecb50bd).
 - An authenticated call survives a host stall of a few seconds. The identity check retries once and caches its result for 3 seconds (b1d3b6f).
-- The Stop hook counts each assistant message's tokens once. Before, it counted them once per content block, which inflated usage (9f444ad).
+- The Stop hook counts each assistant message's tokens once in a Claude Code transcript. Before, it counted them once per content block, which inflated usage (9f444ad).
+
+### Documentation
+- The relay skill documents `deploying` and `deploy_task` (884ce5d), and the minimal `session_context` a live agent gets on re-register (96caef7).
+- v1.25.0 release notes (3b24e47)
+
+### Upgrade notes
+- **Additive schema change, applied on first start (idempotent).**
+  - New table `task_deploys`, new column `task_holds.park_noticed_at`, new index `idx_tasks_refscan`. Nothing is dropped or rewritten.
+  - A one-shot repair rewrites short `parent_task_id` prefixes to full task ids. It logs once: `migrate: short parent_task_id backfill — N repaired, M left as-is`. A prefix that matches no task, or more than one, is left as it is.
+- **New task status `deploying`.** A client that switches on task status should handle it. New tool: `deploy_task`.
+- **Smaller responses by default.** `discover_tools`, `dispatch_task`, `update_task` and `cancel_task` take `verbose: true` for the old full shape. `get_inbox` takes `apply_budget: false` for the whole inbox. A re-register takes `session_context: "full"` for the full boot payload.
+- **`/healthz` can now return 503** when the reader pool is starved. A monitor that only checked for 200 will now see it.
+- **Token counting lives in the Stop hook.** A machine gets the new hook on `agent-relay update` or `agent-relay hooks install`. Usage recorded before the update keeps its old, inflated Claude numbers.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.25.0...v1.26.0
 
 ## [1.25.0] — 2026-10-01
 
