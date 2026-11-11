@@ -5,10 +5,88 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 ## [Unreleased]
 
+## [1.26.0] — 2026-11-11
+
+A merged task can wait for its deploy.
+- A task can now go `in-review → deploying → done`. The doer keeps the lease while the deploy runs, and the stale-task sweeper leaves it alone.
+- A PR-merged event no longer marks a deploying task done. Only the deploy's verification does.
+- Both boards show a Deploying column, and Linear shows "Deploying" when the team has that state.
+
 A reboot reads less relay output.
-- `discover_tools` answers with one line per tool by default: its required params and a short description, under 1.5k per category. `verbose: true` still returns the full JSON schemas, optional params included.
-- `get_inbox` prunes to the agent's `max_context_bytes` by default. The response says how many messages were held back. They stay unread, and they come through once the agent marks the returned messages read with `mark_read`. Until then every poll returns the same subset. `apply_budget: false` returns the whole inbox.
-- A re-register of a live agent gets the minimal `session_context` (shipped earlier, now documented in the relay skill). `session_context: "full"` gets everything.
+- `discover_tools` answers with one line per tool by default.
+- `get_inbox` stays within the agent's `max_context_bytes` by default and says how many messages it held back.
+- A re-register of a live agent gets the minimal `session_context`.
+- `dispatch_task`, `update_task` and `cancel_task` echo a compact record instead of the whole task.
+
+Asks get answered, and reach the right person:
+- A doer can always message its dispatcher and its own lead chain.
+- An answer on the same task counts, even when it starts a new thread.
+- An unanswered ask escalates up the recipient's chain, never back to the agent who asked.
+
+The relay holds up under load:
+- A slow database read fails after 10 seconds instead of hanging every call, and `/healthz` returns 503 when reads are starved.
+- A host stall of a few seconds no longer fails an authenticated call.
+- The background integrity scan reads about ten times fewer pages.
+
+Subtasks and Linear get easier to manage:
+- `dispatch_task` and `update_task` accept short parent ids and refuse unknown, cyclic or cross-project parents.
+- A native task can carry a `linear_key`, and `list_tasks` filters on it.
+- Claiming a Linear mirror no longer writes In Progress to Linear, and a park posts one comment there.
+- Backlog tasks can be listed on their own and get their own board column.
+
+Token usage is counted right:
+- A Claude Code session counts each assistant message once. Its usage numbers from now on are lower than before for the same work.
+- A Codex session now reports its token usage. Before, it recorded zero.
+
+This release holds 20 changes since v1.25.0, release-notes commits excluded. The schema changes are additive and apply on startup: a new `task_deploys` table, a new `task_holds.park_noticed_at` column, and a new `idx_tasks_refscan` index (`CREATE ... IF NOT EXISTS`). On first start the relay also rewrites short `parent_task_id` values to full ids, once, and logs how many it repaired.
+
+### Added
+- Deploy stage:
+  - New status `deploying`. A task reaches it from `in-review` (or from `blocked`) and leaves it for `done`, `blocked`, `cancelled` or back to `in-review`. The doer keeps the lease, and the sweeper skips the task.
+  - `task_deploys` records the merge sha of each deploy. A task blocked during its deploy can retry from `blocked` only for that same sha (c2c86b5).
+  - `deploy_task(task_id, merge_sha)` moves an `in-review` task to `deploying` over MCP (901aa40).
+  - The Linear connector maps `deploying` to the team's "Deploying" state when it has one. Otherwise the issue stays In Review (843db42).
+  - The v1 and v2 boards show a Deploying column. The relay skill documents `deploying` and `deploy_task` (884ce5d).
+- `dispatch_task` and `batch_dispatch_tasks` accept `linear_key` (format `ABC-123`). A key already held by an active task in the project is refused (d6b53fa).
+- `list_tasks` filters by `linear_key`. Before, the filter was ignored and the whole board came back (77177b0).
+- `list_tasks` accepts `status: "backlog"`. Backlog tasks get their own board column and never appear with `ready=true` (1591118).
+- `update_task` can set or clear `parent_task_id`. `""` detaches the task. Short ids are resolved, and a cycle, the task itself or a parent in another project is refused (093796d).
+- `/healthz` probes the reader pool with a 2-second limit and returns 503 when reads are starved (ecb50bd).
+- The Stop hook reads Codex rollout transcripts. It sums the `token_count` events and records the model of the last turn. Before, every Codex session ingested 0 tokens. A transcript in neither format posts no tokens and logs one `unrecognised transcript format` line (9f444ad).
+
+### Changed
+- `discover_tools` returns one line per tool by default: its required params and a short description, under 1.5k per category. `verbose: true` still returns the full JSON schemas, optional params included (96caef7).
+- `get_inbox` prunes to the agent's `max_context_bytes` by default. The response says how many messages were held back. They stay unread, and they come through once the agent marks the returned messages read with `mark_read`. Until then every poll returns the same subset. `apply_budget: false` returns the whole inbox (96caef7).
+- A re-register of a live agent gets the minimal `session_context`. `session_context: "full"` gets everything. Boot memories are bounded (dba9a15, documented in 96caef7).
+- `dispatch_task`, `update_task` and `cancel_task` echo a compact record by default. `verbose: true` returns the full task. `get_task` always returns the full record (dba9a15).
+- `dispatch_task` resolves a short `parent_task_id` and refuses an unknown parent with `NOT_FOUND`. A subtask with no board inherits its parent's board. `blocked_by` accepts an array, a JSON string or a comma-separated list (4b79127).
+- The lane lead a Linear mirror is routed to can park that pending mirror. Before, only executives could (04ab02d).
+- Claiming a Linear mirror writes nothing to Linear. Each park posts one "parked on the relay" comment on the Linear issue (fea4017).
+- A doer can always message its dispatcher and its `reports_to` chain. A refused send names the rule (`send.no_route`) (f724a84).
+- An answer obligation is met by any message on the same task, even outside the reply thread (62dca6e).
+- An unanswered ask escalates up the recipient's `reports_to` chain, skipping the asker and inactive agents (94b469f).
+- The background integrity scan uses `idx_tasks_refscan` and reads about ten times fewer pages (b1d3b6f).
+
+### Fixed
+- A PR-merged event (webhook, `reconcile_pr`, PR poll) on a deploying task no longer forces it to done (9fd5640).
+- MCP and REST calls no longer hang for 20 seconds or more when the reader pool is starved. Every database read has a 10-second deadline (ecb50bd).
+- An authenticated call survives a host stall of a few seconds. The identity check retries once and caches its result for 3 seconds (b1d3b6f).
+- The Stop hook counts each assistant message's tokens once in a Claude Code transcript. Before, it counted them once per content block, which inflated usage (9f444ad).
+
+### Documentation
+- The relay skill documents `deploying` and `deploy_task` (884ce5d), and the minimal `session_context` a live agent gets on re-register (96caef7).
+- v1.25.0 release notes (3b24e47)
+
+### Upgrade notes
+- **Additive schema change, applied on first start (idempotent).**
+  - New table `task_deploys`, new column `task_holds.park_noticed_at`, new index `idx_tasks_refscan`. Nothing is dropped or rewritten.
+  - A one-shot repair rewrites short `parent_task_id` prefixes to full task ids. It logs once: `migrate: short parent_task_id backfill — N repaired, M left as-is`. A prefix that matches no task, or more than one, is left as it is.
+- **New task status `deploying`.** A client that switches on task status should handle it. New tool: `deploy_task`.
+- **Smaller responses by default.** `discover_tools`, `dispatch_task`, `update_task` and `cancel_task` take `verbose: true` for the old full shape. `get_inbox` takes `apply_budget: false` for the whole inbox. A re-register takes `session_context: "full"` for the full boot payload.
+- **`/healthz` can now return 503** when the reader pool is starved. A monitor that only checked for 200 will now see it.
+- **Token counting lives in the Stop hook.** A machine gets the new hook on `agent-relay update` or `agent-relay hooks install`. Usage recorded before the update keeps its old, inflated Claude numbers.
+
+Full diff: https://github.com/TsukumoHQ/WRAI.TH/compare/v1.25.0...v1.26.0
 
 ## [1.25.0] — 2026-10-01
 

@@ -20,3 +20,15 @@ flowchart TD
     I --> K[Deny Access]
 ```
 
+## [audit T5] compact boot payloads: discover_tools terse by default, re-register minimal, inbox budgeted
+
+discover_tools returns compact signatures by default (name, description, required params) instead of full schemas to reduce boot payloads; get_inbox applies context budget constraints by default to prevent inbox overflow.
+
+```mermaid
+flowchart LR
+    A["discover_tools()"] -->|default| B["Terse 1.5k"]
+    A -->|verbose| C["Full schema"]
+    D["get_inbox()"] -->|default| E["Pruned"]
+    D -->|explicit| F["Full"]
+```
+
