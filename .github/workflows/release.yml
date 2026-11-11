@@ -17,7 +17,7 @@ jobs:
         include:
           - os: darwin
             arch: arm64
-            runner: macos-14
+            runner: macos-15
             cc: ""
             ext: ""
           - os: darwin
