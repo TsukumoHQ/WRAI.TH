@@ -5,6 +5,7 @@
 # Kept on disk for correctness (toolchain / harness / agents read these from
 # disk — routing them to the store would break the repo):
 README.md
+CHANGELOG.md
 CLAUDE.md
 AGENTS.md
 LICENSE*
