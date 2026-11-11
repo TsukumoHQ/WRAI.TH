@@ -7,7 +7,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/). Versions follow 
 
 A reboot reads less relay output.
 - `discover_tools` answers with one line per tool by default: its required params and a short description, under 1.5k per category. `verbose: true` still returns the full JSON schemas, optional params included.
-- `get_inbox` prunes to the agent's `max_context_bytes` by default. The response says how many messages were held back; they stay unread and come back on a later poll. `apply_budget: false` returns the whole inbox.
+- `get_inbox` prunes to the agent's `max_context_bytes` by default. The response says how many messages were held back. They stay unread, and they come through once the agent marks the returned messages read with `mark_read`. Until then every poll returns the same subset. `apply_budget: false` returns the whole inbox.
 - A re-register of a live agent gets the minimal `session_context` (shipped earlier, now documented in the relay skill). `session_context: "full"` gets everything.
 
 ## [1.25.0] — 2026-10-01

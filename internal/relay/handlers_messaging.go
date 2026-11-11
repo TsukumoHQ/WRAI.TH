@@ -446,11 +446,24 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 	// passes apply_budget=false. An explicit value always wins. When the budget
 	// is only defaulted, an inbox that already fits is returned as-is (no
 	// pruning pass, no [budget] journal line on every poll).
+	//
+	// The agent row comes from the identity read (3s cache, one retry on a
+	// deadline) so this hot path adds no reader-pool query on a cache hit. A
+	// failed read must not silently drop the budget when the host is loaded:
+	// the poll keeps the column-default budget and logs the failure.
 	_, budgetExplicit := req.GetArguments()["apply_budget"]
 	budgetMode := req.GetBool("apply_budget", false)
-	agentObj, _ := h.db.GetAgent(project, agent)
+	agentObj, agentErr := h.identityAgent(project, agent)
+	budgetBytes, budgetTags := 0, "[]"
+	switch {
+	case agentObj != nil:
+		budgetBytes, budgetTags = agentObj.MaxContextBytes, agentObj.InterestTags
+	case agentErr != nil:
+		log.Printf("[budget] get_inbox %s/%s: agent read failed, using default budget %d: %v", project, agent, defaultInboxBudgetBytes, agentErr)
+		budgetBytes = defaultInboxBudgetBytes
+	}
 	if !budgetExplicit {
-		budgetMode = agentObj != nil && agentObj.MaxContextBytes > 0
+		budgetMode = budgetBytes > 0
 	}
 
 	_ = h.db.TouchAgent(project, agent)
@@ -491,11 +504,11 @@ func (h *Handlers) HandleGetInbox(ctx context.Context, req mcp.CallToolRequest) 
 	// told so it never mistakes a pruned inbox for the whole one.
 	heldBack := 0
 	if budgetMode && len(messages) > 0 {
-		if agentObj != nil && (budgetExplicit || inboxBytes(messages) > agentObj.MaxContextBytes) {
+		if (agentObj != nil || agentErr != nil) && (budgetExplicit || inboxBytes(messages) > budgetBytes) {
 			var tags []string
-			_ = json.Unmarshal([]byte(agentObj.InterestTags), &tags)
+			_ = json.Unmarshal([]byte(budgetTags), &tags)
 			fetched := len(messages)
-			messages = applyBudget(messages, tags, agentObj.MaxContextBytes)
+			messages = applyBudget(messages, tags, budgetBytes)
 			heldBack = fetched - len(messages)
 		}
 		// Surface only the deliveries that survived the budget filter

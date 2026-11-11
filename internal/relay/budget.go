@@ -13,6 +13,11 @@ import (
 // created_at is parsed as RFC3339Nano first and falls back to this.
 const legacyCreatedAtLayout = "2006-01-02T15:04:05.000000Z"
 
+// defaultInboxBudgetBytes mirrors the agents.max_context_bytes column default.
+// get_inbox falls back to it when the agent row cannot be read, so a loaded
+// host does not silently turn the inbox budget off.
+const defaultInboxBudgetBytes = 16384
+
 // inboxBytes is the budget weight of a fetched inbox (same per-message measure
 // applyBudget uses).
 func inboxBytes(messages []models.Message) int {

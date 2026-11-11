@@ -1,8 +1,13 @@
 package relay
 
 import (
+	"context"
+	"fmt"
 	"strings"
 	"testing"
+
+	"agent-relay/internal/db"
+	"agent-relay/internal/models"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -158,5 +163,27 @@ func TestInboxBudget_ZeroBudgetDisablesDefault(t *testing.T) {
 	h := budgetFixture(t, 0, 6, 600)
 	if got := inboxIDs(t, h, nil); len(got) != 6 {
 		t.Fatalf("agent without a budget must get the whole inbox, got %d of 6", len(got))
+	}
+}
+
+// A failed agent read (host stall: the identity read times out twice) must not
+// silently turn the budget off and hand back the whole inbox: the poll keeps
+// the column-default budget (defaultInboxBudgetBytes).
+func TestInboxBudget_FailedAgentReadKeepsDefaultBudget(t *testing.T) {
+	// 30 x 1000B = ~30 KB of unread, over the 16 KB default budget.
+	h := budgetFixture(t, defaultInboxBudgetBytes, 30, 1000)
+	orig := identityLookup
+	defer func() { identityLookup = orig }()
+	identityLookup = func(d *db.DB, project, name string) (*models.Agent, error) {
+		return nil, fmt.Errorf("get agent: %w", context.DeadlineExceeded)
+	}
+	h.idCache.invalidate("p1", "bot-b")
+
+	got := inboxIDs(t, h, nil)
+	if len(got) == 0 || len(got) >= 30 {
+		t.Fatalf("failed agent read must keep the default budget: got %d of 30", len(got))
+	}
+	if all := inboxIDs(t, h, map[string]any{"apply_budget": false}); len(all) != 30 {
+		t.Fatalf("explicit apply_budget=false must still return the whole inbox, got %d of 30", len(all))
 	}
 }
